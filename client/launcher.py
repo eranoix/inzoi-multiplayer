@@ -29,6 +29,7 @@ import companion  # noqa: E402
 import inzoi_mp_server as mpserver  # noqa: E402
 import menu  # noqa: E402
 import netinfo  # noqa: E402
+import firewall  # noqa: E402
 import ue4ss  # noqa: E402
 import updater  # noqa: E402
 
@@ -241,6 +242,8 @@ async def follow_game(keep: bool | None = None) -> str:
         if up:
             if keep and seen and gone >= 30:
                 log.info("inZOI is back")
+                if HOST_RESUME:
+                    await HOST_RESUME()                      # coop-casal: listening again for the friend
             if up_since is None:
                 up_since = time.monotonic()
             seen, gone = True, 0
@@ -250,14 +253,17 @@ async def follow_game(keep: bool | None = None) -> str:
                 up_since = None
             gone += 3
             if gone == 30 and keep:
-                log.info("inZOI closed: your server keeps running for your friends. Start inZOI again to play, "
-                         "or close this window to stop hosting")
+                log.info("inZOI closed: the server stops listening (the port is closed) until inZOI is back. Start "
+                         "inZOI again to play, or close this window to stop")
+                if HOST_PAUSE:
+                    await HOST_PAUSE()                       # coop-casal: nothing listens while inZOI is closed
             if gone >= 30 and not keep:                      # (not just a restart of the game)
                 return "inZOI closed"
         elif time.monotonic() - start > NEVER_STARTED and not keep:
             return "inZOI didn't start"
 
 
+HOST_PAUSE = HOST_RESUME = None         # coop-casal (host mode): stop/start the server as inZOI closes/comes back
 EARLY_EXIT = 90                         # inZOI's window gone this soon after it came up: it likely crashed
 
 
@@ -292,6 +298,8 @@ async def run(mode: str, cfg: dict, comp):
         args = argparse.Namespace(host="0.0.0.0", port=cfg["host_port"], password=cfg["host_password"],
                                   motd=cfg["host_motd"], max_players=None, data=str(SERVER_DATA), hosted=False,
                                   name=cfg.get("host_name") or None, directory=bool(cfg.get("host_directory")))
+        await asyncio.to_thread(firewall.ensure, args.port, cfg)    # coop-casal: friends can reach this server
+        companion.save_config(cfg)
         try:
             hosted = await mpserver.start(args)
         except OSError as e:
@@ -310,8 +318,23 @@ async def run(mode: str, cfg: dict, comp):
             comp.notice = f"Couldn't start your server: {e}"
     asyncio.create_task(fetch_update())                  # coop-casal: updates come quietly, applied at next start
     main = asyncio.create_task(comp.run())
-    global KEEP_HOSTING
+    global KEEP_HOSTING, HOST_PAUSE, HOST_RESUME
     KEEP_HOSTING = mode == "host"
+    if KEEP_HOSTING:
+        async def pause():
+            if comp.hosted:
+                await comp.stop_hosting()
+                cfg["mode"] = "host"                     # (stop_hosting says "play": it comes back as a host)
+                companion.save_config(cfg)
+
+        async def resume():
+            if not comp.hosted:
+                try:
+                    await comp.start_hosting(play=True)
+                    log.info("hosting again")
+                except ValueError as e:
+                    log.warning("couldn't host again: %s", e)
+        HOST_PAUSE, HOST_RESUME = pause, resume
     game = asyncio.create_task(follow_game())
     done, _ = await asyncio.wait({main, game}, return_when=asyncio.FIRST_COMPLETED)
     if main in done:

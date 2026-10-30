@@ -21,6 +21,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+import firewall
 import ingame
 import menu
 import mods
@@ -446,6 +447,9 @@ class Servers:
                                   max_players=int(settings["max_players"]) if settings.get("max_players") else None,
                                   data=str(self.server_data), hosted=True, directory=False,
                                   directories=[d for d in self.directories() if not same_server(d, f"127.0.0.1:{port}")])
+        fw = await asyncio.to_thread(firewall.ensure, port, self.cfg)   # coop-casal: the friend can reach us
+        if fw == "declined":
+            self.notice, self.notice_code = "Windows Firewall wasn't opened: your partner may not reach you", "firewall_declined"
         try:
             self.hosted = await mpserver.start(args)
         except OSError as e:

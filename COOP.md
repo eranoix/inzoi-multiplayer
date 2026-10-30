@@ -21,8 +21,8 @@ O plano B, se a pergunta do certificado não aparecer, é o `dist\confiar-certif
 ## PC do Arthur (host)
 
 1. Python 3.10 ou mais novo, com Tailscale ligado.
-2. Dar dois cliques em `hospedar.bat`. Na primeira vez, o Windows pergunta sobre o firewall: permitir em **rede privada**.
-3. O servidor **continua no ar mesmo se o jogo fechar ou travar**: é só abrir o inZOI de novo. Para desligar, feche a janela preta.
+2. Dar dois cliques em `hospedar.bat`. Na primeira vez, o Windows pergunta "Permitir que este app faça alterações?" para liberar o firewall (só a porta 24242, só redes privadas): clique em **Sim**.
+3. Ao fechar o jogo, o servidor para de escutar (a porta fecha) e volta sozinho quando você abre o inZOI de novo. Para desligar de vez, feche a janela preta.
 
 Se usar NordVPN, desligue-o ou desative a "Invisibilidade na LAN".
 
@@ -44,7 +44,7 @@ Se usar NordVPN, desligue-o ou desative a "Invisibilidade na LAN".
 - **Ajuda:** **Verificar conexão** (diz o que está errado e como resolver) e **Enviar diagnóstico**, que gera um zip
   na Área de Trabalho para mandar ao Arthur.
 - Se o Tailscale não responder, o programa acha o PC do Arthur sozinho pela rede de casa.
-  No PC do Arthur, o firewall precisa liberar a porta **UDP 24242** (além da TCP 24242).
+  O firewall é liberado sozinho na primeira vez que alguém hospeda (o Windows pergunta uma vez: clique em **Sim**).
 
 ## Proteções automáticas
 

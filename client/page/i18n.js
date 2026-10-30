@@ -396,6 +396,7 @@
     // notices by code
     'code.wrong_password': 'senha errada. Confira a senha com seu par.',
     'code.version_mismatch': 'versões diferentes do inZOI Multiplayer. Os dois precisam da mesma versão.',
+    'code.firewall_declined': 'o Firewall do Windows não foi liberado, então seu par pode não conseguir entrar. Hospede de novo e clique em Sim quando o Windows perguntar.',
     'code.version_differs': 'vocês estão com versões diferentes do inZOI Multiplayer. Atualizem os dois para evitar problemas.',
     'code.full': 'o servidor está cheio.',
     'code.banned': 'você foi banido deste servidor.',
@@ -408,6 +409,7 @@
     'sort.name': 'name',
     'code.wrong_password': 'wrong password. Check the password with your partner.',
     'code.version_mismatch': 'different inZOI Multiplayer versions. You both need the same version.',
+    'code.firewall_declined': 'Windows Firewall was not opened: your partner may not reach you. Host again and click Yes when Windows asks.',
     'code.version_differs': 'you have different inZOI Multiplayer versions. Update both to avoid problems.',
     'code.full': 'the server is full.',
     'code.banned': "you're banned from this server.",
