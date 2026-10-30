@@ -41,15 +41,23 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "0.7.2"
+VERSION = "0.8.1"
 PROTOCOL = 1
-MAX_LINE = 32 * 1024 * 1024        # house snapshots can be large
+MAX_LINE = 32 * 1024 * 1024        # house snapshots can be large (only after a successful hello)
+MAX_LINE_BEFORE_HELLO = 64 * 1024  # hello, info, directory messages: small; a stranger can't make us buffer 32 MB
+MAX_CONNS = 64                     # open connections in all (each player has 2: game + mod files)
+MAX_CONNS_PER_IP = 12              # from one address (a couple behind one router: 2 players x 2 + servers page probes)
+MAX_PIECE = 8 * 1024 * 1024        # blob_put: the most bytes one piece may carry (the companion sends 512 KB)
+CLAIM_TRIES = 5                    # admin_claim attempts per address per minute
 PING_EVERY = 15                    # seconds between keepalives
 TIMEOUT = 45                       # drop a client that sent nothing for this long
+FILES_TIMEOUT = 600                # a file connection gets no pings (and can't answer them): it may sit idle longer
 CHUNK = 512 * 1024                 # mod file transfer: bytes per blob_get answer
 SHA = re.compile(r"[0-9a-f]{64}")
 FILE_MESSAGES = {"blob_check", "blob_put", "blob_get", "ping", "pong"}
 BEFORE_HELLO = {"info", "ping", "pong", "dir_announce", "dir_list", "dir_remove"}   # allowed without joining
+PART_TTL = 86400                   # an unfinished upload (.part) older than this is deleted
+BLOB_GRACE = 3600                  # an unreferenced blob younger than this is kept (it may be part of an upload)
 HISTORY = 20                       # world versions kept (their files stay on disk: an admin can go back to one)
 ANNOUNCE_EVERY = 60                # seconds between a public server's announcements to its directories
 LISTING_TTL = 180                  # a directory drops a server it hasn't heard from for this long
@@ -78,6 +86,14 @@ def mod_fp(mod: dict) -> str:
     """A short fingerprint of a mod's content (not its mod_manifest.json): equal on two PCs when they have the very same
     mod. The companion computes the same (mods.fp) to tell which of a server's mods it has."""
     return hashlib.sha256("\n".join(sorted(f"{p}:{h}" for p, h in content(mod))).encode()).hexdigest()[:16]
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def world_summary(meta: dict | None) -> dict | None:
@@ -128,15 +144,37 @@ class Store:
 
     @staticmethod
     def _load(path: Path, default):
+        """A saved file; if it's damaged (power cut mid-write...), the copy before it (.bak), loudly. Never the default
+        in silence: that would drop the password and everyone's profile."""
+        bak = path.with_name(path.name + ".bak")
         try:
             return json.loads(path.read_text("utf-8"))
-        except (OSError, ValueError):
+        except FileNotFoundError:
+            if not bak.exists():
+                return default                       # never saved yet: normal
+            log.warning("%s is missing: using its backup %s", path, bak.name)
+        except (OSError, ValueError) as e:
+            log.warning("%s is damaged (%s): trying its backup %s", path, e, bak.name)
+            try:
+                path.replace(path.with_name(f"{path.name}.corrupt-{int(now())}"))     # kept for a human to look at
+            except OSError:
+                pass
+        try:
+            return json.loads(bak.read_text("utf-8"))
+        except (OSError, ValueError) as e:
+            log.warning("the backup %s can't be read either (%s): %s starts over from defaults", bak, e, path.name)
             return default
 
     @staticmethod
     def _save(path: Path, data) -> None:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
+        """Written to a .tmp, flushed to disk, then swapped in; the previous file stays as .bak."""
+        tmp = path.with_name(path.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False))
+            f.flush()
+            os.fsync(f.fileno())
+        if path.exists():
+            os.replace(path, path.with_name(path.name + ".bak"))
         os.replace(tmp, path)
 
     def player_for_key(self, key: str, name: str) -> dict:
@@ -200,16 +238,49 @@ class Store:
         return self.root / "blobs" / sha
 
     # The shared world: one game save everyone plays, as files (blobs) plus a version that goes up with each upload.
+    _world: tuple | None = None        # (meta, {sha}): the current world, read once (blob_get asks per 512 KB)
+
     def world_save(self) -> dict | None:
-        return self._load(self.root / "world_save.json", None)
+        if self._world is None:
+            meta = self._load(self.root / "world_save.json", None)
+            self._world = (meta, {f["h"] for f in (meta or {}).get("files", [])})
+        return self._world[0]
+
+    def world_blobs(self) -> set:
+        self.world_save()
+        return self._world[1]
 
     def set_world_save(self, meta: dict) -> None:
         """The new current world; the last HISTORY versions are kept so an admin can go back to one."""
         self._save(self.root / "world_save.json", meta)
+        self._world = None
         self._save(self.root / "world_history" / f"{meta['version']}.json", meta)
         for old in sorted(self.root.glob("world_history/*.json"), key=lambda f: int(f.stem) if f.stem.isdigit() else 0)[
                 :-HISTORY]:
             old.unlink(missing_ok=True)
+            old.with_name(old.name + ".bak").unlink(missing_ok=True)
+
+    def gc_blobs(self, keep: set = frozenset()) -> None:
+        """Deletes blobs nothing uses any more: not a file of anyone's mods (all stored lists, not just the current
+        mod set), of the current world or a kept world version, nor in `keep` (uploads under way); and .part files
+        of uploads abandoned over a day ago. Mod files and world files share the folder, hence the full list."""
+        used = set(keep) | self.world_blobs()
+        for d in self.all_mods().values():
+            used |= {f["h"] for m in d.get("mods", []) for f in m.get("files", [])}
+        for m in self.world_history():
+            used |= {f["h"] for f in m.get("files", [])}
+        freed, t = 0, now()
+        for f in (self.root / "blobs").iterdir():
+            try:
+                st = f.stat()
+                if (f.name.endswith(".part") and t - st.st_mtime > PART_TTL) or \
+                        (SHA.fullmatch(f.name) and f.name not in used and t - st.st_mtime > BLOB_GRACE):
+                    f.unlink()
+                    freed += st.st_size
+            except OSError:
+                pass
+        if freed:
+            log.info("deleted %d MB of files nothing uses any more", freed >> 20)
 
     def world_history(self) -> list[dict]:
         out = [self._load(f, None) for f in self.root.glob("world_history/*.json")]
@@ -260,6 +331,7 @@ class Client:
         self.lock = asyncio.Lock()
         self.files = False                 # a second connection of a player, only for mod file transfers
         self.joined = 0.0
+        self.version = ""                  # the player's companion app version (others are warned on a mismatch)
 
     def ip(self) -> str:
         return str((self.addr or ("",))[0])
@@ -270,7 +342,7 @@ class Client:
     def public(self) -> dict:
         p = self.server.store.players.get(self.id or "", {})
         return {"id": self.id, "name": self.name, "profile": p.get("profile"), "state": self.state,
-                "leader": self.server.leader is self}
+                "leader": self.server.leader is self, "version": self.version}
 
     async def send(self, msg: dict) -> None:
         if self.closed:
@@ -282,6 +354,11 @@ class Client:
                 await self.writer.drain()
         except (ConnectionError, OSError):
             await self.close()
+
+    async def fail(self, code: str, error: str, **extra) -> None:
+        """A fatal error (code: machine-readable, for the UI to translate; error: English), then hang up."""
+        await self.send({"t": "error", "fatal": True, "code": code, "error": error, **extra})
+        await self.close()
 
     async def close(self) -> None:
         if self.closed:
@@ -320,6 +397,8 @@ class Server:
         self.conns: set[Client] = set()        # every open connection, players' and file transfers'
         self.world_offers: dict[str, dict] = {}   # player id -> {sha: size} of the world files they're uploading
         self.restart_requested = False
+        self.claims: dict[str, collections.deque] = {}   # address -> times of its recent admin_claim attempts
+        store.gc_blobs()
 
     @property
     def password(self) -> str:
@@ -354,17 +433,23 @@ class Server:
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         c = Client(self, reader, writer)
+        same_ip = sum(1 for o in self.conns if o.ip() == c.ip())
+        if len(self.conns) >= MAX_CONNS or (same_ip >= MAX_CONNS_PER_IP and not c.local()):
+            log.warning("refused a connection from %s: too many open", c.addr)
+            await c.fail("busy", "too many connections, try again in a moment")
+            return
         self.conns.add(c)
         log.info("connection from %s", c.addr)
+        reader._limit = MAX_LINE_BEFORE_HELLO        # StreamReader's line limit: back to MAX_LINE after a hello
         try:
             while not c.closed:
                 try:
-                    line = await asyncio.wait_for(reader.readline(), TIMEOUT)
+                    line = await asyncio.wait_for(reader.readline(), FILES_TIMEOUT if c.files else TIMEOUT)
                 except asyncio.TimeoutError:
                     log.info("%s timed out", c.name)
                     break
                 except (ValueError, asyncio.LimitOverrunError):
-                    await c.send({"t": "error", "error": "message too large"})
+                    await c.fail("too_large", "message too large")
                     break
                 if not line:
                     break
@@ -374,15 +459,27 @@ class Server:
                     if not isinstance(msg, dict):
                         raise ValueError
                 except ValueError:
-                    await c.send({"t": "error", "error": "bad json"})
+                    await c.send({"t": "error", "code": "bad_json", "error": "bad json"})
                     continue
-                await self.dispatch(c, msg)
+                try:
+                    await self.dispatch(c, msg)
+                except Exception as e:               # a malformed field, a bug: answer it and keep the connection
+                    log.exception("%s: %r message failed", c.name, msg.get("t"))
+                    await c.send({"t": "error", "code": "bad_request", "error": f"bad {msg.get('t')!r} message: {e}",
+                                  "ref": msg.get("ref")})
+                if c.id is not None:
+                    reader._limit = MAX_LINE
         except (ConnectionError, OSError):
             pass
         finally:
             self.conns.discard(c)
             await c.close()
             await self.drop(c)
+
+    async def gc(self) -> None:
+        """Deletes blobs nothing uses any more (keeping the files of world uploads under way), off the event loop."""
+        keep = {h for offer in self.world_offers.values() for h in offer}
+        await asyncio.to_thread(self.store.gc_blobs, keep)
 
     async def drop(self, c: Client, reelect: bool = True) -> None:
         if c.id and self.clients.get(c.id) is c:
@@ -408,76 +505,85 @@ class Server:
             if t in BEFORE_HELLO:
                 await getattr(self, "on_" + t)(c, msg)
             elif t != "hello":
-                await c.send({"t": "error", "error": "say hello first"})
+                await c.send({"t": "error", "code": "hello_first", "error": "say hello first"})
             else:
                 await self.on_hello(c, msg)
             return
         if c.files != (t in FILE_MESSAGES - {"ping", "pong"}) and t not in ("ping", "pong"):
-            await c.send({"t": "error", "error": f"{t!r} doesn't belong on this connection"})
+            await c.send({"t": "error", "code": "wrong_connection", "error": f"{t!r} doesn't belong on this connection"})
             return
         fn = getattr(self, "on_" + str(t), None) if re.fullmatch(r"[a-z_]{1,32}", str(t)) and t != "hello" else None
         if fn is None:
-            await c.send({"t": "error", "error": f"unknown message type {t!r}"})
+            await c.send({"t": "error", "code": "unknown_type", "error": f"unknown message type {t!r}"})
             return
         await fn(c, msg)
 
     async def on_hello(self, c: Client, msg: dict) -> None:
         if msg.get("protocol") != PROTOCOL:
-            await c.send({"t": "error", "fatal": True, "error": f"version mismatch: server speaks protocol {PROTOCOL}"})
-            await c.close()
+            await c.fail("version_mismatch", f"version mismatch: server speaks protocol {PROTOCOL}", protocol=PROTOCOL,
+                         server_version=VERSION)
             return
-        if self.password and not secrets.compare_digest(str(msg.get("password", "")), self.password):
-            await c.send({"t": "error", "fatal": True, "error": "wrong server password"})
-            await c.close()
+        given = str(msg.get("password") or "").encode("utf-8")        # bytes: compare_digest refuses non-ASCII str
+        if self.password and not secrets.compare_digest(given, self.password.encode("utf-8")):
+            await c.fail("wrong_password", "wrong server password")
             return
         key = str(msg.get("key", ""))
         if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
-            await c.send({"t": "error", "fatal": True, "error": "missing or malformed player key"})
-            await c.close()
+            await c.fail("bad_key", "missing or malformed player key")
             return
         name = str(msg.get("name", "")).strip()[:40] or "Player"
         p = self.store.player_for_key(key, name)
         ban = self.store.settings["bans"].get(p["id"])
         if ban:
-            await c.send({"t": "error", "fatal": True, "banned": True, "error": "you're banned from this server"
-                          + (f" ({ban['reason']})" if ban.get("reason") else "")})
-            await c.close()
+            await c.fail("banned", "you're banned from this server" + (f" ({ban['reason']})" if ban.get("reason") else ""),
+                         banned=True)
             return
+        version = str(msg.get("version") or "")[:20]
         if msg.get("files"):                         # the player's file transfer connection: not a second player
-            c.id, c.name, c.files = p["id"], name, True
+            c.id, c.name, c.files, c.version = p["id"], name, True, version
             await c.send({"t": "files_ok"})
             return
         old = self.clients.get(p["id"])
-        was_leader = old is not None and self.leader is old
-        if old:                                      # same player reconnecting: replace the stale session
+        if old is None and len(self.clients) >= self.max_players:
+            await c.fail("full", "server is full")
+            return
+        c.id, c.name, c.joined, c.version = p["id"], name, now(), version
+        if old:
+            # Same player reconnecting (a Wi-Fi blip): swap the session in place. Nobody is told they left, so their
+            # Zoi stays in everyone's world; the others only get "rejoined" (older companions ignore it).
+            c.state, c.joined = old.state, old.joined
+            self.clients[c.id] = c
+            if self.leader is old:
+                self.leader = c
             await old.send({"t": "kicked", "reason": "you connected from somewhere else"})
             await old.close()
-            await self.drop(old, reelect=False)
-        elif len(self.clients) >= self.max_players:
-            await c.send({"t": "error", "fatal": True, "error": "server is full"})
-            await c.close()
+            log.info("%s (%s) reconnected from %s", c.name, c.id, c.addr)
+            await c.send(self.welcome(c))
+            await self.broadcast({"t": "rejoined", "player": c.public()}, exclude=c)
             return
-        c.id, c.name, c.joined = p["id"], name, now()
         self.clients[c.id] = c
         is_host = self.hosted and bool(msg.get("host")) and c.local()
         if is_host:
             self.host_id = c.id
         before = self.leader.id if self.leader else None
-        if self.leader is None or was_leader or is_host:             # a reconnecting leader keeps the world clock
+        if self.leader is None or is_host:
             self.leader = c
         log.info("%s (%s) joined from %s%s", c.name, c.id, c.addr, " - the host" if is_host else "")
         modset = self.modset()
-        await c.send({
-            "t": "welcome", "id": c.id, "server_version": VERSION, "motd": self.motd,
-            "leader": self.leader.id, "world": self.world, "host": self.host_id,
-            "players": [o.public() for o in self.clients.values() if o is not c],
-            "houses": self.store.list_houses(), "modset": modset, "world_save": self.store.world_save(),
-            "server": self.summary(), "admin": self.is_admin(c),
-        })
+        await c.send(self.welcome(c, modset))
         await self.broadcast({"t": "joined", "player": c.public()}, exclude=c)
         if before not in (None, self.leader.id):                    # the clock changed hands
             await self.broadcast({"t": "leader", "id": self.leader.id}, exclude=c)
         await self.send_modset(modset, exclude=c)        # it's in the welcome already
+
+    def welcome(self, c: Client, modset: dict | None = None) -> dict:
+        return {
+            "t": "welcome", "id": c.id, "server_version": VERSION, "protocol": PROTOCOL, "motd": self.motd,
+            "leader": self.leader.id if self.leader else None, "world": self.world, "host": self.host_id,
+            "players": [o.public() for o in self.clients.values() if o is not c],
+            "houses": self.store.list_houses(), "modset": modset or self.modset(), "world_save": self.store.world_save(),
+            "server": self.summary(), "admin": self.is_admin(c),
+        }
 
     async def on_ping(self, c: Client, msg: dict) -> None:
         await c.send({"t": "pong", "time": now(), "echo": msg.get("echo")})
@@ -503,6 +609,9 @@ class Server:
         await self.broadcast({"t": "world", "world": self.world}, exclude=c)
 
     async def on_take_leader(self, c: Client, msg: dict) -> None:
+        if self.hosted and self.host_id in self.clients and c.id != self.host_id:     # the host keeps their clock
+            await c.send({"t": "leader", "id": self.leader.id if self.leader else None})
+            return
         self.leader = c
         await self.broadcast({"t": "leader", "id": c.id})
 
@@ -522,7 +631,7 @@ class Server:
             if target:
                 await target.send(out)
             else:
-                await c.send({"t": "error", "error": f"{to} is not online", "ref": msg.get("ref")})
+                await c.send({"t": "error", "code": "not_online", "error": f"{to} is not online", "ref": msg.get("ref")})
         else:
             await self.broadcast(out, exclude=c)
 
@@ -601,18 +710,24 @@ class Server:
             return
         part = self.store.blob(h).with_name(f"{h}.{c.id}.part")
         size = part.stat().st_size if part.exists() else 0
-        if offset != size:
+        if type(offset) is not int or offset != size:
             await c.send({"t": "blob_bad", "h": h, "error": f"expected offset {size}", "o": size})
             return
+        d = msg.get("d", "")
+        try:
+            data = base64.b64decode(d, validate=True) if isinstance(d, str) and len(d) <= MAX_PIECE * 4 // 3 + 4 else None
+        except ValueError:
+            data = None
+        if data is None or size + len(data) > mine[h]:
+            part.unlink(missing_ok=True)
+            await c.send({"t": "blob_bad", "h": h, "o": 0,
+                          "error": "bad piece (not base64, too big or past the end of the file): start again"})
+            return
         with part.open("ab") as f:
-            f.write(base64.b64decode(str(msg.get("d", ""))))
+            f.write(data)
         if not msg.get("end"):
             return
-        digest = hashlib.sha256()
-        with part.open("rb") as f:
-            for block in iter(lambda: f.read(1 << 20), b""):
-                digest.update(block)
-        if digest.hexdigest() != h or part.stat().st_size != mine[h]:
+        if part.stat().st_size != mine[h] or await asyncio.to_thread(sha256_file, part) != h:   # off the event loop
             part.unlink()
             await c.send({"t": "blob_bad", "h": h, "error": "the file didn't arrive intact"})
             return
@@ -623,8 +738,9 @@ class Server:
         """Download a piece of a file that's part of the shared mods: {h, o} -> blob {h, o, d, end}."""
         h, offset = str(msg.get("h", "")), int(msg.get("o") or 0)
         path = self.store.blob(h)
-        world = {f["h"] for f in (self.store.world_save() or {}).get("files", [])}
-        if not SHA.fullmatch(h) or (h not in self.shared_blobs() and h not in world):
+        if offset < 0:
+            raise ValueError("negative offset")
+        if not SHA.fullmatch(h) or (h not in self.store.world_blobs() and h not in self.shared_blobs()):
             await c.send({"t": "blob", "h": h, "error": "not shared"})
             return
         if not path.exists():
@@ -666,6 +782,7 @@ class Server:
                 "name": str(msg.get("name", ""))[:100] or current.get("name", ""), "size": sum(f["s"] for f in files)}
         self.store.set_world_save(meta)
         self.world_offers.pop(c.id, None)
+        await self.gc()
         log.info("%s saved the shared world: version %d (%d MB)", c.name, meta["version"], meta["size"] >> 20)
         await c.send({"t": "world_save_put", "ok": True, "version": meta["version"]})
         await self.broadcast({"t": "world_save", **meta}, exclude=c)
@@ -709,8 +826,16 @@ class Server:
 
     async def on_admin_claim(self, c: Client, msg: dict) -> None:
         """Become an admin with the server's admin code (shown to admins, and by --admin-code on the server's PC)."""
+        tries = self.claims.setdefault(c.ip(), collections.deque())
+        while tries and now() - tries[0] > 60:
+            tries.popleft()
+        if len(tries) >= CLAIM_TRIES:                # someone guessing the code
+            await c.send({"t": "admin", "ref": msg.get("ref"), "op": "claim", "ok": False, "code": "rate_limited",
+                          "error": "too many tries: wait a minute"})
+            return
+        tries.append(now())
         code = str(msg.get("code", "")).strip().lower()
-        ok = bool(code) and secrets.compare_digest(code, self.store.settings["admin_code"])
+        ok = bool(code) and secrets.compare_digest(code.encode("utf-8"), self.store.settings["admin_code"].encode("utf-8"))
         if ok and c.id not in self.store.settings["admins"]:
             self.store.settings["admins"].append(c.id)
             self.store.save_settings()
@@ -732,6 +857,7 @@ class Server:
             "id": s["id"], "admin_code": s["admin_code"], "version": VERSION, "uptime": int(now() - self.started),
             "hosted": self.hosted, "restartable": self.restartable, "shown_name": self.name(), "port": self.port,
             "players": [{"id": c.id, "name": c.name, "ip": c.ip(), "since": c.joined, "admin": self.is_admin(c),
+                         "version": c.version,
                          "leader": c is self.leader, "host": c.id == self.host_id} for c in self.clients.values()],
             "known": [{"id": pid, "name": p.get("name"), "last_seen": p.get("last_seen"), "banned": pid in banned,
                        "admin": pid in s["admins"], "online": pid in self.clients}
@@ -857,6 +983,7 @@ class Server:
             meta = {**old, "version": version, "by": f"{by} (back to version {old['version']})", "time": now(),
                     "pid": None}
             self.store.set_world_save(meta)
+            await self.gc()
             log.info("%s made world version %d current again (as version %d)", by, old["version"], version)
             await self.broadcast({"t": "world_save", **meta})
             return {"ok": True, "version": version}

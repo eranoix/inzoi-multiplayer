@@ -1,10 +1,16 @@
 """Everything the companion asks the running game, through its built-in control server (http://127.0.0.1:11212/mcp)."""
+import http.client
 import json
 import math
 import os
+import re
+import subprocess
+import threading
+import time
 import urllib.request
 
 GAME_MCP = os.environ.get("INZOI_MP_GAME_URL") or "http://127.0.0.1:11212/mcp"     # (tests point it elsewhere)
+MCP_PORT = 11212                                                                    # unless inZOI ran with -climcpport
 
 
 # Interactions that are just getting somewhere: a puppet's own follow logic covers them.
@@ -13,6 +19,20 @@ MOVE_BAGS = ("ClickMove", "SelfMove", "Move_", "WalkTo", "Run_", "Sprint")
 
 class GameError(Exception):
     pass
+
+
+def mcp_port_flag() -> int | None:
+    """-climcpport=N from the running game's command line (None: not given, no game running, or not Windows)."""
+    if os.name != "nt":
+        return None
+    q = "(Get-CimInstance Win32_Process -Filter \"Name like 'inZOI%'\").CommandLine"
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", q], capture_output=True,
+                             text=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"-climcpport[=\s]+(\d+)", out or "", re.I)
+    return int(m.group(1)) if m else None
 
 
 def describe_act(game, a: dict, me: int, owner_of, cache: dict) -> dict | None:
@@ -42,31 +62,51 @@ def describe_act(game, a: dict, me: int, owner_of, cache: dict) -> dict | None:
 
 
 class Game:
-    def __init__(self, url: str = GAME_MCP):
-        self.url = url
+    def __init__(self, url: str | None = None):
+        self.fixed = url or os.environ.get("INZOI_MP_GAME_URL")    # else the game's own port (game_url)
+        self.url = self.fixed or GAME_MCP
+        self._port_at = None            # when the game's command line was last looked at (None: not yet)
+        self._port_lock = threading.Lock()
         self._templates = None          # (gender, growth) -> entity id of a local Zoi to build puppets on
 
     # ------------------------------------------------------------------ transport
+    def game_url(self, failed: bool = False) -> str:
+        """The control server's address: INZOI_MP_GAME_URL, else 127.0.0.1 on the game's -climcpport (11212 if not
+        given). The command line is read once (game calls run in threads, off the event loop), and again at most
+        every 30 s while the game can't be reached (it may have started later, or restarted on another port)."""
+        if self.fixed:
+            return self.fixed
+        with self._port_lock:
+            if self._port_at is None or (failed and time.monotonic() - self._port_at > 30):
+                self._port_at = time.monotonic()
+                self.url = f"http://127.0.0.1:{mcp_port_flag() or MCP_PORT}/mcp"
+        return self.url
+
     def call(self, tool: str, **args):
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                            "params": {"name": tool.replace(".", "_"), "arguments": args}}).encode()
-        req = urllib.request.Request(self.url, body, {"Content-Type": "application/json",
-                                                      "Accept": "application/json, text/event-stream"})
+        req = urllib.request.Request(self.game_url(), body, {"Content-Type": "application/json",
+                                                             "Accept": "application/json, text/event-stream"})
         try:
             raw = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", "replace")
-        except OSError as e:
+        except (OSError, http.client.HTTPException) as e:      # (IncompleteRead, BadStatusLine... are HTTPExceptions)
+            if isinstance(getattr(e, "reason", e), ConnectionRefusedError):     # (nothing on that port)
+                self.game_url(failed=True)
             raise GameError(f"inZOI isn't reachable ({e})") from None
-        if raw.startswith(("event:", "data:")):
-            raw = "\n".join(l[5:].strip() for l in raw.splitlines() if l.startswith("data:"))
-        res = json.loads(raw).get("result", {})
-        if res.get("structuredContent") is not None:
-            out = res["structuredContent"]
-        else:
-            text = " ".join(c.get("text", "") for c in res.get("content", []))
-            try:
-                out = json.loads(text)
-            except ValueError:
-                out = {"_text": text}
+        try:
+            if raw.startswith(("event:", "data:")):
+                raw = "\n".join(l[5:].strip() for l in raw.splitlines() if l.startswith("data:"))
+            res = json.loads(raw).get("result") or {}
+            if res.get("structuredContent") is not None:
+                out = res["structuredContent"]
+            else:
+                text = " ".join(c.get("text", "") for c in res.get("content") or [] if isinstance(c, dict))
+                try:
+                    out = json.loads(text)
+                except ValueError:
+                    out = {"_text": text}
+        except (ValueError, KeyError, TypeError, AttributeError) as e:     # empty / half / odd answer (loading...)
+            raise GameError(f"odd answer from inZOI to {tool}: {e!r}") from None
         if res.get("isError") or (isinstance(out, dict) and "_error" in out):
             raise GameError(str(out))
         return out
@@ -104,16 +144,30 @@ class Game:
         return json.loads(body) if body.strip().startswith("[") else []
 
     def possessed(self) -> int:
-        return int(self.call("entity.get_possessed")["entity_id"])
+        try:
+            return int(self.call("entity.get_possessed")["entity_id"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise GameError(f"no possessed Zoi ({e!r})") from None
+
+    def clock(self) -> tuple:
+        """(hour, minute, speed, paused) of the game's clock."""
+        c = self.call("environment.get_time")
+        try:
+            return int(c["hour"]), int(c["minute"]), c.get("time_scale", 1), bool(c.get("paused"))
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            raise GameError(f"odd clock ({e!r})") from None
 
     def state_of(self, entity_id: int) -> dict:
         """Position, facing and whereabouts of a character: what other players need to mirror it."""
         r = self.call("entity.reflect", entity_id=entity_id)
-        w = r["worldTransform"]
-        t, q = w["translation"], w["rotation"]
-        yaw = math.degrees(math.atan2(2 * (q["w"] * q["z"] + q["x"] * q["y"]), 1 - 2 * (q["y"] ** 2 + q["z"] ** 2)))
-        return {"x": round(t["x"], 1), "y": round(t["y"], 1), "z": round(t["z"], 1), "yaw": round(yaw, 1),
-                "city": r.get("locatedCityName") or "", "site": (r.get("locatedSiteId") or {}).get("value", -1)}
+        try:
+            w = r["worldTransform"]
+            t, q = w["translation"], w["rotation"]
+            yaw = math.degrees(math.atan2(2 * (q["w"] * q["z"] + q["x"] * q["y"]), 1 - 2 * (q["y"] ** 2 + q["z"] ** 2)))
+            return {"x": round(t["x"], 1), "y": round(t["y"], 1), "z": round(t["z"], 1), "yaw": round(yaw, 1),
+                    "city": r.get("locatedCityName") or "", "site": (r.get("locatedSiteId") or {}).get("value", -1)}
+        except (KeyError, TypeError, AttributeError) as e:          # (mid-loading or teleport: no transform yet)
+            raise GameError(f"no transform for {entity_id} ({e!r})") from None
 
     def activity(self, entity_id: int) -> dict:
         """What a character is doing right now: interaction bag, its state/action type, target, and the motion."""
@@ -124,7 +178,7 @@ class Game:
             m = self.call("motion.get_current", entity_id=entity_id)
             mo = (m.get("motions") or [None])[0]
             out["anim"] = mo and {"id": mo["anim_id"], "pos": mo.get("position", 0)}
-        except GameError:
+        except (GameError, KeyError, TypeError, AttributeError):
             out["anim"] = None
         return out
 

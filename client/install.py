@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 MOD_ID = "InZOIMultiplayer"
-MAILBOX_FILES = {"MPCmd.lua", "MPBulk.lua", "inject.json"}
+MAILBOX_FILES = {"MPCmd.lua", "MPBulk.lua", "MPSeq.lua", "MPCmd.tmp", "MPBulk.tmp", "MPSeq.tmp", "inject.json"}
 
 
 def _documents() -> Path:

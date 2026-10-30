@@ -73,8 +73,8 @@ class Registry:
         self.cache = {}
         for f in (SEED, CACHE):                 # the user's own cache wins (it reflects their game version)
             try:
-                self.cache.update(json.loads(f.read_text("utf-8")))
-            except (OSError, ValueError):
+                self.cache.update({k: v for k, v in json.loads(f.read_text("utf-8")).items() if v})  # (no empties)
+            except (OSError, ValueError, AttributeError):
                 pass
 
     def fields(self, struct):
@@ -92,9 +92,16 @@ class Registry:
                     m = re.match(r"(\w+)\s*:\s*(.+)$", line)
                     if m:
                         props[m.group(1).lower()] = [m.group(1), m.group(2).strip()]
+            if not props:                       # (a loading screen answers empty): ask again next time, never keep it
+                return props
             self.cache[struct] = props
-            CACHE.parent.mkdir(parents=True, exist_ok=True)
-            CACHE.write_text(json.dumps(self.cache, indent=0), "utf-8")
+            try:
+                CACHE.parent.mkdir(parents=True, exist_ok=True)
+                tmp = CACHE.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self.cache, indent=0), "utf-8")
+                os.replace(tmp, CACHE)
+            except OSError:
+                pass                            # (only a cache: it's written again with the next struct)
         return self.cache[struct]
 
 

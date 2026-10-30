@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
 <title>inZOI Multiplayer</title>
@@ -21,13 +21,15 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 #title-bar { display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
              padding: 10px 12px 10px 14px; cursor: move;
              user-select: none; -webkit-user-select: none; border-bottom: 1px solid rgba(255, 255, 255, 0.10); }
-#title-text { font-size: 16px; font-weight: bold; letter-spacing: 0.2px; display: flex; align-items: center; }
+#title-text { font-size: 16px; min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; font-weight: bold; letter-spacing: 0.2px; display: flex; align-items: center; }
 #title-text .dot { width: 9px; height: 9px; border-radius: 50%; margin-right: 9px; background: rgba(238, 241, 246, 0.62); }
 #title-text .dot.on { background: #7fd1b9; }
 #title-text .dot.wait { background: #f0b35a; }
 #title-text .badge { margin-left: 8px; padding: 1px 8px; border-radius: 10px; font-size: 13px;
                      background: #5aa8f0; color: #0d1420; }
-#title-buttons { display: flex; align-items: center; gap: 6px; }
+#title-label { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#title-text .dot { flex-shrink: 0; }
+#title-buttons { flex-shrink: 0; margin-left: 8px; display: flex; align-items: center; gap: 6px; }
 /* ASCII-only icons: _ for minimize, X for close. */
 #minimize-btn, #close-btn {
     cursor: pointer; font-size: 14px; font-weight: bold; line-height: 1.4;
@@ -36,7 +38,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
     color: #fff; border-radius: 6px; padding: 1px 8px;
     user-select: none; -webkit-user-select: none; }
 #minimize-btn:hover { background: rgba(255, 255, 255, 0.16); }
-#servers-btn { cursor: pointer; font-size: 13px; font-weight: bold; line-height: 1.6; padding: 1px 9px; border-radius: 6px;
+#servers-btn { cursor: pointer; font-size: 14px; font-weight: bold; line-height: 1.6; padding: 1px 9px; border-radius: 6px;
                background: rgba(90, 168, 240, 0.25); border: 1px solid rgba(90, 168, 240, 0.6); color: #dcefff;
                user-select: none; -webkit-user-select: none; }
 #servers-btn:hover { background: rgba(90, 168, 240, 0.45); }
@@ -48,125 +50,151 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
                 transparent 68%, rgba(255,255,255,0.4) 69%, rgba(255,255,255,0.4) 80%, transparent 81%); }
 #resize-handle:hover { opacity: 1; }
 
-.status { font-size: 14px; color: rgba(238, 241, 246, 0.62); margin-bottom: 8px; }
-.notice { font-size: 14px; color: #f0b35a; margin-bottom: 8px; display: none; }
-.label { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: rgba(238, 241, 246, 0.62); margin: 6px 0 6px; }
+/* Text colours: primary #eef1f6, secondary #c9d0db (readable over the game; no 62%-opacity grey for text). */
+.conn { display: flex; align-items: flex-start; padding: 8px 10px; margin-bottom: 8px; border-radius: 10px; font-size: 15px;
+        line-height: 1.35; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.14); flex-shrink: 0; }
+.conn .ico { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0; margin-right: 9px; text-align: center;
+             line-height: 22px; font-weight: bold; font-size: 14px; background: #c9d0db; color: #0d1420; }
+.conn .txt { flex: 1; min-width: 0; word-wrap: break-word; }
+.conn .sub { display: block; font-size: 14px; color: #c9d0db; margin-top: 2px; }
+.conn .btn { margin: 6px 0 0 0; }
+.conn.on   { background: rgba(127, 209, 185, 0.14); border-color: rgba(127, 209, 185, 0.55); }
+.conn.on .ico { background: #7fd1b9; }
+.conn.wait { background: rgba(240, 179, 90, 0.14); border-color: rgba(240, 179, 90, 0.55); }
+.conn.wait .ico { background: #f0b35a; }
+.conn.bad  { background: rgba(240, 110, 100, 0.16); border-color: rgba(240, 120, 110, 0.65); }
+.conn.bad .ico { background: #f27d72; }
+.notice { font-size: 15px; color: #ffd08a; margin-bottom: 8px; display: none; line-height: 1.35; }
+.label { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #c9d0db; margin: 6px 0 6px; }
 
-.players { flex-shrink: 0; margin-bottom: 6px; }
-.player { display: flex; align-items: center; padding: 8px 10px; margin-bottom: 6px;
-          background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.10); border-radius: 10px; }
+.players { flex-shrink: 0; margin-bottom: 6px; max-height: 170px; overflow-y: auto; }
+.player { display: flex; align-items: center; padding: 7px 10px; margin-bottom: 6px;
+          background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 10px; }
 .player .who { flex: 1; min-width: 0; }
 .player .name { font-size: 16px; font-weight: bold; }
-.player .sub { font-size: 13px; color: rgba(238, 241, 246, 0.62); margin-top: 2px; white-space: nowrap; overflow: hidden; }
-.player .sub.here { color: #7fd1b9; }
-.empty { font-size: 14px; color: rgba(238, 241, 246, 0.62); padding: 6px 2px 10px; }
+.player .sub { font-size: 14px; color: #c9d0db; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.player .sub.here { color: #8fe0c8; }
+.empty { font-size: 15px; color: #c9d0db; padding: 6px 2px 10px; }
 
-.btn { cursor: pointer; padding: 5px 12px; border-radius: 8px; font-size: 14px; font-weight: bold;
-       background: rgba(127, 209, 185, 0.18); border: 1px solid rgba(127, 209, 185, 0.45); color: #dff6ef; }
-.btn:hover { background: rgba(127, 209, 185, 0.32); }
-.btn.off { opacity: 0.35; cursor: default; }
+.btn { cursor: pointer; padding: 6px 12px; border-radius: 8px; font-size: 15px; font-weight: bold; line-height: 1.2;
+       background: rgba(127, 209, 185, 0.22); border: 1px solid rgba(127, 209, 185, 0.6); color: #ecfbf6; }
+.btn:hover { background: rgba(127, 209, 185, 0.36); }
+.btn.off, .btn[disabled] { opacity: 0.45; cursor: default; }
+button { -webkit-appearance: none; }
+button:focus { outline: none; }
+button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visible {
+    outline: 2px solid #ffe08a; outline-offset: 2px; }
 
-.chat { flex: 1; min-height: 60px; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end;
-        padding: 8px 10px; background: rgba(0, 0, 0, 0.18); border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.10); }
-.msg { font-size: 15px; line-height: 1.35; margin-top: 4px; word-wrap: break-word; }
-.msg .from { font-weight: bold; color: #5aa8f0; margin-right: 6px; }
-.msg.mine .from { color: #7fd1b9; }
-.msg.system { color: rgba(238, 241, 246, 0.62); font-size: 13px; }
+.chat { flex: 1; min-height: 60px; overflow-y: auto; overflow-x: hidden; display: block;
+        padding: 6px 10px 8px; background: rgba(0, 0, 0, 0.24); border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.12); }
+.msg { font-size: 15px; line-height: 1.4; margin-top: 4px; word-wrap: break-word; }
+.msg .from { font-weight: bold; color: #7dbcf5; margin-right: 6px; }
+.msg.mine .from { color: #8fe0c8; }
+.msg.system { color: #c9d0db; font-size: 14px; font-style: italic; }
 
-.say { display: flex; margin-top: 8px; }
-.say input { flex: 1; min-width: 0; padding: 7px 10px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.10);
-             background: rgba(255, 255, 255, 0.08); outline: none; font-size: 15px; }
-.say input:focus { border-color: rgba(127, 209, 185, 0.6); }
+.say { display: flex; margin-top: 8px; flex-shrink: 0; }
+.say input { flex: 1; min-width: 0; padding: 7px 10px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.18);
+             background: rgba(255, 255, 255, 0.10); outline: none; font-size: 15px; }
+.say input:focus { border-color: rgba(127, 209, 185, 0.8); }
 .say .btn { margin-left: 6px; }
 
-.tabs { display: flex; margin: 2px 0 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.10); }
-.tab { font-size: 14px; padding: 4px 2px 7px; margin-right: 18px; color: rgba(238, 241, 246, 0.62); cursor: pointer;
-       user-select: none; border-bottom: 2px solid transparent; }
+.tabs { display: flex; margin: 2px 0 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.14); flex-shrink: 0; }
+.tab { font-size: 15px; padding: 4px 2px 7px; margin-right: 16px; color: #c9d0db; cursor: pointer; background: none;
+       border: 0; border-bottom: 2px solid transparent; user-select: none; }
 .tab:hover { color: #fff; }
-.tab.on { color: #fff; border-bottom-color: #7fd1b9; }
+.tab.on { color: #fff; border-bottom-color: #7fd1b9; font-weight: bold; }
 .pane { display: none; flex: 1; min-height: 0; flex-direction: column; overflow: hidden; }
 .pane.on { display: flex; }
-.hint { font-size: 12px; color: rgba(238, 241, 246, 0.62); line-height: 1.35; margin-bottom: 4px; }
+#pane-houses, #pane-mods, #pane-settings { overflow-y: auto; }
+.hint { font-size: 14px; color: #c9d0db; line-height: 1.4; margin-bottom: 4px; }
 .house { display: flex; align-items: center; padding: 6px 8px; margin-bottom: 5px; border-radius: 8px;
-         background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.10); font-size: 14px; }
-.house .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; }
-.house .t .s { font-size: 12px; color: rgba(238, 241, 246, 0.62); }
-.house .btn { padding: 3px 9px; font-size: 13px; margin-left: 6px; }
+         background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12); font-size: 15px; }
+.house .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.house .t .s { font-size: 13px; color: #c9d0db; }
+.house .btn { padding: 4px 9px; font-size: 14px; margin-left: 6px; }
 .field { display: flex; align-items: center; margin-bottom: 6px; }
-.field span { width: 90px; font-size: 13px; color: rgba(238, 241, 246, 0.62); }
-.toggle { display: flex; align-items: center; font-size: 13px; color: rgba(238, 241, 246, 0.62); margin: 4px 0 10px; cursor: pointer; }
-.toggle .box { width: 16px; height: 16px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.10); margin-right: 8px;
+.field > span { width: 96px; font-size: 14px; color: #c9d0db; flex-shrink: 0; }
+.field input, .field select { flex: 1; min-width: 0; padding: 5px 8px; border-radius: 7px; border: 1px solid rgba(255, 255, 255, 0.18);
+               background: rgba(255, 255, 255, 0.10); outline: none; font-size: 15px; }
+.field select option { color: #111; }
+.field .btn { margin-left: 6px; padding: 4px 8px; font-size: 13px; }
+.toggle { display: flex; align-items: center; font-size: 14px; color: #c9d0db; margin: 4px 0 10px; cursor: pointer;
+          background: none; border: 0; text-align: left; padding: 2px 0; }
+.toggle .box { width: 18px; height: 18px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.4); margin-right: 8px;
                background: rgba(255, 255, 255, 0.08); flex-shrink: 0; }
 .toggle.on .box { background: #7fd1b9; border-color: #7fd1b9; }
 .toggle.on { color: #eef1f6; }
-.tab.alert { color: #f0b35a; }
-.save-box { display: none; padding: 8px 10px; margin-bottom: 8px; border-radius: 10px; font-size: 14px; line-height: 1.4;
-            background: rgba(240, 179, 90, 0.12); border: 1px solid rgba(240, 179, 90, 0.45); }
+.tab.alert { color: #ffc56e; }
+.save-box { display: none; padding: 8px 10px; margin-bottom: 8px; border-radius: 10px; font-size: 15px; line-height: 1.4;
+            background: rgba(240, 179, 90, 0.14); border: 1px solid rgba(240, 179, 90, 0.55); flex-shrink: 0; }
 .save-box .btn { display: inline-block; margin: 6px 6px 0 0; }
 .hint.version { margin-top: 14px; }
-.mods-state { font-size: 14px; line-height: 1.4; margin: 4px 0 8px; }
-.bar { height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.08); margin: 0 0 10px; display: none; }
+.mods-state { font-size: 15px; line-height: 1.4; margin: 4px 0 8px; }
+.bar { height: 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.10); margin: 0 0 10px; display: none; flex-shrink: 0; }
 .bar .fill { height: 8px; border-radius: 4px; background: #7fd1b9; width: 0; }
 .m-buttons { display: none; margin-bottom: 10px; }
 .m-buttons .btn { margin-right: 8px; }
-.mod { font-size: 14px; padding: 3px 2px; white-space: nowrap; overflow: hidden; }
-.mod .ok { color: #7fd1b9; margin-right: 6px; }
-.mod .no { color: #f0b35a; margin-right: 6px; }
-.field input { flex: 1; min-width: 0; padding: 5px 8px; border-radius: 7px; border: 1px solid rgba(255, 255, 255, 0.10);
-               background: rgba(255, 255, 255, 0.08); outline: none; font-size: 14px; }
+.mod { font-size: 15px; padding: 3px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mod .ok { color: #8fe0c8; margin-right: 6px; }
+.mod .no { color: #ffc56e; margin-right: 6px; }
 </style>
 </head>
 <body>
 <div id="app-root">
   <div id="title-bar">
-    <span id="title-text"><span class="dot"></span><span id="title-label">inZOI Multiplayer</span></span>
+    <span id="title-text"><span class="dot" aria-hidden="true"></span><span id="title-label">inZOI Multiplayer</span></span>
     <div id="title-buttons">
-      <span id="servers-btn" title="Servers: join one, host your own, admin console">Servers</span>
-      <span id="minimize-btn">_</span>
-      <span id="close-btn">X</span>
+      <button type="button" id="servers-btn" data-i18n="Servers" data-i18n-title="Servers: join one, host your own, admin console">Servers</button>
+      <button type="button" id="minimize-btn" data-i18n-title="Minimize">_</button>
+      <button type="button" id="close-btn" data-i18n-title="Close">X</button>
     </div>
   </div>
   <div id="content">
-    <div class="status" id="status">Looking for the inZOI Multiplayer program...</div>
-    <div class="notice" id="notice"></div>
+    <div class="conn wait" id="conn" role="status" aria-live="polite">
+      <span class="ico" id="conn-ico" aria-hidden="true">…</span>
+      <div class="txt"><span id="status" data-i18n>Looking for the inZOI Multiplayer program...</span><span class="sub" id="conn-sub"></span>
+        <button type="button" class="btn" id="conn-retry" style="display:none" data-i18n>Try again</button></div>
+    </div>
+    <div class="notice" id="notice" role="alert"></div>
     <div class="save-box" id="update-box"><div id="update-text"></div><div id="update-buttons"></div></div>
     <div class="save-box" id="world-box"><div id="world-text"></div><div id="world-buttons"></div></div>
     <div class="save-box" id="save-box"><div id="save-text"></div><div id="save-buttons"></div></div>
-    <div class="tabs"><span class="tab on" data-tab="people">People</span><span class="tab" data-tab="houses">Houses</span><span class="tab" data-tab="mods" id="tab-mods">Mods</span><span class="tab" data-tab="settings">Settings</span></div>
+    <div class="tabs" role="tablist"><button type="button" role="tab" class="tab on" data-tab="people" data-i18n>People</button><button type="button" role="tab" class="tab" data-tab="houses" data-i18n>Houses</button><button type="button" role="tab" class="tab" data-tab="mods" id="tab-mods">Mods</button><button type="button" role="tab" class="tab" data-tab="settings" data-i18n>Settings</button></div>
     <div class="pane on" id="pane-people">
-      <div class="label">Players</div>
+      <div class="label" data-i18n>Players</div>
       <div class="players" id="players"></div>
-      <div class="label">Chat</div>
-      <div class="chat" id="chat"></div>
+      <div class="label" data-i18n>Chat</div>
+      <div class="chat" id="chat" role="log" aria-live="polite"></div>
       <div class="say">
-        <input id="say" maxlength="200" placeholder="Say something...">
-        <span class="btn" id="send">Send</span>
+        <input id="say" maxlength="500" placeholder="Say something..." data-i18n-ph>
+        <button type="button" class="btn" id="send" data-i18n>Send</button>
       </div>
     </div>
     <div class="pane" id="pane-houses">
-      <div class="hint">To have friends visit you at home: in Build mode, save your home to your library, then share it
+      <div class="hint" data-i18n>To have friends visit you at home: in Build mode, save your home to your library, then share it
         here. Friends add it to their library and place it on the same lot with the build tools.</div>
-      <div class="label">Your saved houses</div>
+      <div class="label" data-i18n>Your saved houses</div>
       <div id="h-mine"></div>
-      <div class="label">Shared by friends</div>
+      <div class="label" data-i18n>Shared by friends</div>
       <div id="h-shared"></div>
     </div>
     <div class="pane" id="pane-mods">
-      <div class="hint">Everyone needs the same mods to see each other's clothes and things. When someone hosts and
+      <div class="hint" data-i18n>Everyone needs the same mods to see each other's clothes and things. When someone hosts and
         plays, the host's mods count; on a stand-alone server, everyone's mods are shared.</div>
       <div class="mods-state" id="m-state"></div>
       <div class="bar" id="m-bar"><div class="fill" id="m-fill"></div></div>
-      <div class="m-buttons" id="m-buttons"><span class="btn" id="m-yes">Download</span><span class="btn" id="m-no">No thanks</span></div>
-      <div class="label">Mods everyone uses</div>
+      <div class="m-buttons" id="m-buttons"><button type="button" class="btn" id="m-yes">Download</button><button type="button" class="btn" id="m-no" data-i18n>No thanks</button></div>
+      <div class="label" data-i18n>Mods everyone uses</div>
       <div id="m-list"></div>
     </div>
     <div class="pane" id="pane-settings">
-      <div class="field"><span>Your name</span><input id="s-name"></div>
-      <div class="field"><span>Server</span><input id="s-server"></div>
-      <div class="field"><span>Port</span><input id="s-port"></div>
-      <div class="field"><span>Password</span><input id="s-password" type="password"></div>
-      <div class="toggle" id="s-sync"><span class="box"></span>Follow the host's time of day, season and weather</div>
-      <span class="btn" id="s-save">Save and reconnect</span>
+      <label class="field"><span data-i18n>Your name</span><input id="s-name" maxlength="40"></label>
+      <label class="field"><span data-i18n>Server</span><input id="s-server"></label>
+      <label class="field"><span data-i18n>Port</span><input id="s-port"></label>
+      <label class="field"><span data-i18n>Password</span><input id="s-password" type="password" placeholder="Unchanged unless you type" data-i18n-ph><button type="button" class="btn" id="s-nopw" data-i18n>No password</button></label>
+      <button type="button" class="toggle" id="s-sync" role="switch" aria-checked="false"><span class="box" aria-hidden="true"></span><span data-i18n>Follow the host's time of day, season and weather</span></button>
+      <label class="field"><span data-i18n>Language</span><select id="s-lang"><option value="pt-BR">Português (Brasil)</option><option value="en">English</option></select></label>
+      <button type="button" class="btn" id="s-save" data-i18n>Save and reconnect</button>
       <div class="hint version" id="s-version"></div>
     </div>
   </div>
@@ -176,11 +204,13 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
        1. coui://inzoi/cohtml.js        -> engine (game bridge; input forwarding)
        2. coui://inzoi/mod/inzoi-sdk.js -> inzoi.* (view.hover, cli, saveState...)
        3. window.js                     -> scaffold window mgr; defines the wf global
-       4. app.js                        -> mod logic (uses wf)
+       4. i18n.js                       -> translations (I18N global; pt-BR / en)
+       5. app.js                        -> mod logic (uses wf, I18N)
      ==================================================================== -->
 <script src="coui://inzoi/cohtml.js"></script>
 <script src="coui://inzoi/mod/inzoi-sdk.js"></script>
 <script src="window.js"></script>
+<script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

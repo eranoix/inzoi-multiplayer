@@ -64,6 +64,7 @@ local function label_of(combo)                       -- the text above a filter:
 end
 
 function P.prepare(page)
+  pcall(U.prune_handlers)                    -- the previous page's widgets are gone: drop their click handlers
   MP.page = page
   MP.pg = {}
   MP.dlg = nil
@@ -416,12 +417,14 @@ function P.render(vm)
                   render_dialog }
   for _, f in ipairs(steps) do
     local ok, err = pcall(f, vm)
-    if not ok then U.log("render: " .. tostring(err)) end
+    if not ok then U.log_limited("render: " .. tostring(err)) end      -- (re-applied every few seconds: don't flood)
   end
 end
 
 -- ------------------------------------------------------------------------------------------------ events and polling
 function P.event(e) U.send(e) end
+
+local ENFORCE_FOR, ENFORCE_SLOW = 10, 5
 
 -- Called every tick while the page is up: news from the program, and what the player typed or picked.
 function P.tick()
@@ -433,17 +436,23 @@ function P.tick()
   s.was_open = true
   P.show_list()                                -- (the tabs' own code switches to the mod intro)
   local raw = U.read(U.SIGNALS .. "page.json")
-  if raw and raw ~= s.raw then
+  if raw and raw ~= s.raw and raw ~= s.bad_raw then
     local vm, err = U.json.decode(raw)
     if vm then
       s.raw = raw
       s.vm = vm
+      s.bad_raw = nil
+      s.changed = os.clock()
       P.render(vm)
     else
-      U.log("page.json: " .. tostring(err))
+      s.bad_raw = raw                           -- (not decoded again every tick until the program rewrites it)
+      U.log_limited("page.json: " .. tostring(err))
     end
   elseif s.vm and (s.enforce or 0) < os.clock() then
-    s.enforce = os.clock() + 1                  -- the page's own code may still be setting itself up: re-apply
+    -- Unchanged: the page's own code may still be setting itself up, so re-apply, every second for a while after
+    -- the page opened or changed, then only every ENFORCE_SLOW s (it's still self-healing, just cheaper).
+    local settling = os.clock() - (s.changed or 0) < ENFORCE_FOR
+    s.enforce = os.clock() + (settling and 1 or ENFORCE_SLOW)
     P.render(s.vm)
   end
   local ok = pcall(function()
@@ -481,7 +490,7 @@ function P.on_new(w)
         U.show(w.BW_ListView_ModList, false)
         local raw = U.read(U.SIGNALS .. "page.json")
         local vm = raw and U.json.decode(raw)
-        if vm then S().raw, S().vm = raw, vm; P.render(vm) end
+        if vm then S().raw, S().vm, S().changed = raw, vm, os.clock(); P.render(vm) end
       end)
       pcall(function() w:SetRenderOpacity(1) end)
     end)

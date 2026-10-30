@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -10,55 +10,60 @@
 <div id="stage">
   <div id="dots"></div>
 
-  <button class="back" id="back" title="Back to the game (Esc)"><svg viewBox="0 0 14 14"><path d="M9 2 4 7l5 5" fill="none" stroke="#5f6366" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-  <span class="back-label" id="back-label">Back</span>
+  <button class="back" id="back" title="Back to the game (Esc)" data-i18n-title><svg viewBox="0 0 14 14"><path d="M9 2 4 7l5 5" fill="none" stroke="#5f6366" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  <button class="back-label" id="back-label" data-i18n>Back</button>
   <span class="bar-sep"></span>
-  <span class="page-title">Multiplayer</span>
+  <span class="page-title" data-i18n>Multiplayer</span>
+  <button class="couple-toggle" id="couple-toggle" type="button" role="switch" aria-checked="true"><span class="knob"></span><span data-i18n>Couple mode</span></button>
+  <label class="lang"><span class="sr" data-i18n>Language</span><select id="lang-select"><option value="pt-BR">Português</option><option value="en">English</option></select></label>
   <nav class="tabs">
-    <button class="tab on" data-tab="public">Public Servers</button>
-    <button class="tab" data-tab="private">Private Servers</button>
+    <button class="tab on" data-tab="public" data-i18n>Public Servers</button>
+    <button class="tab" data-tab="private" data-i18n>Private Servers</button>
   </nav>
 
   <div class="head-title">
-    <h1><span id="list-title">Public Servers</span><span class="count" id="count">0</span></h1>
-    <button class="pill blue" id="add-server" data-icon="plus">Add Server</button>
-    <button class="pill blue" id="host-server" data-icon="host">Host a Server</button>
+    <h1><span id="list-title" data-i18n>Public Servers</span><span class="count" id="count">0</span></h1>
+    <button class="pill blue" id="add-server" data-icon="plus"><span data-i18n>Add Server</span></button>
+    <button class="pill blue" id="host-server" data-icon="host"><span data-i18n>Host a Server</span></button>
   </div>
-  <div class="search"><span data-icon="search"></span><input id="search" placeholder="Search" autocomplete="off"></div>
+  <div class="search"><span data-icon="search"></span><input id="search" placeholder="Search" data-i18n-ph autocomplete="off"></div>
 
   <div class="filters">
-    <label class="filter" style="left:0"><span>Status</span><select id="f-status">
-      <option value="all">All Status</option><option value="online">Online</option><option value="room">Has Room</option>
-      <option value="offline">Offline</option></select></label>
-    <label class="filter" style="left:218px"><span>Version Compatibility</span><select id="f-compat">
-      <option value="all">All</option><option value="ready">Ready to Join</option><option value="problem">Can't Join</option></select></label>
-    <label class="filter" style="left:437px"><span>Mods</span><select id="f-mods">
-      <option value="all">All Mods</option><option value="have">You Have Them All</option>
-      <option value="download">Mods to Download</option><option value="none">No Mods</option></select></label>
-    <label class="filter" style="left:655px"><span>Access</span><select id="f-access">
-      <option value="all">All</option><option value="open">No Password</option><option value="password">Password</option></select></label>
-    <label class="filter" style="left:874px"><span>Server Type</span><select id="f-type">
-      <option value="all">All</option><option value="hosted">Hosted by a Player</option><option value="standalone">Always On</option></select></label>
-    <button class="reset" id="reset"><span data-icon="reset"></span>Reset</button>
+    <label class="filter" style="left:0"><span data-i18n>Status</span><select id="f-status">
+      <option value="all" data-i18n>All Status</option><option value="online" data-i18n>Online</option><option value="room" data-i18n>Has Room</option>
+      <option value="offline" data-i18n>Offline</option></select></label>
+    <label class="filter" style="left:218px"><span data-i18n>Version Compatibility</span><select id="f-compat">
+      <option value="all" data-i18n>All</option><option value="ready" data-i18n>Ready to Join</option><option value="problem" data-i18n>Can't Join</option></select></label>
+    <label class="filter" style="left:437px"><span data-i18n>Mods</span><select id="f-mods">
+      <option value="all" data-i18n>All Mods</option><option value="have" data-i18n>You Have Them All</option>
+      <option value="download" data-i18n>Mods to Download</option><option value="none" data-i18n>No Mods</option></select></label>
+    <label class="filter" style="left:655px"><span data-i18n>Access</span><select id="f-access">
+      <option value="all" data-i18n>All</option><option value="open" data-i18n>No Password</option><option value="password" data-i18n>Password</option></select></label>
+    <label class="filter" style="left:874px"><span data-i18n>Server Type</span><select id="f-type">
+      <option value="all" data-i18n>All</option><option value="hosted" data-i18n>Hosted by a Player</option><option value="standalone" data-i18n>Always On</option></select></label>
+    <button class="reset" id="reset"><span data-icon="reset"></span><span data-i18n>Reset</span></button>
   </div>
 
-  <div class="list-head"><span class="check" id="all-check" title="Saved in Private Servers"></span>All<span class="count" id="all-count">0</span><span class="note" id="list-note"></span></div>
-  <button class="sort" id="sort" title="Sort: players"><span data-icon="sort"></span></button>
+  <div class="list-head"><span class="check" id="all-check" title="Saved in Private Servers" data-i18n-title></span><span data-i18n>All</span><span class="count" id="all-count">0</span><span class="note" id="list-note"></span></div>
+  <button class="sort" id="sort" title="Sort: players" aria-label="Sort"><span data-icon="sort"></span></button>
   <div class="rows" id="rows"></div>
 
   <section class="details" id="details"></section>
 
   <aside class="actions">
-    <div class="sel-head"><span data-icon="checked"></span><span id="sel-name">Selected</span></div>
-    <div class="sel-sub"><span data-icon="people"></span><span id="sel-sub">No server selected</span></div>
+    <div class="sel-head"><span data-icon="checked"></span><span id="sel-name" data-i18n>Selected</span></div>
+    <div class="sel-sub"><span data-icon="people"></span><span id="sel-sub" data-i18n>No server selected</span></div>
     <div class="rule"></div>
     <div id="action-buttons"></div>
     <div class="me" id="me"></div>
   </aside>
 
-  <div class="toast" id="toast"></div>
+  <section class="couple" id="couple" aria-label="Couple mode"></section>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <div class="modal-back" id="modal-back"><div class="modal" id="modal"></div></div>
 </div>
+<script src="/page/i18n.js"></script>
 <script src="/page/servers.js"></script>
 </body>
 </html>

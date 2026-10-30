@@ -35,6 +35,7 @@ import updater  # noqa: E402
 log = logging.getLogger("launcher")
 SERVER_DATA = companion.SERVER_DATA
 GAME_URL = "steam://rungameid/2456740"
+DEFAULT_SERVER = os.environ.get("INZOI_MP_DEFAULT_SERVER", "100.99.177.28")   # coop-casal: Arthur's PC (Tailscale)
 GAME_STARTED = False                    # this program already started inZOI (after adding the menu button)
 NEVER_STARTED = 1800                    # inZOI didn't come up this long after the program started: give up
 
@@ -218,20 +219,36 @@ async def fetch_update():
 
 
 # ---------------------------------------------------------------------------------------------- running
-async def follow_game() -> str:
-    """The program lives as long as inZOI: returns once inZOI has closed (or never came up)."""
+KEEP_HOSTING = False                    # host mode: the program (and the server) stays up while inZOI is closed
+
+
+async def follow_game(keep: bool | None = None) -> str:
+    """The program lives as long as inZOI: returns once inZOI has closed (or never came up). keep (hosting): never
+    returns: the server stays up for the friend while inZOI is closed or restarting, and the program waits for the
+    game to come back (closing the program's window stops it)."""
+    keep = KEEP_HOSTING if keep is None else keep
     if os.name != "nt" or testing():
         await asyncio.Event().wait()
     seen, gone, start = False, 0, time.monotonic()
     while True:
         await asyncio.sleep(3)
-        if await asyncio.to_thread(menu.game_window):
+        try:
+            up = await asyncio.to_thread(menu.game_window)
+        except Exception as e:                               # noqa: BLE001 - never end the program over this
+            log.debug("game window: %s", e)
+            continue
+        if up:
+            if keep and seen and gone >= 30:
+                log.info("inZOI is back")
             seen, gone = True, 0
         elif seen:
             gone += 3
-            if gone >= 30:                                   # (not just a restart of the game)
+            if gone == 30 and keep:
+                log.info("inZOI closed: your server keeps running for your friends. Start inZOI again to play, "
+                         "or close this window to stop hosting")
+            if gone >= 30 and not keep:                      # (not just a restart of the game)
                 return "inZOI closed"
-        elif time.monotonic() - start > NEVER_STARTED:
+        elif time.monotonic() - start > NEVER_STARTED and not keep:
             return "inZOI didn't start"
 
 
@@ -256,7 +273,10 @@ async def run(mode: str, cfg: dict, comp):
         except ValueError as e:
             log.warning("couldn't start your server: %s", e)
             comp.notice = f"Couldn't start your server: {e}"
+    asyncio.create_task(fetch_update())                  # coop-casal: updates come quietly, applied at next start
     main = asyncio.create_task(comp.run())
+    global KEEP_HOSTING
+    KEEP_HOSTING = mode == "host"
     game = asyncio.create_task(follow_game())
     done, _ = await asyncio.wait({main, game}, return_when=asyncio.FIRST_COMPLETED)
     if main in done:
@@ -290,8 +310,8 @@ def main():
     args = ap.parse_args()
     saved = companion.read_config()
     mode = args.mode or (saved.get("mode") if saved.get("mode") in ("play", "host", "host-only") else "play")
-    if mode == "host-only":
-        make_console()
+    if mode == "host-only" or (mode == "host" and getattr(sys, "frozen", False)):
+        make_console()                                    # (host: a window to close to stop it, now that it stays up)
     else:
         quiet_streams()
     companion.setup_logging(args.verbose)
@@ -320,6 +340,8 @@ def main():
         return
     if not saved.get("name") and not args.name:
         args.name = ue4ss.steam_name()                    # friends know them by it (else the Windows user name)
+    if mode == "play" and not args.server and not saved.get("server") and DEFAULT_SERVER:
+        args.server, args.port = DEFAULT_SERVER, args.port or 24242
     joining = args if mode == "play" else argparse.Namespace(server=None, port=None, password=None, name=args.name)
     cfg = companion.load_config(joining, ask_server=False, ask=False)
     if mode == "host":

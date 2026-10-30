@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -397,9 +398,26 @@ class Servers:
             return None
         server = self.hosted[0].mp_server
         port = self.hosting[0]
-        return {"port": port, "addresses": netinfo.addresses(port), "settings": server.status()["settings"],
+        return {"port": port, "addresses": self.host_addresses(port), "settings": server.status()["settings"],
                 "name": server.name(), "players": len(server.clients), "public_status": server.public_status,
                 "playing_here": self.play_local, "admin_code": server.store.settings["admin_code"]}
+
+    def host_addresses(self, port: int) -> list[dict]:
+        """netinfo.addresses (it runs `tailscale status`), cached: refreshed in a thread at most every 30 s, so the
+        page's polling never holds up the event loop (the first answer may come a moment later)."""
+        c = self.__dict__.setdefault("_addr_cache", {"port": None, "at": -1e9, "list": [], "busy": False})
+        if (c["port"] != port or time.monotonic() - c["at"] > 30) and not c["busy"]:
+            c["busy"] = True
+
+            def refresh():
+                try:
+                    c["list"], c["port"] = netinfo.addresses(port), port
+                except Exception as e:                     # noqa: BLE001
+                    log.debug("addresses: %s", e)
+                finally:
+                    c["at"], c["busy"] = time.monotonic(), False
+            threading.Thread(target=refresh, daemon=True).start()
+        return c["list"] if c["port"] == port else []
 
     # ------------------------------------------------------------------ admin console
     async def admin(self, op: str, local: bool = False, **fields) -> dict:
@@ -465,6 +483,8 @@ class Servers:
                             spot = (x + layout[1][0] * scale, y + layout[1][1] * scale, scale)
             except (GameError, OSError, ValueError, KeyError, TypeError) as e:
                 log.debug("menu item: %s", e)
+            except Exception as e:                         # noqa: BLE001 - keep the menu item alive
+                log.debug("menu item: %r", e, exc_info=e)
             if spot:
                 self.menu_item.place(*spot)
             else:
@@ -554,6 +574,7 @@ class Servers:
                 saved.append(await self.row(current))
             return {"name": self.cfg.get("name"), "version": self.version, "current": current,
                     "connected": bool(self.writer and self.me_id), "error": self.connect_block or self.notice,
+                    "notice_code": getattr(self, "notice_code", None),
                     "server": self.server_info, "admin": self.is_admin, "players": len(self.remotes),
                     "saved": saved, "public": self.public["list"], "public_errors": self.public["errors"],
                     "public_at": self.public["at"], "directories": self.directories(),

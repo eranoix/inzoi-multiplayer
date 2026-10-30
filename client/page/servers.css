@@ -231,3 +231,67 @@ svg { display: block; }
 .inline .field { flex: 1; margin-bottom: 0; }
 .inline .btn { width: 160px; margin-bottom: 0; }
 .code { font-family: Consolas, monospace; font-size: 22px; letter-spacing: 2px; }
+
+/* ---------------------------------------------------------------- keyboard focus, readability */
+button:focus { outline: none; }
+button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible, .check:focus-visible {
+  outline: 3px solid #ffe08a; outline-offset: 2px; }
+.empty-details { color: rgba(255, 255, 255, 0.85); }
+.details h3, .modal h3 { color: rgba(255, 255, 255, 0.85); }
+.facts dt, .modrow .ms, .addrrow .how, .card .k, .table th { color: rgba(255, 255, 255, 0.85); }
+.note, .list-head .note, .details .addr, .field .hint, .switch .what { opacity: 1; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+/* ---------------------------------------------------------------- top bar: couple mode switch, language */
+.couple-toggle { position: absolute; left: 1250px; top: 18px; height: 32px; display: flex; align-items: center; gap: 10px;
+  font-size: 17px; color: #fff; padding: 0 12px 0 6px; border-radius: 16px; }
+.couple-toggle:hover { background: rgba(255, 255, 255, 0.12); }
+.couple-toggle .knob { width: 44px; height: 24px; border-radius: 12px; background: rgba(255, 255, 255, 0.35); position: relative; flex-shrink: 0; transition: background 0.2s; }
+.couple-toggle .knob::after { content: ""; position: absolute; left: 3px; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: left 0.2s; }
+.couple-toggle.on .knob { background: var(--blue); }
+.couple-toggle.on .knob::after { left: 23px; }
+.lang { position: absolute; left: 1700px; top: 18px; }
+.lang select { height: 32px; border-radius: 16px; border: 1.5px solid #d7d9da; background: transparent; color: #fff; padding: 0 12px;
+  font-size: 15px; cursor: pointer; }
+.lang select option { color: #222; background: #fff; }
+
+/* ---------------------------------------------------------------- couple mode: two big actions instead of the lists */
+.couple { display: none; }
+#stage.couple-on .tabs, #stage.couple-on .head-title, #stage.couple-on .search, #stage.couple-on .filters,
+#stage.couple-on .list-head, #stage.couple-on .sort, #stage.couple-on .rows, #stage.couple-on .details,
+#stage.couple-on .actions { display: none; }
+#stage.couple-on .couple { display: block; position: absolute; left: 260px; top: 110px; width: 1400px; bottom: 40px;
+  overflow-y: auto; user-select: text; }
+.couple h1 { font-size: 34px; font-weight: 600; margin-bottom: 22px; }
+.couple h3 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.8px; color: rgba(255, 255, 255, 0.9); margin: 26px 0 10px; font-weight: 600; }
+.couple-status { display: flex; align-items: center; gap: 16px; padding: 18px 22px; border-radius: 12px; font-size: 21px; line-height: 1.4;
+  background: rgba(0, 0, 0, 0.18); border: 2px solid rgba(255, 255, 255, 0.4); margin-bottom: 30px; }
+.couple-status .ico { width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 22px; font-weight: 700; background: #e3e5e6; color: #33393d; }
+.couple-status .txt { flex: 1; min-width: 0; }
+.couple-status .sub { display: block; font-size: 17px; color: var(--sub); }
+.couple-status.on { border-color: #8fe39c; background: rgba(60, 120, 70, 0.25); }
+.couple-status.on .ico { background: #8fe39c; }
+.couple-status.wait { border-color: var(--warn); background: rgba(120, 90, 30, 0.22); }
+.couple-status.wait .ico { background: var(--warn); }
+.couple-status.bad { border-color: var(--bad); background: rgba(130, 50, 40, 0.28); }
+.couple-status.bad .ico { background: var(--bad); }
+.couple-status .btn { width: 220px; margin: 0; flex-shrink: 0; }
+.couple-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; }
+.couple-col { min-width: 0; }
+.couple .big { width: 100%; height: 150px; border-radius: 20px; background: var(--blue); color: var(--pill-ink); font-size: 30px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center; gap: 18px; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15); }
+.couple .big svg { width: 40px; height: 40px; }
+.couple .big:hover:not([disabled]) { background: #c4e5ff; }
+.couple .big[disabled] { cursor: default; opacity: 0.6; }
+.couple .big.done { background: #c3ead9; color: #2b5546; opacity: 1; }
+.couple-help { font-size: 18px; line-height: 1.5; color: #fff; margin-top: 14px; }
+.couple .addrrow .a { font-size: 24px; }
+.couple .addrrow .how { font-size: 15px; }
+.couple .note { font-size: 16px; }
+.couple-buttons { display: flex; gap: 14px; margin-top: 20px; }
+.couple-buttons .btn { margin: 0; }
+.couple-saved { display: flex; align-items: center; gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.couple-saved .n { flex: 1; min-width: 0; font-size: 19px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.couple-saved .s { display: block; font-size: 15px; font-weight: 400; color: var(--sub); }
+.btn.small { width: 180px; margin: 0; }

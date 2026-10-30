@@ -40,6 +40,7 @@ function M.attach(lobby)
     U.on_click(MP.menu_button.BW_Button, function() MP.menu.clicked() end)     -- (re)bind to the code loaded now
     return
   end
+  pcall(U.prune_handlers)                     -- a new menu: the old one's item (and any closed page) is gone
   WBL = WBL or StaticFindObject("/Script/UMG.Default__WidgetBlueprintLibrary")
   local idx = box:GetChildIndex(ng)
   local w = WBL:Create(lobby, ng:GetClass(), lobby:GetOwningPlayer())

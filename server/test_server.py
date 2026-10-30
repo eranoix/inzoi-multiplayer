@@ -11,14 +11,15 @@ import inzoi_mp_server as mp  # noqa: E402
 
 
 class Fake:
-    def __init__(self, port, name, key=None, password=""):
-        self.port, self.name, self.password = port, name, password
+    def __init__(self, port, name, key=None, password="", **extra):
+        self.port, self.name, self.password, self.extra = port, name, password, extra
         self.key = key or secrets.token_urlsafe(24)
         self.skip_others = False
 
     async def connect(self):
         self.r, self.w = await asyncio.open_connection("127.0.0.1", self.port, limit=mp.MAX_LINE)
-        await self.send({"t": "hello", "protocol": mp.PROTOCOL, "key": self.key, "name": self.name, "password": self.password})
+        await self.send({"t": "hello", "protocol": mp.PROTOCOL, "key": self.key, "name": self.name, "password": self.password,
+                        **self.extra})
         return await self.expect("welcome", "error")
 
     async def send(self, msg):
@@ -42,16 +43,18 @@ async def run():
         port = srv.sockets[0].getsockname()[1]
 
         bad = Fake(port, "Mallory", password="nope")
-        assert (await bad.connect())["error"] == "wrong server password"
+        err = await bad.connect()
+        assert err["error"] == "wrong server password" and err["code"] == "wrong_password" and err["fatal"]
 
         a = Fake(port, "Ana", password="pw")
         wa = await a.connect()
         assert wa["t"] == "welcome" and wa["players"] == [] and wa["leader"] == wa["id"]
 
-        b = Fake(port, "Ben", password="pw")
+        b = Fake(port, "Ben", password="pw", version="0.8.1")
         wb = await b.connect()
-        assert [p["name"] for p in wb["players"]] == ["Ana"]
-        assert (await a.expect("joined"))["player"]["name"] == "Ben"
+        assert [p["name"] for p in wb["players"]] == ["Ana"] and wb["server_version"] == mp.VERSION
+        joined = (await a.expect("joined"))["player"]
+        assert joined["name"] == "Ben" and joined["version"] == "0.8.1"
 
         await a.send({"t": "profile", "profile": {"first_name": "Ana", "gender": "Female"}})
         assert (await b.expect("profile"))["profile"]["first_name"] == "Ana"
@@ -80,13 +83,29 @@ async def run():
         h = await b.expect("house")
         assert h["house"] == house
 
-        # Ana reconnects with the same key: same id, old session kicked, Ben is told she left and re-joined.
+        # A malformed message gets an error (not fatal), and the connection stays open.
+        await b.send({"t": "admin_claim", "code": {"not": "a string"}, "ref": 6})
+        await b.expect("admin")
+        r, w = await asyncio.open_connection("127.0.0.1", port)      # an exception in a handler (bad int)
+        w.write(b'{"t": "announce_restart", "in": "soon"}\n{"t": "info"}\n')
+        await w.drain()
+        e = json.loads(await r.readline())
+        assert e["t"] == "error" and e["code"] == "bad_request" and not e.get("fatal"), e
+        assert json.loads(await r.readline())["t"] == "info"          # still connected
+        w.close()
+
+        # Ana reconnects with the same key (a Wi-Fi blip): same id, old session kicked, and Ben is NOT told she left:
+        # only "rejoined", her Zoi stays.
         a2 = Fake(port, "Ana", key=a.key, password="pw")
         wa2 = await a2.connect()
-        assert wa2["id"] == wa["id"] and len(wa2["houses"]) == 1
+        assert wa2["id"] == wa["id"] and len(wa2["houses"]) == 1 and wa2["leader"] == wa["id"]
         assert (await a.expect("kicked"))["t"] == "kicked"
-        assert (await b.expect("left"))["id"] == wa["id"]
-        assert (await b.expect("joined"))["player"]["profile"]["first_name"] == "Ana"
+        rj = await b.expect("rejoined")
+        assert rj["player"]["id"] == wa["id"] and rj["player"]["profile"]["first_name"] == "Ana"
+        assert rj["player"]["state"]["yaw"] == 90                       # her last state carries over
+        await asyncio.sleep(0.2)                                         # the old session's hang-up is handled
+        await b.send({"t": "who"})
+        assert sorted(p["name"] for p in (await b.expect("who"))["players"]) == ["Ana", "Ben"]   # no left/joined between
 
         # Leader hand-off when the leader disconnects.
         a2.w.close()
@@ -96,11 +115,81 @@ async def run():
         b.w.close()
         srv.close()
         await srv.wait_closed()
+    await hardening()
     await mods_shared()
     await mods_hosted()
     await shared_world()
     await servers_page()
     print("all server tests passed")
+
+
+async def hardening():
+    """A password with accents, an oversized line before hello, a guest can't take the hosted clock, garbage collection
+    of world files nothing uses, a damaged server.json falls back to its backup, admin code guessing is slowed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        server = mp.Server(mp.Store(Path(tmp)), password="cora\u00e7\u00e3o", hosted=True)
+        srv = await asyncio.start_server(server.handle, "127.0.0.1", 0, limit=mp.MAX_LINE)
+        port = srv.sockets[0].getsockname()[1]
+        pw = "cora\u00e7\u00e3o"                                        # "coracao" with cedilla and tilde
+        err = await Fake(port, "Mallory", password="coracao").connect()
+        assert err["t"] == "error" and err["code"] == "wrong_password" and err["fatal"]
+        err = await Fake(port, "Mallory", password="\u00e7\u00e3\u00e9").connect()
+        assert err["code"] == "wrong_password"
+        err = await Fake(port, "Old", password=pw, protocol=99).connect()
+        assert err["code"] == "version_mismatch"
+        host = Fake(port, "Host", password=pw, host=True)
+        assert (await host.connect())["t"] == "welcome"
+        host.skip_others = True
+        guest = Fake(port, "Guest", password=pw)
+        wg = await guest.connect()
+        assert wg["t"] == "welcome" and wg["leader"] == wg["host"]
+        await guest.send({"t": "take_leader"})
+        assert (await guest.expect("leader"))["id"] == wg["host"]        # the host keeps the clock
+        assert server.leader.id == wg["host"]
+
+        # An oversized line before hello: refused and hung up (after hello up to MAX_LINE is fine: see the house test).
+        r, w = await asyncio.open_connection("127.0.0.1", port, limit=mp.MAX_LINE)
+        w.write(b'{"t": "hello", "pad": "' + b"x" * (200 * 1024) + b'"}\n')
+        await w.drain()
+        e = json.loads(await asyncio.wait_for(r.readline(), 3))
+        assert e["code"] == "too_large" and e["fatal"], e
+        try:
+            assert await asyncio.wait_for(r.read(), 3) == b""
+        except ConnectionResetError:                                      # hung up with our bytes unread: a reset
+            pass
+        w.close()
+
+        # Admin code guessing: 5 tries a minute.
+        for i in range(6):
+            await guest.send({"t": "admin_claim", "code": f"guess{i}", "ref": i})
+            m = await answer(guest, i)
+        assert m["ok"] is False and m["code"] == "rate_limited"
+
+        # Garbage collection: a world file no version uses goes (once old), mod files and kept versions stay.
+        st = server.store
+        mod, w1, w2, orphan = b"MOD", b"WORLD1", b"WORLD2", b"ORPHAN"
+        st.set_mods("pzz", "Zed", [{"id": "M", "files": [{"p": "m.pak", "h": sha(mod), "s": 3}]}])
+        for data in (mod, w1, w2, orphan):
+            st.blob(sha(data)).write_bytes(data)
+        st.set_world_save({"version": 1, "files": [{"p": "w.usvx", "h": sha(w1), "s": 6}]})
+        st.set_world_save({"version": 2, "files": [{"p": "w.usvx", "h": sha(w2), "s": 6}]})
+        part = st.blob("a" * 64).with_name("a" * 64 + ".p1.part")
+        part.write_bytes(b"half")
+        old = mp.now() - 2 * 86400
+        for f in (st.root / "blobs").iterdir():
+            mp.os.utime(f, (old, old))
+        st.gc_blobs()
+        assert [st.blob(sha(d)).exists() for d in (mod, w1, w2, orphan)] == [True, True, True, False]
+        assert not part.exists()
+
+        # server.json damaged: its backup is used (the password survives), loudly.
+        st.save_settings()
+        (st.root / "server.json").write_text("{broken", "utf-8")
+        assert mp.Store(st.root).settings["password"] == pw
+        for x in (host, guest):
+            x.w.close()
+        srv.close()
+        await srv.wait_closed()
 
 
 async def answer(player, ref):

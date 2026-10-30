@@ -2,7 +2,7 @@
 - whoever is behind catches up with whoever is furthest ahead; nobody is ever pushed back
 - pausing is your own: a paused player isn't caught up and doesn't hold anyone back
 - speed is normal while anyone's awake, fast while everyone's asleep; alone on the server, speed is yours
-- season and weather follow the leader
+- season and weather follow the leader; the leader's clock catches up like everyone's
 
     python tools/test_time_sync.py
 """
@@ -104,6 +104,15 @@ async def main():
     comp, sent = make(g, leader=True)
     await comp.sync_world()
     assert sent == [{"t": "world", "world": {"season": "Summer", "weather": "Sunny"}}]
+
+    # The leader (host) catches up too, when a friend is ahead (it paused); its season/weather still go out.
+    g = StandIn(9, 0, season="Summer", weather="Sunny")
+    comp, sent = make(g, leader=True)
+    friend(comp, "a", [9, 40])
+    comp.leader_world = {"season": "Winter", "weather": "Snow"}     # (never followed by the leader itself)
+    await comp.sync_world()
+    assert commands(g, "environment.time_skip") == [{"minutes": 40}], g.sent
+    assert not commands(g, "environment.change_season") and sent[0]["t"] == "world"
 
     # Speed: a friend awake -> back to normal; everyone asleep -> fast; alone or paused -> left alone.
     g = StandIn(9, 0, speed=3)

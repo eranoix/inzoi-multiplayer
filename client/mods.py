@@ -210,21 +210,28 @@ class Transfer:
         return (await self.expect("blob_missing"))["h"]
 
     async def upload(self, path: Path, sha: str, progress=None):
-        size, offset = path.stat().st_size, 0
-        with path.open("rb") as f:
-            while True:
-                data = f.read(CHUNK)
-                end = offset + len(data) >= size
-                await self.send({"t": "blob_put", "h": sha, "o": offset, "d": base64.b64encode(data).decode(),
-                                 "end": end})
-                offset += len(data)
-                if progress:
-                    progress(len(data))
-                if end:
-                    break
-        m = await self.expect("blob_ok", "blob_bad")
-        if m.get("t") != "blob_ok":
-            raise ConnectionError(f"upload of {path.name} failed: {m.get('error')}")
+        """Send one file. blob_bad (a bad piece; the server wants it again from offset 0): one more try, from 0."""
+        size = path.stat().st_size
+        for attempt in range(2):
+            offset = 0
+            with path.open("rb") as f:
+                while True:
+                    data = f.read(CHUNK)
+                    end = offset + len(data) >= size
+                    await self.send({"t": "blob_put", "h": sha, "o": offset, "d": base64.b64encode(data).decode(),
+                                     "end": end})
+                    offset += len(data)
+                    if progress and not attempt:
+                        progress(len(data))
+                    if end:
+                        break
+            m = await self.expect("blob_ok", "blob_bad")
+            if m.get("t") == "blob_ok":
+                return
+            if m.get("t") != "blob_bad" or m.get("o", 0) != 0 or attempt:
+                break
+            log.info("upload of %s: the server asked for it again (%s)", path.name, m.get("error"))
+        raise ConnectionError(f"upload of {path.name} failed: {m.get('error')}")
 
     async def download(self, sha: str, dest: Path, progress=None) -> str | None:
         """Fetch one file into dest (checked against its sha256). Returns None, or why it isn't available yet."""

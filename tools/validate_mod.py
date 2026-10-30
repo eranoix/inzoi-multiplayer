@@ -25,7 +25,7 @@ def main():
     a = ap.parse_args()
     bad = False
     for f in sorted(LUA.rglob("*.lua")):
-        if f.name in ("MPCmd.lua", "MPBulk.lua"):
+        if f.name in ("MPCmd.lua", "MPBulk.lua", "MPSeq.lua"):
             continue
         slot = f.relative_to(LUA).as_posix()
         w = call("modkit_write_lua_script", _url=MODKIT_MCP, plugin=SCRATCH, path=slot, content=f.read_text("utf-8"))

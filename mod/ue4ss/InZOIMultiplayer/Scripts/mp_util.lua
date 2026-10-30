@@ -11,6 +11,21 @@ U.VISIBLE, U.COLLAPSED, U.HIDDEN, U.HIT_TEST_INVISIBLE, U.SELF_HIT_TEST_INVISIBL
 
 function U.log(s) print("[MP] " .. tostring(s) .. "\n") end
 
+-- The same line at most once per `every` seconds (errors repeated every tick would flood UE4SS.log).
+local logged, logged_n = {}, 0
+function U.log_limited(s, every)
+  s = tostring(s)
+  local now = os.clock()
+  local last = logged[s]
+  if last and now - last < (every or 10) then return end
+  if not last then
+    logged_n = logged_n + 1
+    if logged_n > 200 then logged, logged_n = {}, 1 end    -- (messages with changing text: keep it bounded)
+  end
+  logged[s] = now
+  U.log(s)
+end
+
 function U.valid(o) return o ~= nil and o.IsValid ~= nil and o:IsValid() end
 
 function U.addr(o) return U.valid(o) and o:GetAddress() or 0 end
@@ -149,6 +164,7 @@ end
 MP = MP or {}
 MP.clicks = MP.clicks or {}
 MP.checks = MP.checks or {}
+MP.handler_w = MP.handler_w or {}                     -- address -> the widget it was registered for (see prune)
 
 function U.on_click(button, fn)
   if not U.valid(button) then return end
@@ -156,6 +172,7 @@ function U.on_click(button, fn)
   pcall(function() d:Remove(button, "ForceLayoutPrepass") end)
   d:Add(button, "ForceLayoutPrepass")
   MP.clicks[button:GetAddress()] = fn
+  MP.handler_w[button:GetAddress()] = button
 end
 
 function U.on_check(checkbox, fn)
@@ -164,11 +181,25 @@ function U.on_check(checkbox, fn)
   d:Clear()                                           -- also drops the game's own handler (it would act on mod data)
   d:Add(checkbox, "ForceVolatile")
   MP.checks[checkbox:GetAddress()] = fn
+  MP.handler_w[checkbox:GetAddress()] = checkbox
 end
 
 function U.drop_handlers(w)
   local a = U.addr(w)
-  MP.clicks[a], MP.checks[a] = nil, nil
+  MP.clicks[a], MP.checks[a], MP.handler_w[a] = nil, nil, nil
+end
+
+-- Forget the handlers of widgets that are gone (a page or menu that was rebuilt), so the tables don't grow and a new
+-- widget at a reused address doesn't run an old page's handler. Handlers registered without a widget kept (before a
+-- reload of this file) are left alone.
+function U.prune_handlers()
+  local gone = {}
+  for a, w in pairs(MP.handler_w) do
+    local ok, alive = pcall(U.valid, w)
+    if not (ok and alive) then gone[#gone + 1] = a end
+  end
+  for _, a in ipairs(gone) do MP.clicks[a], MP.checks[a], MP.handler_w[a] = nil, nil, nil end
+  return #gone
 end
 
 -- ------------------------------------------------------------------------------------------------ talking to the program

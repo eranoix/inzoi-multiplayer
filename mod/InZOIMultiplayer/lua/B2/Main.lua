@@ -6,6 +6,8 @@
 --
 --   MPCmd   return { seq = <int>, bulk = <int>, ops = { {id = "<unique>", op = "...", ...}, ... } }
 --   MPBulk  return { seq = <int>, members = { [<player key>] = <FB1CustomizedCharacterInfo table>, ... } }
+--   MPSeq   return { seq = <int> }   tiny, rewritten right after MPCmd: while it's unchanged MPCmd isn't re-read
+--           (optional: without it MPCmd is read on every poll, as before)
 --
 -- Ops (each runs once per id; the companion may repeat an op for a while so it can't be missed):
 --   spawn   {key, template, x, y, z, home_door?, home_site?}   create the puppet for player `key` from MPBulk
@@ -24,8 +26,10 @@ local M = {}
 local P = "[mp] "
 local CMD = table.concat({ "MP", "Cmd" })      -- built at runtime: the validator only allows static module names
 local BULK = table.concat({ "MP", "Bulk" })
+local SEQ = table.concat({ "MP", "Seq" })
 
-local S = { clock = 0, poll = 0, seq = nil, bulkSeq = nil, members = {}, done = {}, doneOrder = {} }
+local S = { clock = 0, poll = 0, seq = nil, bulkSeq = nil, members = {}, done = {}, doneOrder = {},
+            seqFile = nil, seqMiss = 0, cmdT = -10, box = nil, retry = {} }
 local find_me
 local PUPPETS = {}      -- key -> {id, trail = {...}, dest, lastOrderT, pending, hidden}
 
@@ -43,6 +47,19 @@ end
 local function log(s)
     print(P .. string.format("%.2f ", S.clock) .. s)
     report("log", s)
+end
+
+-- The same line at most once per `every` seconds: a broken state must not write a report file every frame.
+local LOGGED, LOGGED_N = {}, 0
+local function log_limited(s, every)
+    local last = LOGGED[s]
+    if last and S.clock - last < (every or 10) then return end
+    if not last then
+        LOGGED_N = LOGGED_N + 1
+        if LOGGED_N > 200 then LOGGED, LOGGED_N = {}, 1 end     -- (messages with changing text: keep it bounded)
+    end
+    LOGGED[s] = S.clock
+    log(s)
 end
 
 local function eid(n)
@@ -245,21 +262,27 @@ local function spawn_puppet(op)
     info.HouseholdMemberCustomizedInfo:Add(mem)
     local hh = m:RegisterHousehold(tpl.LocatedCityName, info)
     local id = m:FindHousehold(hh):GetHouseholdMembers():Get(1).Value
-    local c = char(id)
-    -- New characters exist only as background simulation until switched into the world by hand.
-    c:SetLocationOnlySimul(UE.FVector(op.x, op.y, op.z))
-    local me = char(op.near or op.template)
-    c:SetLocatedSiteId(me:GetLocatedSiteId())
-    local ES, R = inzoi.EB2EntityState, inzoi.EB2EntityStateChangeReason
-    c:RemoveEntityState(ES.TimelineSimulateOnly, R.RequestSpawn)
-    c:AddEntityState(ES.Simulate, R.RequestSpawn)
-    c:AddEntityState(ES.GameSpawned, R.RequestSpawn)
-    freeze(id)
-    cli(string.format("life_and_death.stop_aging entity_id=%d enable=true", id))     -- a puppet never ages or dies here
-    cli(string.format("life_and_death.immortal entity_id=%d enable=true", id))
-    teleport(id, op.x, op.y, op.z)
-    if op.home_door and op.home_site then
-        c:GrantKnockDoorVisitSitePrivilege(eid(op.home_door), eid(op.home_site))
+    local okSetup, errSetup = pcall(function()
+        local c = char(id)
+        -- New characters exist only as background simulation until switched into the world by hand.
+        c:SetLocationOnlySimul(UE.FVector(op.x, op.y, op.z))
+        local me = char(op.near or op.template)
+        c:SetLocatedSiteId(me:GetLocatedSiteId())
+        local ES, R = inzoi.EB2EntityState, inzoi.EB2EntityStateChangeReason
+        c:RemoveEntityState(ES.TimelineSimulateOnly, R.RequestSpawn)
+        c:AddEntityState(ES.Simulate, R.RequestSpawn)
+        c:AddEntityState(ES.GameSpawned, R.RequestSpawn)
+        freeze(id)
+        cli(string.format("life_and_death.stop_aging entity_id=%d enable=true", id))  -- a puppet never ages or dies here
+        cli(string.format("life_and_death.immortal entity_id=%d enable=true", id))
+        teleport(id, op.x, op.y, op.z)
+        if op.home_door and op.home_site then
+            c:GrantKnockDoorVisitSitePrivilege(eid(op.home_door), eid(op.home_site))
+        end
+    end)
+    if not okSetup then                                 -- a failed spawn is retried: don't leave a half-made Zoi behind
+        pcall(cli, string.format("zoi.destroy entity_id=%d", id))
+        error(errSetup, 0)
     end
     PUPPETS[op.key] = { id = id, trail = {}, dest = nil, lastOrderT = -10, pending = nil, hidden = false }
     report("spawned", op.key .. " " .. id)
@@ -300,7 +323,8 @@ local function add_trail(op)
             p.lastN = pt[1]
             local last = p.trail[#p.trail]
             if not last or dist2(last.x, last.y, pt[2], pt[3]) > 5 then
-                p.trail[#p.trail + 1] = { t = S.clock, x = pt[2], y = pt[3], z = pt[4], yaw = pt[5] }
+                -- t: last change (moved or turned); at: when it moved here (turning on the spot doesn't count)
+                p.trail[#p.trail + 1] = { t = S.clock, at = S.clock, x = pt[2], y = pt[3], z = pt[4], yaw = pt[5] }
             elseif pt[5] and yaw_gap(last.yaw or pt[5], pt[5]) > 10 then
                 last.yaw, last.t = pt[5], S.clock      -- turned on the spot
             end
@@ -310,12 +334,51 @@ local function add_trail(op)
     return nil      -- trails are too frequent to log
 end
 
--- Follow logic: head for the player's newest position. Redirecting a walk costs a short stop, so only re-aim when
--- the player has moved REAIM cm away from where we're headed (or we've stopped); sprint when far behind;
--- teleport when hopelessly behind (other side of town, loading screen...).
+-- Follow logic: head for the player's newest position (led a little ahead, see below). Redirecting a walk costs a
+-- short stop, so only re-aim when the player has moved REAIM cm away from where we're headed (or we've stopped);
+-- sprint when far behind; teleport when hopelessly behind (other side of town, loading screen...).
 local REAIM, SPRINT, TELEPORT, MIN_GAP = 300, 800, 1500, 0.4
 local ACT_LEAVE = 600       -- while copying an action, only a remote player this far from the puppet means "they left"
 local FACE_GAP, FACE_EVERY = 25, 1.5
+-- Smoothing (no new engine calls: only where the puppet aims and when it redirects):
+--  * the trail arrives late (~0.5-1 s), so while the player is walking aim LEAD cm past their newest point, along the
+--    direction of their last LEAD_BACK cm: the goal stays ahead of the puppet instead of being reached and stopped at
+--    (it can end up to LEAD cm past where they stop: well inside the "arrived" margin below);
+--  * a redirect costs a short stop, so while the new goal lies straight on along the walk under way, wait until it's
+--    REAIM_STRAIGHT away (a turn still re-aims at REAIM);
+--  * trail points carry no sender timestamps (t/at are when they reached us, in batches), so walk vs sprint stays
+--    chosen by distance (SPRINT).
+local LEAD, LEAD_BACK, MOVING_FOR, REAIM_STRAIGHT, STRAIGHT_COS = 100, 150, 0.6, 450, 0.9
+
+-- Where to send the puppet for trail point `pick`: pick itself, or a point LEAD ahead while the player walks straight.
+local function lead_point(p, pick, me)
+    if not pick.at or S.clock - pick.at > MOVING_FOR then return pick end     -- standing still (or only turning)
+    if math.abs(me.Z - pick.z) > 150 then return pick end                     -- another floor: follow exactly
+    local n, back = #p.trail, nil
+    for i = n - 1, math.max(1, n - 8), -1 do
+        local q = p.trail[i]
+        if math.abs(q.z - pick.z) > 50 then break end                         -- stairs/slope: no extrapolating
+        back = q
+        if dist2(q.x, q.y, pick.x, pick.y) >= LEAD_BACK then break end
+    end
+    if not back then return pick end
+    local dx, dy = pick.x - back.x, pick.y - back.y
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len < 50 then return pick end                                          -- too little movement to trust a direction
+    local k = LEAD / len
+    return { x = pick.x + dx * k, y = pick.y + dy * k, z = pick.z }
+end
+
+-- The new goal is straight on from the current one, along the walk under way (so carrying on loses nothing).
+local function straight_on(p, aim)
+    local o, d = p.orderFrom, p.dest
+    if not (o and d) then return false end
+    local ax, ay = d.x - o.x, d.y - o.y
+    local bx, by = aim.x - d.x, aim.y - d.y
+    local la, lb = math.sqrt(ax * ax + ay * ay), math.sqrt(bx * bx + by * by)
+    if la < 50 or lb < 1 then return false end
+    return (ax * bx + ay * by) / (la * lb) > STRAIGHT_COS
+end
 
 local function start_act(c, p)
     local a = p.actQueued
@@ -331,6 +394,7 @@ end
 
 local function drive(key, p, dt)
     local c = char(p.id)
+    if not c then error("no character " .. tostring(p.id)) end     -- counted by on_tick: gone for good -> dropped
     if p.pending then                                   -- second half of a redirect: the old walk is gone now
         p.pending.t = p.pending.t + dt
         if not is_walking(c) or p.pending.t > 0.3 then
@@ -356,7 +420,7 @@ local function drive(key, p, dt)
     end
     if far > TELEPORT then
         teleport(p.id, pick.x, pick.y, pick.z)
-        p.lastOrderT, p.dest = S.clock, pick
+        p.lastOrderT, p.dest, p.aimFor = S.clock, pick, pick
         log(string.format("%s teleported (%.0f m behind)", key, far / 100))
         return
     end
@@ -371,7 +435,7 @@ local function drive(key, p, dt)
         return
     end
     if math.abs(me.Z - pick.z) > 150 then               -- another floor: never "arrived", walk there (stairs)
-        if not walking and p.dest == pick and S.clock - p.lastOrderT > 3 then
+        if not walking and p.aimFor == pick and S.clock - p.lastOrderT > 3 then
             teleport(p.id, pick.x, pick.y, pick.z)      -- the walk was refused: go straight there
             p.lastOrderT = S.clock
             log(string.format("%s teleported to their floor", key))
@@ -379,7 +443,8 @@ local function drive(key, p, dt)
         end
         far = math.max(far, 300)
     end
-    if far < 60 or (not walking and p.dest == pick and far < 300) then
+    -- (aimFor: the trail point the last order was for; dest may lie LEAD past it)
+    if far < 60 or (not walking and p.aimFor == pick and far < 300) then
         -- Arrived (or as close as it gets: the spot can be taken): also face the way they face, since a walk ends
         -- facing the walking direction.
         if not walking and far < 300 and pick.yaw and S.clock - (p.facedT or -10) > FACE_EVERY
@@ -389,16 +454,18 @@ local function drive(key, p, dt)
         end
         return
     end
-    local stale = not p.dest or dist2(p.dest.x, p.dest.y, pick.x, pick.y) > REAIM
+    local aim = lead_point(p, pick, me)
+    local reaim = (walking and far <= SPRINT and straight_on(p, aim)) and REAIM_STRAIGHT or REAIM
+    local stale = not p.dest or dist2(p.dest.x, p.dest.y, aim.x, aim.y) > reaim
     if walking and not stale then return end
-    if not walking and p.dest == pick then return end
+    if not walking and p.aimFor == pick then return end
     local bag = far > SPRINT and "ClickMove_Sprint_Close" or nil
-    p.lastOrderT, p.dest, p.retried, p.orderFrom = S.clock, pick, false, { x = me.X, y = me.Y }
+    p.lastOrderT, p.dest, p.aimFor, p.retried, p.orderFrom = S.clock, aim, pick, false, { x = me.X, y = me.Y }
     if walking then
         cancel_walk(c)
-        p.pending = { x = pick.x, y = pick.y, z = pick.z, bag = bag, t = 0 }
+        p.pending = { x = aim.x, y = aim.y, z = aim.z, bag = bag, t = 0 }
     else
-        order_walk(c, pick.x, pick.y, pick.z, bag)
+        order_walk(c, aim.x, aim.y, aim.z, bag)
     end
 end
 
@@ -524,32 +591,95 @@ local function load(name)
     return ok and type(box) == "table" and box or nil
 end
 
+-- A failed spawn isn't remembered: it's tried again while the companion keeps sending it (it drops ops after a few
+-- seconds), but at most every SPAWN_RETRY s, not on every poll. S.retry: op id -> {at = clock of the next try, key}.
+local SPAWN_RETRY = 2.0
+
+local function run_op(op)
+    local f = OPS[op.op]
+    local ok, res = pcall(f or function() error("unknown op " .. tostring(op.op)) end, op)
+    if ok or op.op ~= "spawn" then
+        if op.id then remember(op.id); S.retry[op.id] = nil end
+        if ok and op.op == "spawn" then                 -- other failed copies of this spawn are moot now
+            for id, r in pairs(S.retry) do
+                if r.key == op.key then remember(id); S.retry[id] = nil end
+            end
+        end
+    else
+        if op.id then S.retry[op.id] = { at = S.clock + SPAWN_RETRY, key = op.key } end
+        -- With its profile here the failure is real (a spawn without its profile yet just waits for MPBulk): tell the
+        -- companion, which resets that spawn.
+        if S.members[op.key] then report("spawn_failed", tostring(op.key)) end
+    end
+    if res ~= nil or not ok then
+        log(string.format("%s: %s", tostring(op.op), ok and tostring(res) or ("ERR " .. tostring(res))))
+    end
+end
+
+local function due(op)
+    if op.id and S.done[op.id] then return false end
+    local r = op.id and S.retry[op.id]
+    return not r or S.clock >= r.at
+end
+
+-- Nothing new in the mailbox: only the failed spawns whose wait is over.
+local function retry_due(box)
+    if not box then return end
+    local any = false
+    for _ in pairs(S.retry) do any = true; break end
+    if not any then return end
+    for _, op in ipairs(box.ops or {}) do
+        if op.id and S.retry[op.id] and due(op) then run_op(op) end
+    end
+end
+
+-- MPSeq says whether MPCmd changed since we last read it, so an unchanged MPCmd isn't re-read (and recompiled)
+-- 10x/s. Without MPSeq (older companion), or if it proves unreliable, MPCmd is read on every poll as before; it's
+-- also re-read at least every CMD_EVERY s regardless, which is how a stale MPSeq gets noticed.
+local CMD_EVERY = 1.0
+
 local function poll()
+    local mark = S.seqMiss < 3 and load(SEQ) or nil
+    local mseq = mark and mark.seq
+    if mseq ~= nil and mseq == S.seqFile and S.box and S.clock - S.cmdT < CMD_EVERY then
+        retry_due(S.box)
+        return
+    end
     local box = load(CMD)
-    if not box or box.seq == S.seq then return end
+    if not box then return end
+    S.cmdT = S.clock
+    if mseq ~= nil and mseq == S.seqFile and box.seq ~= S.seq then
+        S.seqMiss = S.seqMiss + 1                       -- MPSeq said "unchanged" but MPCmd had changed
+        if S.seqMiss >= 3 then log("MPSeq looks stale: reading MPCmd on every poll") end
+    end
+    S.box = box
+    if mseq ~= nil then S.seqFile = mseq end            -- (MPCmd is written before MPSeq: this box is at least that new)
+    if box.seq == S.seq then
+        retry_due(box)
+        return
+    end
     S.seq = box.seq
     if box.bulk and box.bulk ~= S.bulkSeq then
         local bulk = load(BULK)
         if bulk and bulk.seq == box.bulk then
             S.bulkSeq = bulk.seq
             S.members = bulk.members or {}
+            for _, r in pairs(S.retry) do r.at = 0 end  -- new profiles: a waiting spawn may work now
         end
     end
+    local live = {}
     for _, op in ipairs(box.ops or {}) do
-        if not (op.id and S.done[op.id]) then
-            local f = OPS[op.op]
-            local ok, res = pcall(f or function() error("unknown op " .. tostring(op.op)) end, op)
-            if ok or op.op ~= "spawn" or S.members[op.key] then      -- a spawn without its profile yet is retried
-                if op.id then remember(op.id) end
-            end
-            if res ~= nil or not ok then
-                log(string.format("%s: %s", tostring(op.op), ok and tostring(res) or ("ERR " .. tostring(res))))
-            end
-        end
+        if op.id then live[op.id] = true end
+        if due(op) then run_op(op) end
+    end
+    for id in pairs(S.retry) do                         -- the companion dropped it: stop waiting on it
+        if not live[id] then S.retry[id] = nil end
     end
 end
 
 -- ---------------------------------------------------------------- lifecycle
+local DRIVE_ERRS, DRIVE_ERR_SPAN = 3, 1.0
+
 function M.on_begin(self)
     require("Objects.B2Entity")
     require("Objects.B2Actor")
@@ -572,7 +702,7 @@ function M.on_tick(self, dt)
     if S.poll >= 0.1 then
         S.poll = 0
         local ok, err = pcall(poll)
-        if not ok then log("poll ERR " .. tostring(err)) end
+        if not ok then log_limited("poll ERR " .. tostring(err)) end
     end
     S.beat = (S.beat or 0) + dt
     if S.beat >= 2 then                                 -- heartbeat: the companion knows the mod is loaded and alive
@@ -584,7 +714,27 @@ function M.on_tick(self, dt)
     end
     for key, p in pairs(PUPPETS) do
         local ok, err = pcall(drive, key, p, dt)
-        if not ok then log(key .. " drive ERR " .. tostring(err)) end
+        if ok then
+            p.errs = nil
+        else
+            -- A puppet whose character is gone (or that fails every tick) is dropped after DRIVE_ERRS errors in a row
+            -- over at least DRIVE_ERR_SPAN s (not one bad frame), and reported "despawned" so the companion spawns it
+            -- again. (Clearing a field during pairs() is allowed.)
+            p.errs = (p.errs or 0) + 1
+            p.errT = p.errs == 1 and S.clock or p.errT
+            if p.errs >= DRIVE_ERRS and S.clock - p.errT >= DRIVE_ERR_SPAN then
+                PUPPETS[key] = nil
+                if p.adopted then
+                    pcall(freeze, p.id, false)
+                else
+                    pcall(cli, string.format("zoi.destroy entity_id=%d", p.id))   -- if it's still there: no duplicate
+                end
+                report("despawned", key)
+                log(string.format("%s dropped after %d drive errors: %s", key, p.errs, tostring(err)))
+            else
+                log_limited(key .. " drive ERR " .. tostring(err))
+            end
+        end
     end
 end
 

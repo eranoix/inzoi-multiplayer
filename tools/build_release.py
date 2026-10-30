@@ -11,6 +11,7 @@ The first run creates build/venv with PyInstaller in it (needs the internet once
     inZOI-Multiplayer.exe               the program on its own
     inZOI-Multiplayer-<version>.zip     inZOI Multiplayer.exe, README.txt, server for Raspberry Pi or Linux/
 """
+import base64
 import json
 import os
 import re
@@ -28,7 +29,7 @@ DIST = ROOT / "dist"
 VENV_PY = BUILD / "venv" / "Scripts" / "python.exe"
 EXE_NAME = "inZOI Multiplayer"
 LINUX_SERVER = ["inzoi_mp_server.py", "PROTOCOL.md", "inzoi-mp.service"]
-SKIP_MOD = {"MPCmd.lua", "MPBulk.lua", "inject.json", "__pycache__", "out", "signals_dir.txt", "version.txt"}
+SKIP_MOD = {"MPCmd.lua", "MPBulk.lua", "MPSeq.lua", "inject.json", "__pycache__", "out", "signals_dir.txt", "version.txt"}
 # UE4SS (github.com/UE4SS-RE/RE-UE4SS, MIT), the script loader behind the main menu's Multiplayer button: the very
 # build that was tested with inZOI, checked by its sha256 (the "experimental-latest" release changes every day).
 UE4SS_ZIP = "UE4SS_v3.0.1-1165-g12ec45a0.zip"
@@ -159,7 +160,11 @@ def ue4ss_runtime() -> Path:
     if not zpath.exists():
         zpath.parent.mkdir(parents=True, exist_ok=True)
         print(f"downloading {UE4SS_URL}")
-        urllib.request.urlretrieve(UE4SS_URL, zpath)
+        try:
+            urllib.request.urlretrieve(UE4SS_URL, zpath)
+        except OSError as e:            # coop-casal: the pinned build left "experimental-latest"; build without it
+            print(f"UE4SS not available ({e}): building without it (the menu item is drawn over the game instead)")
+            return None
     digest = hashlib.sha256(zpath.read_bytes()).hexdigest()
     if digest != UE4SS_SHA256:
         raise SystemExit(f"{zpath} isn't the tested UE4SS build (sha256 {digest}); put the right one in build/cache")
@@ -194,8 +199,9 @@ def build_exe(version: str) -> Path:
         "--paths", str(ROOT / "client"), "--paths", str(ROOT / "server"),
         "--add-data", f"{stage / 'mod'}{os.pathsep}mod",
         "--add-data", f"{ROOT / 'client' / 'struct_cache.json'}{os.pathsep}.",
+        "--add-data", f"{ROOT / 'release' / 'coop-cert.cer'}{os.pathsep}.",     # the exe trusts its own publisher
         "--add-data", f"{ROOT / 'client' / 'page'}{os.pathsep}page",       # the servers page, with its font
-        "--add-data", f"{runtime}{os.pathsep}ue4ss_runtime",                # UE4SS, for the main menu's button
+        *(["--add-data", f"{runtime}{os.pathsep}ue4ss_runtime"] if runtime else []),   # UE4SS, for the menu button
         "--add-data", f"{stage / 'ue4ss_mod'}{os.pathsep}ue4ss_mod",        # our script for it
         "--exclude-module", "tkinter", "--exclude-module", "unittest", "--exclude-module", "pydoc",
         "--distpath", str(BUILD / "exe"), "--workpath", str(BUILD / "pyinstaller"), "--specpath", str(BUILD),
@@ -203,10 +209,45 @@ def build_exe(version: str) -> Path:
     return BUILD / "exe" / f"{EXE_NAME}.exe"
 
 
+def sign(exe: Path):
+    """coop-casal: Authenticode-sign the exe with our certificate (tools/criar-certificado.ps1), the one the updater
+    insists on (client/updater.py SIGNER). The private key never leaves this PC's certificate store."""
+    signer = re.search(r'^SIGNER = "([0-9A-Fa-f]*)"', (ROOT / "client" / "updater.py").read_text("utf-8"), re.M).group(1)
+    if not signer:
+        raise SystemExit("no certificate yet: run  powershell -ExecutionPolicy Bypass -File tools\\criar-certificado.ps1")
+    ps = (f"$c = Get-Item Cert:\\CurrentUser\\My\\{signer} -ErrorAction Stop; "
+          "$s = Set-AuthenticodeSignature -LiteralPath $env:SIGN_EXE -Certificate $c -HashAlgorithm SHA256 "
+          "-TimestampServer http://timestamp.digicert.com; "
+          "if ($s.Status -eq 'UnknownError' -or $s.Status -eq 'Valid') { 'signed' } else { throw $s.StatusMessage }")
+    out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True,
+                         text=True, env={**os.environ, "SIGN_EXE": str(exe)})
+    if "signed" not in out.stdout:
+        raise SystemExit(f"couldn't sign {exe.name}: {out.stderr.strip() or out.stdout.strip()}")
+    print(f"signed with {signer}")
+
+
+def trust_script(dest: Path):
+    """confiar-certificado.bat: run once on a friend's PC, so Windows knows the exe's publisher (our certificate,
+    carried inside the script). Goes in the current user's stores only: no administrator needed."""
+    b64 = base64.b64encode((ROOT / "release" / "coop-cert.cer").read_bytes()).decode()
+    dest.write_text(
+        "@echo off\r\n"
+        "rem Roda uma vez: faz o Windows confiar no certificado que assina o inZOI-Multiplayer.exe do co-op.\r\n"
+        "rem O Windows vai perguntar se deseja instalar o certificado: clique em Sim.\r\n"
+        "set CER=%TEMP%\\inzoi-coop-cert.cer\r\n"
+        f"powershell -NoProfile -Command \"[IO.File]::WriteAllBytes($env:CER, "
+        f"[Convert]::FromBase64String('{b64}'))\"\r\n"
+        "certutil -user -addstore Root \"%CER%\"\r\n"
+        "certutil -user -addstore TrustedPublisher \"%CER%\"\r\n"
+        "del \"%CER%\"\r\n"
+        "echo.\r\necho Pronto! Agora e so abrir o inZOI-Multiplayer.exe.\r\npause\r\n", "ascii")
+
+
 def main():
     version = re.search(r'VERSION = "([^"]+)"', (ROOT / "client" / "companion.py").read_text("utf-8")).group(1)
     sync_versions(version)
     exe = build_exe(version)
+    sign(exe)
     name = f"inZOI-Multiplayer-{version}"
     out = DIST / name
     if out.exists():
@@ -223,6 +264,7 @@ def main():
             if f.is_file():
                 z.write(f, Path(name) / f.relative_to(out))
     shutil.copy2(exe, DIST / "inZOI-Multiplayer.exe")
+    trust_script(DIST / "confiar-certificado.bat")
     print(f"{DIST / 'inZOI-Multiplayer.exe'}  ({exe.stat().st_size // 1024} KB)")
     print(f"{zpath}  ({zpath.stat().st_size // 1024} KB)")
     return version, zpath

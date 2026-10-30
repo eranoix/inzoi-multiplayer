@@ -44,7 +44,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.7.2"
+VERSION = "0.8.1"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -115,8 +115,36 @@ def first_run_setup(cfg: dict, ask_server: bool = True):
     print()
 
 
+_loop_errors = {}
+
+
+def loop_error(where: str, e: BaseException):
+    """Something unexpected in a long-running loop: logged (with the traceback at most once a minute per loop), and
+    the loop carries on."""
+    now = time.monotonic()
+    if now - _loop_errors.get(where, -1e9) > 60:
+        _loop_errors[where] = now
+        log.warning("%s: unexpected error, carrying on: %r", where, e, exc_info=e)
+    else:
+        log.debug("%s: %r", where, e)
+
+
 def read_config() -> dict:
-    return json.loads(CONFIG_FILE.read_text("utf-8")) if CONFIG_FILE.exists() else {}
+    """The saved settings. A damaged file falls back to the copy kept by the save before (or to nothing): never a
+    crash at start."""
+    for f in (CONFIG_FILE, CONFIG_FILE.with_suffix(".json.bak")):
+        try:
+            cfg = json.loads(f.read_text("utf-8"))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError) as e:
+            log.warning("the settings file %s is damaged (%s)", f, e)
+            continue
+        if isinstance(cfg, dict):
+            if f != CONFIG_FILE:
+                log.warning("using the settings saved before (%s)", f)
+            return cfg
+    return {}
 
 
 def load_config(args, ask_server: bool = True, ask: bool = True) -> dict:
@@ -142,8 +170,26 @@ def load_config(args, ask_server: bool = True, ask: bool = True) -> dict:
 
 
 def save_config(cfg: dict):
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(cfg, indent=1), "utf-8")
+    """Atomically (temp file + rename), keeping the version before as config.json.bak."""
+    tmp, bak = CONFIG_FILE.with_suffix(".json.tmp"), CONFIG_FILE.with_suffix(".json.bak")
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(cfg, indent=1))
+            f.flush()
+            os.fsync(f.fileno())
+        for i in range(10):
+            try:
+                if CONFIG_FILE.exists():
+                    os.replace(CONFIG_FILE, bak)
+                os.replace(tmp, CONFIG_FILE)
+                return
+            except PermissionError:                  # (an antivirus or a reader has it open for a moment)
+                if i == 9:
+                    raise
+                time.sleep(0.05)
+    except OSError as e:
+        log.warning("couldn't save the settings: %s", e)
 
 
 class ProgressBar:
@@ -186,6 +232,8 @@ class Remote:
         self.state_at = 0.0          # when their last state arrived
         self.spawned = False
         self.spawn_requested = 0.0
+        self.seen_at = 0.0           # when the controller's heartbeat last listed their puppet
+        self.building = None         # profile hash whose puppet description is being built (build_member)
         self.hidden = False
         self.act_sig = None          # last mirrored action (json) / anim / outfit, to act on changes only
         self.anim = None
@@ -212,6 +260,10 @@ class Companion(servers.Servers):
         self.mod = {"state": "waiting for the game", "beat": 0.0, "instance": None}
         self.chat = collections.deque(maxlen=60)
         self.notice = ""
+        self.notice_code = None      # machine-readable reason for the notice (server error code, version_mismatch)
+        self.despawning: dict[str, float] = {}  # puppet key -> when its despawn was asked (until the controller did it)
+        self.grace = None            # task: friends' Zois stay a few seconds after the connection drops
+        self.registry_lock = threading.Lock()
         self.world = "out"
         self.leader = None           # player whose clock everyone may follow (the server picks; usually the host)
         self.leader_world = None     # latest {hour, minute, speed, season, weather} from the leader
@@ -280,9 +332,9 @@ class Companion(servers.Servers):
         except OSError:
             raise SystemExit("inZOI Multiplayer is already running in another window. Use that one "
                              "(or close it first).") from None
-        for loop in (self.game_loop, self.mailbox_loop, self.mods_loop, self.update_loop, self.menu_loop,
-                     self.directory_loop, self.ingame_loop):
-            asyncio.create_task(loop())
+        self.tasks = [asyncio.create_task(self.keep_running(loop)) for loop in (
+            self.game_loop, self.mailbox_loop, self.mods_loop, self.update_loop, self.menu_loop, self.directory_loop,
+            self.ingame_loop)]
         backoff = 2
         while True:
             self.wake.clear()
@@ -295,44 +347,94 @@ class Companion(servers.Servers):
             try:
                 await self.session()
                 backoff = 2
-            except (OSError, asyncio.IncompleteReadError, ConnectionError) as e:
+            except (OSError, asyncio.IncompleteReadError, ConnectionError, asyncio.TimeoutError) as e:
                 if not self.wake.is_set():
-                    log.warning("server connection lost: %s", e)
+                    log.warning("server connection lost: %s", e or type(e).__name__)
                     self.notice = f"Can't reach the server ({self.address()[0]}): retrying"
-            self.writer, self.me_id = None, None
-            for r in list(self.remotes.values()):
-                self.drop_remote(r)
-            self.remotes.clear()
+            except Exception as e:                       # noqa: BLE001 - a bad message must never end the program
+                loop_error("server connection", e)       # (hosting: that would close the friend's server too)
+            w, self.writer, self.me_id = self.writer, None, None
+            if w:
+                w.close()
+            if self.wake.is_set():                       # another server: these players aren't on it
+                self.drop_all_remotes()
+            elif not self.grace or self.grace.done():    # the same server: their Zois wait a moment for us
+                self.grace = asyncio.create_task(self.drop_after_grace())
             try:
                 await asyncio.wait_for(self.wake.wait(), backoff)
                 backoff = 2                              # another server was picked: go now
             except asyncio.TimeoutError:
                 backoff = min(backoff * 2, 30)
 
+    async def keep_running(self, loop):
+        """Run a long-running loop; if it ever stops with an unexpected error, log it and start it again."""
+        while True:
+            try:
+                return await loop()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:                       # noqa: BLE001
+                loop_error(loop.__name__, e)
+            await asyncio.sleep(5)
+
+    def drop_all_remotes(self):
+        if self.grace and not self.grace.done():
+            self.grace.cancel()
+        for r in list(self.remotes.values()):
+            self.drop_remote(r)
+        self.remotes.clear()
+
+    async def drop_after_grace(self, wait: float = 10):
+        """Connection lost: friends' Zois stay for a few seconds (a quick Wi-Fi blip shouldn't rebuild them)."""
+        await asyncio.sleep(wait)
+        if not (self.writer and self.me_id):
+            log.info("still not connected: friends' Zois leave your world")
+            self.drop_all_remotes()
+
     async def session(self):
         host, port, password = self.address()
         log.info("connecting to %s:%d as %s", host, port, self.cfg["name"])
-        reader, self.writer = await asyncio.open_connection(host, port, limit=32 * 1024 * 1024)
+        reader, self.writer = await asyncio.wait_for(asyncio.open_connection(host, port, limit=32 * 1024 * 1024), 20)
         self.connected_at = time.time()
         self.sent_profile = None
         await self.send({"t": "hello", "protocol": PROTOCOL, "key": self.cfg["key"], "name": self.cfg["name"],
-                         "password": password, "host": bool(self.hosting and self.play_local)})
+                         "password": password, "host": bool(self.hosting and self.play_local), "version": VERSION})
         while True:
-            line = await reader.readline()
+            line = await asyncio.wait_for(reader.readline(), 45)     # the server pings every 15 s: silence = gone
             if not line:
                 raise ConnectionError("server closed the connection")
-            await self.on_message(json.loads(line))
+            try:
+                m = json.loads(line)
+            except ValueError:
+                log.warning("server sent something unreadable: %r", line[:200])
+                continue
+            if not isinstance(m, dict):
+                continue
+            try:
+                await self.on_message(m)
+            except (OSError, ConnectionError, asyncio.TimeoutError):
+                raise                                # (the connection itself, or a fatal error from the server)
+            except Exception as e:                   # noqa: BLE001 - one odd message isn't worth the connection
+                loop_error(f"server message {m.get('t')!r}", e)
 
     async def on_message(self, m: dict):
         t = m.get("t")
         if t == "welcome":
             self.me_id = m["id"]
             self.leader, self.leader_world, self.world_synced = m.get("leader"), m.get("world"), 0.0
-            self.notice = ""
+            self.notice, self.notice_code = "", None
+            if self.grace and not self.grace.done():
+                self.grace.cancel()                      # back in time: friends' Zois stay
             log.info("joined as %s; %d other player(s) online%s", m["id"], len(m["players"]),
                      f" - {m['motd']}" if m.get("motd") else "")
+            here = {p.get("id") for p in m["players"]}
+            for r in [r for pid, r in self.remotes.items() if pid not in here]:
+                self.remotes.pop(r.pid, None)            # (left while we were away)
+                self.drop_remote(r)
+            self.check_version("the server", m.get("version") or m.get("server_version"))
             for p in m["players"]:
                 self.update_remote(p)
+                self.check_version(p.get("name") or "a friend", p.get("version"))
             self.houses = {h["owner"]: h for h in m.get("houses") or []}
             self.modset = m.get("modset")
             self.check_mods()
@@ -360,6 +462,10 @@ class Companion(servers.Servers):
             log.info("%s joined", m["player"]["name"])
             self.update_remote(m["player"])
             self.system_line(f"{m['player']['name']} joined")
+            self.check_version(m["player"]["name"], m["player"].get("version"))
+        elif t == "rejoined":                        # the same player reconnected: their puppet stays
+            self.update_remote(m["player"])
+            self.check_version(m["player"].get("name") or "a friend", m["player"].get("version"))
         elif t == "left":
             log.info("%s left", m.get("name"))
             r = self.remotes.pop(m["id"], None)
@@ -397,17 +503,25 @@ class Companion(servers.Servers):
                 self.notice = f"You were {m.get('reason')}"
                 self.system_line(self.notice)
         elif t == "error":
-            log.error("server: %s", m.get("error"))
-            self.notice = f"Server: {m.get('error')}"
+            log.error("server: %s%s", m.get("error"), f" ({m['code']})" if m.get("code") else "")
+            self.notice, self.notice_code = f"Server: {m.get('error')}", m.get("code")     # (the page translates codes)
             if m.get("fatal"):
-                err = str(m.get("error"))
-                if m.get("banned") or "password" in err or "version mismatch" in err:
+                err, code = str(m.get("error")), str(m.get("code") or "")
+                if m.get("banned") or "password" in err or "version mismatch" in err \
+                        or code in ("wrong_password", "version_mismatch", "bad_key", "banned"):
                     self.connect_block = f"{self.joining or self.address()[0]}: {err}"      # retrying won't help
                 raise ConnectionError(m.get("error"))
 
     # ------------------------------------------------------------------ chat
     def system_line(self, text: str):
         self.chat.append({"name": "", "text": text, "time": time.time(), "system": True})
+
+    def check_version(self, who: str, version):
+        """Different versions may not understand each other fully: say so (a missing version says nothing)."""
+        if version and str(version) != VERSION:
+            log.warning("versions differ: you have %s, %s has %s", VERSION, who, version)
+            self.notice = f"Versions differ: you have {VERSION}, {who} has {version}. Update both to the same version."
+            self.notice_code = "version_differs"
 
     async def on_chat(self, m: dict):
         mine = m.get("id") == self.me_id
@@ -425,7 +539,7 @@ class Companion(servers.Servers):
     def update_remote(self, p: dict):
         r = self.remotes.get(p["id"]) or Remote(p["id"], p["name"])
         r.name = p["name"]
-        if p["id"] in self.puppet_ids:
+        if p["id"] in self.puppet_ids and p["id"] not in self.despawning:
             r.spawned = True                 # the controller already has their puppet
         self.remotes[p["id"]] = r
         if p.get("profile"):
@@ -435,19 +549,48 @@ class Companion(servers.Servers):
 
     def set_profile(self, r: Remote, profile: dict):
         h = profile_hash(profile)
-        if h == r.profile_hash:
+        if h in (r.profile_hash, r.building):
             return
-        first = r.profile_hash is None
-        r.profile, r.profile_hash = profile, h
-        lua, skipped = member_lua(profile, self.registry)
+        r.building = h
+        asyncio.get_running_loop().create_task(self.build_member(r, profile, h))
+
+    async def build_member(self, r: Remote, profile: dict, h: str):
+        """Turn a friend's profile into the puppet description the controller builds from. It asks the game about
+        struct layouts (off the event loop): while the game isn't up or is loading, it tries again a bit later."""
+        wait = 3
+        while r.building == h and self.remotes.get(r.pid) is r:
+            def build():
+                with self.registry_lock:
+                    return member_lua(profile, self.registry)
+            try:
+                lua, skipped = await asyncio.to_thread(build)
+                break
+            except GameError as e:
+                log.debug("building %s's Zoi waits for the game: %s", r.name, e)
+            except Exception as e:                       # noqa: BLE001 - a profile we can't read: say so, skip it
+                log.warning("couldn't use %s's Zoi: %r", r.name, e, exc_info=e)
+                r.building = None
+                return
+            await asyncio.sleep(wait)
+            wait = min(wait * 2, 30)
+        else:
+            return                                       # (a newer profile came, or they left)
         if skipped:
             log.debug("profile of %s: skipped %s", r.name, skipped[:5])
+        first = r.profile_hash is None
+        r.profile, r.profile_hash, r.building = profile, h, None
         self.mail.set_member(r.pid, lua)
         if r.spawned and not first:      # their Zoi really changed (new look, name...): rebuild the puppet
-            self.mail.op("despawn", key=r.pid)
+            self.despawn(r.pid)
             r.spawned = False
-            self.puppet_ids.pop(r.pid, None)
-        log.info("got %s's Zoi: %s %s (%s)", r.name, profile["first_name"], profile["last_name"], profile["gender"])
+        log.info("got %s's Zoi: %s %s (%s)", r.name, profile.get("first_name"), profile.get("last_name"),
+                 profile.get("gender"))
+
+    def despawn(self, key: str):
+        """Ask the controller to take a puppet out (heartbeats that still list it are stale until it says it did)."""
+        self.mail.op("despawn", key=key)
+        self.despawning[key] = time.time()
+        self.puppet_ids.pop(key, None)
 
     def set_state(self, r: Remote, st: dict):
         r.state, r.state_at = st, time.time()
@@ -482,8 +625,9 @@ class Companion(servers.Servers):
             self.mail.op("outfit", key=r.pid, category=st["outfit"])
 
     def drop_remote(self, r: Remote):
-        if r.spawned:
-            self.mail.op("despawn", key=r.pid)
+        r.building = None
+        if r.spawned or r.pid in self.puppet_ids:
+            self.despawn(r.pid)
             r.spawned = False
         self.puppet_ids.pop(r.pid, None)
         self.mail.trails.pop(r.pid, None)
@@ -505,7 +649,7 @@ class Companion(servers.Servers):
                 extra = {"home_door": self.home["door"], "home_site": self.home["site"]} if self.home else {}
                 self.mail.op("spawn", key=r.pid, template=tpl, near=self.my_entity,
                              x=r.state["x"], y=r.state["y"], z=r.state["z"], **extra)
-                r.spawned, r.spawn_requested = True, time.time()
+                r.spawned, r.spawn_requested, r.seen_at = True, time.time(), 0.0
                 r.act_sig = r.anim = r.outfit = None
                 log.info("bringing %s's Zoi into your world", r.name)
             elif r.spawned and here == r.hidden:
@@ -521,12 +665,13 @@ class Companion(servers.Servers):
         slow = time.time() - self.world_synced > 60           # season and weather: once a minute is plenty
         if slow:
             self.world_synced = time.time()
-        if self.leader == self.me_id:
-            if slow or not self.my_weather:
-                env = await self.g(call, "environment.get_state")
-                self.my_weather = {"season": env.get("season"), "weather": env.get("weather")}
-                await self.send({"t": "world", "world": self.my_weather})
-            return
+        leader = self.leader == self.me_id
+        if leader and (slow or not self.my_weather):     # only season and weather are the leader's to give
+            env = await self.g(call, "environment.get_state")
+            self.my_weather = {"season": env.get("season"), "weather": env.get("weather")}
+            await self.send({"t": "world", "world": self.my_weather})
+        # The clock is everyone's, the leader's too: whoever is behind moves forward to whoever is furthest ahead.
+        # Only ever forward and only within 12 h, so two players can't push each other back and forth.
         if not self.cfg.get("sync_time", True) or self.world != "play" or not self.my_clock:
             return
         mine = self.my_clock[0] * 60 + self.my_clock[1]
@@ -536,7 +681,7 @@ class Companion(servers.Servers):
             log.info("catching up with your friends' time: %d minutes", behind)
             await self.g(call, "environment.time_skip", minutes=behind)
         w = self.leader_world
-        if slow and w:
+        if slow and w and not leader:
             env = await self.g(call, "environment.get_state")
             if w.get("season") and env.get("season") != w["season"]:
                 log.info("matching the host's season: %s", w["season"])
@@ -618,18 +763,28 @@ class Companion(servers.Servers):
             for r in self.remotes.values():
                 r.act_sig = r.anim = r.outfit = None
         elif kind == "up":
-            self.mod["beat"] = time.time()
+            now = self.mod["beat"] = time.time()
             self.mod["state"] = "running"
+            for key, at in list(self.despawning.items()):
+                if now - at > 10:
+                    del self.despawning[key]     # (it never said so: maybe the op was missed; cleanup below retries)
             ids = {}
             for pair in filter(None, text.split(",")):
                 key, _, eid = pair.partition("=")
-                if eid.isdigit():
+                if eid.isdigit() and key not in self.despawning:     # (listed before our despawn ran: stale)
                     ids[key] = int(eid)
             self.puppet_ids = ids
             for key in ids:                  # puppets the controller already has (e.g. after a companion restart)
                 r = self.remotes.get(key)
-                if r and not r.spawned:
-                    r.spawned, r.hidden = True, False
+                if r:
+                    r.seen_at = now
+                    if not r.spawned:
+                        r.spawned, r.hidden = True, False
+            for r in self.remotes.values():  # asked for, but it never showed up (the op ran out, the game was busy)
+                if r.spawned and r.pid not in ids and now - max(r.spawn_requested, r.seen_at) > 10 \
+                        and not self.mail.pending(r.pid, "spawn"):
+                    log.info("%s's Zoi didn't show up in your world: trying again", r.name)
+                    r.spawned, r.spawn_requested = False, 0.0
             # puppets nobody is playing any more (left while we were away, or saved into the game): remove
             if self.writer and self.me_id and time.time() - self.connected_at > 20:
                 for key in ids:
@@ -639,13 +794,29 @@ class Companion(servers.Servers):
                     if (r is None or not r.spawned) and time.time() - self.cleaning.get(key, 0) > 15:
                         log.info("removing a leftover puppet (%s)", key)
                         self.cleaning[key] = time.time()
-                        self.mail.op("despawn", key=key)
+                        self.despawn(key)
         elif kind == "spawned":
             key, _, eid = text.partition(" ")
+            self.despawning.pop(key, None)       # (ops run in order: any despawn before it is done)
             if eid.isdigit():
                 self.puppet_ids[key] = int(eid)
+                r = self.remotes.get(key)
+                if r:
+                    r.seen_at = time.time()
         elif kind == "despawned":
-            self.puppet_ids.pop(text, None)
+            key = text.split(" ", 1)[0]
+            self.puppet_ids.pop(key, None)
+            r = self.remotes.get(key)
+            if self.despawning.pop(key, None) is None and r and r.spawned:
+                log.info("%s's Zoi was taken out of your world: bringing it back", r.name)
+                r.spawned, r.spawn_requested = False, time.time() - 5        # (the controller lost it)
+        elif kind == "spawn_failed":
+            key, _, why = text.partition(" ")
+            self.puppet_ids.pop(key, None)
+            r = self.remotes.get(key)
+            log.warning("bringing %s's Zoi in failed: %s", r.name if r else key, why or "no reason given")
+            if r:
+                r.spawned, r.spawn_requested = False, time.time() - 5        # again in ~3 s (manage_puppets waits 8)
         elif kind == "log":
             log.info("[game] %s", text)
 
@@ -659,6 +830,7 @@ class Companion(servers.Servers):
         while True:
             try:
                 world = self.world = await self.g(self.game.world)
+                self.mail.paused = world in ("paused", "stopped")      # (no controller ticks: ops wait)
                 if world in ("paused", "stopped"):
                     self.mod["beat"] = max(self.mod["beat"], time.time() - 3)   # no ticks while paused: not dead
                 if world == "out":
@@ -693,8 +865,7 @@ class Companion(servers.Servers):
                     except GameError:
                         pass
                 if tick % 5 == 2:
-                    c = await self.g(self.game.call, "environment.get_time")
-                    self.my_clock = (c["hour"], c["minute"], c.get("time_scale", 1), bool(c.get("paused")))
+                    self.my_clock = await self.g(self.game.clock)
                     self.sleeping = bool(SLEEPING.search(f"{(act or {}).get('bag', '')} {anim or ''}"))
                     if world == "play" and self.writer and self.me_id and active:
                         await self.keep_speed()
@@ -727,24 +898,32 @@ class Companion(servers.Servers):
                 await asyncio.sleep(1)
             except (OSError, ConnectionError) as e:
                 log.debug("send: %s", e)
+            except Exception as e:                       # noqa: BLE001 - my Zoi must keep being sent
+                loop_error("game loop", e)
+                await asyncio.sleep(1)
             await asyncio.sleep(0.2)
 
     async def mailbox_loop(self):
         inject = install.MAILBOX_DIR / "inject.json"       # debugging: extra ops dropped in by tools
         while True:
             try:
-                for kind, text in self.reports.poll():
-                    self.on_report(kind, text)
+                for kind, text in await asyncio.to_thread(self.reports.poll):
+                    try:
+                        self.on_report(kind, text)
+                    except Exception as e:               # noqa: BLE001 - one odd report, not the whole channel
+                        loop_error(f"report {kind}", e)
                 if inject.exists():
                     for op in json.loads(inject.read_text("utf-8")):
                         name = op.pop("op")
                         self.mail.op(name, **op)
                     inject.unlink()
-                self.mail.flush()
+                await asyncio.to_thread(self.mail.flush)     # (a file held open just waits for the next round)
             except PermissionError:
                 pass                     # the game was reading the mailbox; next round
             except (OSError, ValueError) as e:
                 log.warning("mailbox: %s", e)
+            except Exception as e:                       # noqa: BLE001
+                loop_error("mailbox loop", e)
             await asyncio.sleep(0.1)
 
     # ------------------------------------------------------------------ the multiplayer save
@@ -1143,6 +1322,8 @@ class Companion(servers.Servers):
                     await self.check_update()
                 except (OSError, ValueError) as e:
                     log.debug("update check: %s", e)
+                except Exception as e:                   # noqa: BLE001
+                    loop_error("update check", e)
             await asyncio.sleep(2 * 3600)
 
     async def announce(self, text: str, wait: float = 1800):
@@ -1279,6 +1460,9 @@ class Companion(servers.Servers):
                     await self.install_mods(o)
             except (OSError, ConnectionError, ValueError, asyncio.TimeoutError) as e:
                 log.warning("mods: %s", e)
+                self.mod_share = None
+            except Exception as e:                       # noqa: BLE001
+                loop_error("mods loop", e)
                 self.mod_share = None
             await asyncio.sleep(5)
 
@@ -1461,11 +1645,8 @@ class Companion(servers.Servers):
     def despawn_all(self):
         """On the way out: take every puppet out of the world so none gets saved into the game."""
         for key in list(self.puppet_ids):
-            self.mail.op("despawn", key=key)
-        try:
-            self.mail.flush()
-        except OSError:
-            pass
+            self.despawn(key)
+        self.mail.flush()                                # (never raises: a held file is just skipped)
 
     # ------------------------------------------------------------------ in-game panel
     def ui_routes(self) -> dict:
@@ -1483,6 +1664,7 @@ class Companion(servers.Servers):
                     "server": "this PC" if self.hosting and self.play_local else (self.server_info or {}).get("name")
                     or self.cfg.get("server") or "no server",
                     "name": self.cfg["name"], "mod": self.mod["state"], "notice": self.notice,
+                    "notice_code": self.notice_code,
                     "paused": self.world in ("paused", "stopped"), "port": self.address()[1],
                     "host": self.leader == self.me_id, "sync_time": bool(self.cfg.get("sync_time", True)),
                     "players": players, "chat": list(self.chat)[-30:], "mods": self.mods_status(),
@@ -1514,7 +1696,7 @@ class Companion(servers.Servers):
             if self.hosting and self.play_local:  # the panel shows "this PC": keep the friend's server for next time
                 body = {k: v for k, v in body.items() if k not in ("server", "port", "password")}
             for k in ("name", "server", "password"):
-                if k in body and str(body[k]).strip() and body[k] != self.cfg.get(k):
+                if k in body and (str(body[k]).strip() or k == "password") and body[k] != self.cfg.get(k):
                     self.cfg[k] = str(body[k]).strip()
                     changed = True
             if "sync_time" in body:

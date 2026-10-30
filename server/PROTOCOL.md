@@ -4,10 +4,19 @@ TCP, one JSON object per line (UTF-8, `\n`-terminated). Every message has `t` (i
 
 ## Joining
 
-Client → `{"t":"hello","protocol":1,"key":"<16-128 chars, generated once per player and kept secret>","name":"Ana","password":"","host":false}`
+Client → `{"t":"hello","protocol":1,"key":"<16-128 chars, generated once per player and kept secret>","name":"Ana","password":"","host":false,"version":"0.8.1"}`
+(`version`, optional: the companion app's version; passed on to the others in `Player.version` so they can warn on a
+mismatch. A different app version is never refused: only `protocol` must match.)
 
-Server → `{"t":"welcome","id":"p1a2b3c4","leader":"<player id>","host":"<player id>"|null,"world":{...}|null,"players":[Player...],"houses":[HouseMeta...],"modset":ModSet,"motd":"","server":{id,name,description,motd,public,password,max_players,version,hosted,directory},"admin":false}`
-or `{"t":"error","fatal":true,"error":"..."}` and the connection closes.
+Server → `{"t":"welcome","id":"p1a2b3c4","server_version":"0.8.0","protocol":1,"leader":"<player id>","host":"<player id>"|null,"world":{...}|null,"players":[Player...],"houses":[HouseMeta...],"modset":ModSet,"world_save":WorldMeta|null,"motd":"","server":{id,name,description,motd,public,password,max_players,version,hosted,directory},"admin":false}`
+or `{"t":"error","fatal":true,"code":"...","error":"..."}` and the connection closes.
+
+Every `error` has a machine-readable `code` (for the UI to translate) next to the English `error` text:
+`wrong_password`, `version_mismatch` (also carries `protocol`, `server_version`), `bad_key`, `banned` (also
+`banned: true`), `full`, `busy` (too many connections: 64 in all, 12 per address except 127.0.0.1), `too_large` (a
+line over 64 KB before a successful hello, over 32 MB after), all fatal; and, not fatal (the connection stays open),
+`bad_json`, `bad_request` (a malformed message; carries the message's `ref` if it had one), `hello_first`,
+`wrong_connection`, `unknown_type`, `not_online`. Passwords are compared as UTF-8 bytes (accents are fine).
 
 `host: true` counts only on a server started inside a player's program ("Host and play", `Server(hosted=True)`) and only
 from that same PC (127.0.0.1): that player becomes the host (their mods are everyone's, they lead the clock).
@@ -15,8 +24,10 @@ from that same PC (127.0.0.1): that player becomes the host (their mods are ever
 A second connection with `"files": true` in its hello is the same player's mod file connection: the server answers
 `{"t":"files_ok"}` and accepts only `blob_check`, `blob_put`, `blob_get` (and ping/pong) on it.
 
-`Player` = `{"id","name","profile","state","leader"}`. The `id` is stable for a key, so houses and profiles survive reconnects.
-Connecting again with the same key replaces the old session (it gets `{"t":"kicked"}`).
+`Player` = `{"id","name","profile","state","leader","version"}`. The `id` is stable for a key, so houses and profiles survive reconnects.
+Connecting again with the same key replaces the old session (it gets `{"t":"kicked"}`) without a break: the others get
+no `left`/`joined`, only `{"t":"rejoined","player":Player}` (the player keeps their last state and the clock if they
+led it), so their Zoi stays in everyone's world. Companions that don't know `rejoined` ignore it.
 
 ## Client → server
 
@@ -25,7 +36,7 @@ Connecting again with the same key replaces the old session (it gets `{"t":"kick
 | `state` | `state` | live Zoi state (position, rotation, animation, interaction, site); relayed to everyone else as `state` |
 | `profile` | `profile` | the player's Zoi (name, appearance, traits); stored, relayed as `profile` |
 | `world` | `world` | clock/weather/season; only accepted from the leader, relayed as `world` |
-| `take_leader` | | become the world-clock leader; everyone gets `leader` |
+| `take_leader` | | become the world-clock leader; everyone gets `leader`. On a hosted server while the host is online only the host can: anyone else just gets `leader` back with the host's id |
 | `chat` | `text` (≤500) | broadcast to everyone, including the sender, as `chat` |
 | `event` | `kind`, `data`, `to?` | generic relay to one player (`to`) or everyone else; arrives as `event` with `from` |
 | `house_put` | `house` | store a snapshot of your house; everyone gets `house_updated` |
@@ -33,14 +44,14 @@ Connecting again with the same key replaces the old session (it gets `{"t":"kick
 | `house_list` | | reply `house_list` |
 | `who` | | reply `who` with everyone online |
 | `mods` | `mods: [Mod]` | the player's enabled mods; stored; everyone gets `modset` if the set changed |
-| `ping` / `pong` | `echo?` | keepalive; the server pings every 15 s and drops clients silent for 45 s |
+| `ping` / `pong` | `echo?` | keepalive; the server pings every 15 s and drops clients silent for 45 s (file connections get no pings and are dropped after 10 minutes of silence) |
 
 ## Mod file connection (`files: true`)
 
 | `t` | fields | answer |
 |---|---|---|
 | `blob_check` | `h: [sha256]` | `blob_missing {h}`: the ones the server doesn't have yet |
-| `blob_put` | `h, o (offset), d (base64), end` | in order, only files of your own mods; after `end`: `blob_ok {h}` or `blob_bad {h, error}` |
+| `blob_put` | `h, o (offset), d (base64), end` | in order, only files of your own mods; pieces up to 8 MB; after `end`: `blob_ok {h}` or `blob_bad {h, error}`. A wrong offset gets `blob_bad {h, error, o}` with the offset expected; a bad piece (not base64, too big, past the file's size) discards the upload: `blob_bad {h, error, o: 0}` |
 | `blob_get` | `h, o` | `blob {h, o, d, end}` (512 KB pieces), or `blob {h, error: "not shared" / "not uploaded yet"}` |
 
 `Mod` = `{id, name, version, built, path, size, files: [{p, h, s}]}`: the mod_manifest's ProjectName, FriendlyName,
@@ -73,14 +84,15 @@ The server's admins (data/server.json `admins`; the host of a "Host and play" se
 | `world_restore` | `version` | an earlier world version becomes the current one again (as a new version) |
 
 `{"t":"admin_claim","code":"...","ref":n}` makes the sender an admin if the code is the server's admin code (printed by
-`inzoi_mp_server.py --admin-code` on the server's machine, and shown to admins in their console).
+`inzoi_mp_server.py --admin-code` on the server's machine, and shown to admins in their console). At most 5 tries a
+minute per address; more get `{"t":"admin","op":"claim","ok":false,"code":"rate_limited","error":"..."}`.
 From the server's own machine (127.0.0.1), before hello: `{"t":"make_admin","who":"<name or id>"}` (`--make-admin`).
 
 ## Server → client
 
-`welcome`, `joined {player}`, `left {id,name}`, `leader {id}`, `state {id,state}`, `profile {id,profile}`,
+`welcome`, `joined {player}`, `rejoined {player}`, `left {id,name}`, `leader {id}`, `state {id,state}`, `profile {id,profile}`,
 `world {world}`, `modset {source,host,mods}`, `chat {id,name,text,time}`, `event {from,kind,data}`, `house_updated {meta}`, `house`, `house_list`,
-`who`, `ping`, `pong`, `kicked {reason, by_admin?}`, `error {error, fatal?, banned?}`, `server_info {server, admin?}`, `admin {ref, op, ok, ...}`.
+`who`, `ping`, `pong`, `kicked {reason, by_admin?}`, `error {code, error, fatal?, banned?, ref?}`, `server_info {server, admin?}`, `admin {ref, op, ok, ...}`.
 
 ## What the companion puts in messages (the server relays them as-is)
 
@@ -104,3 +116,10 @@ From the server's own machine (127.0.0.1), before hello: `{"t":"make_admin","who
 
 Defined by the companion app; the server never needs to know them. Planned: `visit_request`, `visit_reply`,
 `interact` (one Zoi starts a social interaction with another player's Zoi), `interact_reply`, `emote`.
+
+## Storage
+
+data/*.json files are written to a .tmp, flushed (fsync) and swapped in; the previous copy stays as `.bak`. A damaged
+file is renamed `.corrupt-<time>` and its `.bak` used, with a warning in the log. Blobs (mod and world files, one
+folder) that no stored mod list, current world or kept world version (nor an upload under way) uses are deleted at start
+and after each world save, once over an hour old; unfinished uploads (`.part`) after a day.
