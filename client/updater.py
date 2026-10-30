@@ -24,6 +24,8 @@ SIGNER = "71F550645942BC38BD8353A6FB3FAEB6DCDA1A14"   # thumbprint of our code-s
 API = os.environ.get("INZOI_MP_UPDATE_API") or f"https://api.github.com/repos/{REPO}/releases/latest"   # (tests: other)
 ASSET = "inZOI-Multiplayer.exe"
 DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp" / "update"
+HEALTH = DIR / "health.json"                # coop-casal: {version, fails, blocked} for rolling back a broken update
+FAILS_TO_ROLL_BACK = 3                      # this start is the 3rd in a row of a version that never ran healthy
 log = logging.getLogger("update")
 
 
@@ -50,6 +52,8 @@ def latest(current: str) -> dict | None:
     version = str(rel.get("tag_name", "")).lstrip("vV")
     if not version or version_tuple(version) <= version_tuple(current) or rel.get("draft") or rel.get("prerelease"):
         return None
+    if version in blocked():
+        return None                                      # it was rolled back: wait for a newer one
     asset = next((a for a in rel.get("assets", []) if a.get("name") == ASSET), None)
     if not asset:
         return None
@@ -124,6 +128,8 @@ def pending(current: str) -> Path | None:
     best = None
     for f in DIR.glob("inZOI-Multiplayer-*.exe") if DIR.exists() else []:
         v = f.stem.split("inZOI-Multiplayer-", 1)[1]
+        if v in blocked():
+            continue
         if version_tuple(v) > version_tuple(current) and (best is None or version_tuple(v) > version_tuple(best[0])):
             best = (v, f)
     return best[1] if best and signed_by_us(best[1]) else None
@@ -132,7 +138,7 @@ def pending(current: str) -> Path | None:
 def apply(new_exe: Path, args: list[str]):
     """Put the new exe where this one is and start it (in a window of its own). The caller exits right after."""
     exe = Path(sys.executable)
-    old = exe.with_name(exe.stem + ".old.exe")
+    old = exe.with_name(exe.stem + ".prev.exe")         # kept (not deleted) so a broken update can be rolled back
     try:
         old.unlink()
     except FileNotFoundError:
@@ -151,13 +157,15 @@ def apply(new_exe: Path, args: list[str]):
 
 
 def clean_old():
-    """Delete the exe a previous update replaced (it was still running then)."""
+    """Delete the exes left behind while they were running: a pre-0.8.2 update's ".old" and a rolled-back ".bad".
+    The ".prev" one stays: it's what a broken update rolls back to."""
     if frozen():
         exe = Path(sys.executable)
-        try:
-            exe.with_name(exe.stem + ".old.exe").unlink()
-        except OSError:
-            pass
+        for tail in (".old.exe", ".bad.exe"):
+            try:
+                exe.with_name(exe.stem + tail).unlink()
+            except OSError:
+                pass
     for f in DIR.glob("*.part") if DIR.exists() else []:
         f.unlink(missing_ok=True)
     if frozen():
@@ -187,3 +195,74 @@ def trust_self():
         mark.write_text(SIGNER, "utf-8")
     except (OSError, subprocess.SubprocessError) as e:
         log.warning("couldn't trust our certificate: %s", e)
+
+
+# ---------------------------------------------------------------------------------------------- rolling back
+def _health() -> dict:
+    try:
+        h = json.loads(HEALTH.read_text("utf-8"))
+        return h if isinstance(h, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_health(h: dict):
+    try:
+        DIR.mkdir(parents=True, exist_ok=True)
+        tmp = HEALTH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(h), "utf-8")
+        os.replace(tmp, HEALTH)
+    except OSError as e:
+        log.warning("couldn't save the update health: %s", e)
+
+
+def blocked() -> list:
+    """Versions that were rolled back: never offered or applied again (a newer release is)."""
+    return [str(v) for v in _health().get("blocked", [])]
+
+
+def startup_check(current: str, args: list[str]) -> bool:
+    """coop-casal: count this start; a version that didn't run healthy (mark_healthy) for FAILS_TO_ROLL_BACK starts
+    in a row is swapped back for the exe it replaced (".prev", if it carries our signature), blocked, and that one
+    is started instead. True: rolled back, the caller exits right away."""
+    if not frozen():
+        return False
+    h = _health()
+    if h.get("version") != current:
+        h.update(version=current, fails=0)
+    h["fails"] = int(h.get("fails") or 0) + 1
+    exe = Path(sys.executable)
+    prev = exe.with_name(exe.stem + ".prev.exe")
+    if h["fails"] < FAILS_TO_ROLL_BACK or not prev.exists() or not signed_by_us(prev):
+        _save_health(h)
+        return False
+    log.warning("version %s failed to start %d times in a row: going back to the previous one", current, h["fails"] - 1)
+    bad = exe.with_name(exe.stem + ".bad.exe")
+    try:
+        bad.unlink(missing_ok=True)
+        exe.rename(bad)
+        try:
+            os.replace(prev, exe)
+        except OSError:
+            bad.rename(exe)
+            raise
+    except OSError as e:
+        log.warning("couldn't roll back: %s", e)
+        _save_health(h)
+        return False
+    h["blocked"] = sorted({*blocked(), current}, key=version_tuple)
+    h.update(version=None, fails=0)
+    _save_health(h)
+    env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+    subprocess.Popen([str(exe), *args, "--restarted"], creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+                     close_fds=True, env=env)
+    return True
+
+
+def mark_healthy():
+    """This version runs fine (a couple of minutes up, or a normal exit): no rollback for it."""
+    if frozen():
+        h = _health()
+        if h.get("fails"):
+            h["fails"] = 0
+            _save_health(h)

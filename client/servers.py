@@ -32,6 +32,7 @@ PROTOCOL = 1
 DIRECTORY_URL = os.environ.get("INZOI_MP_DIRECTORY_URL",
                                "https://raw.githubusercontent.com/Darker117/inzoi-multiplayer/main/directory.json")
 FRESH = 20                       # seconds a server's info stays fresh on the page
+LAN_AFTER = 15                   # seconds without reaching the picked server before looking for it on the home network
 LOCAL = ("127.0.0.1", "localhost", "::1")
 
 
@@ -136,6 +137,9 @@ class Servers:
         self.admin_ref = 0
         self.joining = None                            # the server being joined, by name, for messages
         self.local_mods = (0.0, [])
+        self.lan = {"at": 0.0, "list": [], "busy": False, "tried": -1e9}  # servers found on the home network (UDP)
+        self.lan_override = None                       # (host, port): the picked server's home-network address, for now
+        self.lan_fail_since = None                     # since when the picked server can't be reached (monotonic)
         self.page = menu.Page(page_profile)
         self.menu_item = None
         # the Multiplayer page inside the game (UE4SS script): fed through files next to the page's browser profile
@@ -197,6 +201,7 @@ class Servers:
     def switch_server(self):
         """Drop the server connection and connect again at once to whatever address() says now."""
         self.connect_block = None
+        self.lan_override, self.lan_fail_since = None, None     # another server picked: its own address first
         self.server_info, self.is_admin = None, False
         self.modset, self.world_meta, self.houses, self.leader = None, None, {}, None
         if self.mod_offer and self.mod_offer["state"] not in ("downloading", "installing", "waiting"):
@@ -336,6 +341,94 @@ class Servers:
             except (OSError, ValueError) as e:
                 log.debug("directory list: %s", e)
             await asyncio.sleep(6 * 3600)
+
+    # ------------------------------------------------------------------ LAN discovery
+    # Servers answer a UDP broadcast on their port (b"INZOI-MP?"). When the picked server (usually the host's Tailscale
+    # address) can't be reached for LAN_AFTER seconds, or none is picked, the program looks for it on the home network
+    # and plays there for now (lan_override): the server id it joined last wins, else the only server that answered. The
+    # home-network address is remembered as an alternate (cfg["lan_alt"]), never in place of the picked address: the
+    # next start tries that one first again.
+    async def discover_lan(self) -> list[dict]:
+        if self.lan["busy"]:
+            return self.lan["list"]
+        self.lan["busy"] = True
+        try:
+            found = await asyncio.to_thread(netinfo.discover, int(self.cfg.get("port") or 24242))
+        except OSError as e:
+            log.debug("LAN discovery: %s", e)
+            found = []
+        finally:
+            self.lan["busy"] = False
+        mine = self.hosted[0].mp_server.store.settings.get("id") if self.hosted else None
+        keep = ("address", "name", "id", "version", "protocol", "password", "players", "max_players", "hosted", "ip",
+                "port")
+        self.lan.update(at=time.time(), list=[{k: s.get(k) for k in keep} for s in found
+                                              if not mine or s.get("id") != mine])
+        return self.lan["list"]
+
+    def lan_view(self) -> list[dict]:
+        cur = address_text(*self.lan_override) if self.lan_override else None
+        return [{**s, "current": bool(cur) and same_server(s["address"], cur),
+                 "saved": self.saved_entry(s["address"]) is not None} for s in self.lan["list"]]
+
+    def lan_pick(self, found: list[dict]) -> dict | None:
+        """The server to play on from what answered: the one joined last (by id), else the only one."""
+        primary = self.cfg.get("server") and address_text(self.cfg["server"], self.cfg.get("port", 24242))
+        ids = {self.cfg.get("server_id"), (self.saved_entry(primary) or {}).get("id") if primary else None} - {None, ""}
+        ok = [s for s in found if s.get("protocol", PROTOCOL) == PROTOCOL]
+        return next((s for s in ok if s.get("id") in ids), None) or (ok[0] if len(ok) == 1 else None)
+
+    async def lan_loop(self):
+        while True:
+            await asyncio.sleep(5)
+            try:
+                await self.lan_tick()
+            except Exception as e:                         # noqa: BLE001 - never worth stopping the program
+                log.debug("LAN discovery: %r", e, exc_info=e)
+
+    async def lan_tick(self, after: float = LAN_AFTER):
+        if self.on_own_server() or (self.writer and self.me_id):
+            self.lan_fail_since = None
+            return
+        primary = self.cfg.get("server") and address_text(self.cfg["server"], self.cfg.get("port", 24242))
+        if primary and self.connect_block:
+            return                                     # wrong password, banned...: another address won't help
+        now = time.monotonic()
+        self.lan_fail_since = self.lan_fail_since or now
+        if (primary and now - self.lan_fail_since < after) or now - self.lan["tried"] < after:
+            return
+        self.lan["tried"] = now
+        pick = self.lan_pick(await self.discover_lan())
+        alt = (self.cfg.get("lan_alt") or {}).get(primary or "")
+        if not pick and alt and not self.lan_override:  # nothing answered the broadcast: the address it had last time?
+            try:
+                info, _ = await ask(alt["address"], {"t": "info"}, "info", timeout=3)
+                if info.get("id") and info["id"] == alt.get("id"):
+                    pick = {**info, "address": alt["address"]}
+            except (OSError, ValueError, asyncio.TimeoutError, ConnectionError):
+                pass
+        if not pick:
+            if self.lan_override:                      # not there either: back to the picked address
+                log.info("the server isn't on your home network either: trying %s again", primary)
+                self.lan_override = None
+                self.wake.set()
+            return
+        if not primary:                                # no server picked yet: this one is it
+            log.info("found a server on your home network: %s (%s)", pick.get("name"), pick["address"])
+            await self.join(pick["address"], "", pick.get("name"))
+            return
+        host, port = split_address(pick["address"])
+        if self.lan_override == (host, port) or same_server(pick["address"], primary):
+            return
+        log.info("can't reach %s: playing on the same server on your home network (%s)", primary, pick["address"])
+        self.lan_override = (host, port)
+        self.cfg.setdefault("lan_alt", {})[primary] = {"address": pick["address"], "id": pick.get("id"),
+                                                       "at": time.time()}
+        self.save_cfg()
+        self.connect_block = None
+        if self.writer:
+            self.writer.close()
+        self.wake.set()
 
     # ------------------------------------------------------------------ hosting from the page
     async def start_hosting(self, play: bool = True, **settings) -> dict:
@@ -564,6 +657,8 @@ class Servers:
             self.page.seen()                                   # the page asks every few seconds while it's open
             if time.time() - self.public["at"] > FRESH and not self.public["busy"]:
                 asyncio.get_running_loop().create_task(self.refresh_public())
+            if time.time() - self.lan["at"] > FRESH and not self.lan["busy"]:
+                asyncio.get_running_loop().create_task(self.discover_lan())
             saved = await asyncio.gather(*(self.row(s["address"], s) for s in self.saved()))
             current = self.current_address()
             connected = bool(self.writer and self.me_id)
@@ -579,7 +674,9 @@ class Servers:
                     "saved": saved, "public": self.public["list"], "public_errors": self.public["errors"],
                     "public_at": self.public["at"], "directories": self.directories(),
                     "hosting": self.hosting_state(), "mods": self.mods_status(), "in_game": self.world != "out",
-                    "save": self.mp_name() if self.cfg.get("mp_save") else None, "update": self.update_view()}
+                    "save": self.mp_name() if self.cfg.get("mp_save") else None, "update": self.update_view(),
+                    "lan": self.lan_view(),
+                    "via_lan": address_text(*self.lan_override) if self.lan_override else None}
 
         async def check(body):
             entry = self.saved_entry(body.get("address", ""))

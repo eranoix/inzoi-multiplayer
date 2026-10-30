@@ -30,11 +30,15 @@ VENV_PY = BUILD / "venv" / "Scripts" / "python.exe"
 EXE_NAME = "inZOI Multiplayer"
 LINUX_SERVER = ["inzoi_mp_server.py", "PROTOCOL.md", "inzoi-mp.service"]
 SKIP_MOD = {"MPCmd.lua", "MPBulk.lua", "MPSeq.lua", "inject.json", "__pycache__", "out", "signals_dir.txt", "version.txt"}
-# UE4SS (github.com/UE4SS-RE/RE-UE4SS, MIT), the script loader behind the main menu's Multiplayer button: the very
-# build that was tested with inZOI, checked by its sha256 (the "experimental-latest" release changes every day).
-UE4SS_ZIP = "UE4SS_v3.0.1-1165-g12ec45a0.zip"
-UE4SS_SHA256 = "d51512869bde8c32a1ebd6732a01fbb1343e6b3e0fb9cd0d8a9b1841b68cba97"
-UE4SS_URL = "https://github.com/UE4SS-RE/RE-UE4SS/releases/download/experimental-latest/" + UE4SS_ZIP
+# UE4SS (github.com/UE4SS-RE/RE-UE4SS, MIT), the script loader behind the main menu's Multiplayer button. Its
+# "experimental-latest" release renames its zip every build, so the build we use is pinned in release/ue4ss.lock.json
+# ({zip, sha256}) and kept in build/cache; when that zip is gone, the current one is looked up through GitHub's API,
+# checked against GitHub's digest and pinned anew (coop-casal: the launcher takes UE4SS out again if inZOI keeps
+# crashing right after starting with it).
+UE4SS_RELEASE = "https://github.com/UE4SS-RE/RE-UE4SS/releases/download/experimental-latest/"
+UE4SS_API = "https://api.github.com/repos/UE4SS-RE/RE-UE4SS/releases/tags/experimental-latest"
+UE4SS_LOCK = ROOT / "release" / "ue4ss.lock.json"
+UE4SS_FILES = ("dwmapi.dll", "ue4ss/UE4SS.dll", "ue4ss/UE4SS-settings.ini", "ue4ss/LICENSE")
 
 BG, BLUE, MINT = (22, 34, 56), (90, 168, 240), (127, 209, 185)      # the in-game panel's colours
 
@@ -151,30 +155,56 @@ def sync_versions(version: str):
     server.write_text(re.sub(r'^VERSION = "[^"]*"', f'VERSION = "{version}"', text, count=1, flags=re.M), "utf-8")
 
 
-def ue4ss_runtime() -> Path:
-    """UE4SS's files for the exe (build/ue4ss_runtime), from the pinned zip (build/cache, downloaded once)."""
+def ue4ss_runtime() -> Path | None:
+    """UE4SS's files for the exe (build/ue4ss_runtime), from the pinned zip (build/cache), else the current build of
+    "experimental-latest" (then pinned). None: UE4SS can't be had right now, the exe is built without it."""
     import hashlib
     import urllib.request
     out = BUILD / "ue4ss_runtime"
-    zpath = BUILD / "cache" / UE4SS_ZIP
-    if not zpath.exists():
-        zpath.parent.mkdir(parents=True, exist_ok=True)
-        print(f"downloading {UE4SS_URL}")
+    try:
+        lock = json.loads(UE4SS_LOCK.read_text("utf-8"))
+    except (OSError, ValueError):
+        lock = {}
+    cache = BUILD / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    zpath = cache / lock["zip"] if lock.get("zip") else None
+    sha = lambda f: hashlib.sha256(f.read_bytes()).hexdigest()
+    if zpath and not zpath.exists():
         try:
-            urllib.request.urlretrieve(UE4SS_URL, zpath)
-        except OSError as e:            # coop-casal: the pinned build left "experimental-latest"; build without it
+            urllib.request.urlretrieve(UE4SS_RELEASE + lock["zip"], zpath)
+        except OSError:
+            zpath.unlink(missing_ok=True)
+    if not (zpath and zpath.exists() and sha(zpath) == lock.get("sha256")):
+        try:
+            req = urllib.request.Request(UE4SS_API, headers={"Accept": "application/vnd.github+json",
+                                                             "User-Agent": "inZOI-Multiplayer-build"})
+            rel = json.loads(urllib.request.urlopen(req, timeout=30).read().decode("utf-8"))
+            asset = next(a for a in rel.get("assets", [])
+                         if re.fullmatch(r"UE4SS_.*\.zip", a.get("name", "")) and not a["name"].startswith("zDEV"))
+            zpath = cache / asset["name"]
+            print(f"downloading {asset['browser_download_url']}")
+            urllib.request.urlretrieve(asset["browser_download_url"], zpath)
+        except (OSError, ValueError, StopIteration, KeyError) as e:
             print(f"UE4SS not available ({e}): building without it (the menu item is drawn over the game instead)")
             return None
-    digest = hashlib.sha256(zpath.read_bytes()).hexdigest()
-    if digest != UE4SS_SHA256:
-        raise SystemExit(f"{zpath} isn't the tested UE4SS build (sha256 {digest}); put the right one in build/cache")
+        digest, want = sha(zpath), str(asset.get("digest") or "").removeprefix("sha256:")
+        if want and digest != want:
+            zpath.unlink(missing_ok=True)
+            raise SystemExit(f"{asset['name']} doesn't match GitHub's sha256: not using it")
+        lock = {"zip": asset["name"], "sha256": digest}
+        UE4SS_LOCK.write_text(json.dumps(lock, indent=2) + "\n", "utf-8")
+        print(f"UE4SS pinned to {asset['name']} (release/ue4ss.lock.json): a build not yet tried with inZOI")
     if out.exists():
         shutil.rmtree(out)
     with zipfile.ZipFile(zpath) as z:
-        for name, dest in (("dwmapi.dll", "dwmapi.dll"), ("ue4ss/UE4SS.dll", "ue4ss/UE4SS.dll"),
-                           ("ue4ss/UE4SS-settings.ini", "ue4ss/UE4SS-settings.ini"), ("ue4ss/LICENSE", "ue4ss/LICENSE")):
-            (out / dest).parent.mkdir(parents=True, exist_ok=True)
-            (out / dest).write_bytes(z.read(name))
+        names = set(z.namelist())
+        missing = [f for f in UE4SS_FILES if f not in names]
+        if missing:
+            print(f"UE4SS zip {zpath.name} lacks {missing}: building without it")
+            return None
+        for name in UE4SS_FILES:
+            (out / name).parent.mkdir(parents=True, exist_ok=True)
+            (out / name).write_bytes(z.read(name))
     return out
 
 

@@ -230,6 +230,7 @@ async def follow_game(keep: bool | None = None) -> str:
     if os.name != "nt" or testing():
         await asyncio.Event().wait()
     seen, gone, start = False, 0, time.monotonic()
+    up_since = None
     while True:
         await asyncio.sleep(3)
         try:
@@ -240,8 +241,13 @@ async def follow_game(keep: bool | None = None) -> str:
         if up:
             if keep and seen and gone >= 30:
                 log.info("inZOI is back")
+            if up_since is None:
+                up_since = time.monotonic()
             seen, gone = True, 0
         elif seen:
+            if up_since is not None:
+                await asyncio.to_thread(note_game_session, time.monotonic() - up_since)
+                up_since = None
             gone += 3
             if gone == 30 and keep:
                 log.info("inZOI closed: your server keeps running for your friends. Start inZOI again to play, "
@@ -252,7 +258,36 @@ async def follow_game(keep: bool | None = None) -> str:
             return "inZOI didn't start"
 
 
+EARLY_EXIT = 90                         # inZOI's window gone this soon after it came up: it likely crashed
+
+
+def note_game_session(seconds: float):
+    """coop-casal: UE4SS (the main menu's button) is a newer build than the one upstream tested. If inZOI dies
+    within EARLY_EXIT seconds twice in a row while our UE4SS is in its folder, take UE4SS out (the game just closed,
+    so its files are free) and don't put it back: the menu item is drawn over the game instead, as without it."""
+    cfg = companion.read_config()
+    if seconds >= EARLY_EXIT:
+        if cfg.pop("early_exits", None):
+            companion.save_config(cfg)
+        return
+    cfg["early_exits"] = int(cfg.get("early_exits") or 0) + 1
+    log.warning("inZOI closed %.0f s after it started (%d time(s) in a row)", seconds, cfg["early_exits"])
+    where = cfg.get("ingame_installed")
+    if cfg["early_exits"] >= 2 and where:
+        try:
+            ue4ss.uninstall(Path(where))
+            cfg.update(ingame_menu=False, early_exits=0)
+            cfg.pop("ingame_installed", None)
+            log.warning("took UE4SS out of %s: inZOI kept closing right after starting with it", where)
+            notify("inZOI fechou logo depois de abrir duas vezes seguidas. O botão Multiplayer do menu (UE4SS) foi "
+                   "removido por segurança; o multiplayer continua funcionando pelo painel.", error=True)
+        except OSError as e:
+            log.warning("couldn't take UE4SS out: %s", e)
+    companion.save_config(cfg)
+
+
 async def run(mode: str, cfg: dict, comp):
+    asyncio.get_running_loop().call_later(120, updater.mark_healthy)   # coop-casal: up 2 minutes = no rollback
     if mode == "host-only":
         args = argparse.Namespace(host="0.0.0.0", port=cfg["host_port"], password=cfg["host_password"],
                                   motd=cfg["host_motd"], max_players=None, data=str(SERVER_DATA), hosted=False,
@@ -321,6 +356,8 @@ def main():
         if mode != "host-only":
             bring_up_game()
         return
+    if updater.startup_check(companion.VERSION, [a for a in sys.argv[1:] if a != "--restarted"]):
+        return                                           # coop-casal: this version kept failing: back to the last one
     waiting = updater.pending(companion.VERSION) if updater.frozen() else None
     if waiting:
         log.info("updating to %s", waiting.stem)
@@ -364,6 +401,7 @@ def main():
     except KeyboardInterrupt:
         comp.shutdown()
         time.sleep(0.5)
+    updater.mark_healthy()                               # a normal exit (inZOI closed) isn't a failed start
     log.info("stopped")
 
 

@@ -295,3 +295,23 @@ button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-
 .couple-saved .n { flex: 1; min-width: 0; font-size: 19px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .couple-saved .s { display: block; font-size: 15px; font-weight: 400; color: var(--sub); }
 .btn.small { width: 180px; margin: 0; }
+/* a server found on the home network: one big "Join" button */
+.couple-lan { display: flex; align-items: center; gap: 24px; padding: 18px 22px; margin: -12px 0 30px; border-radius: 12px;
+  background: rgba(161, 212, 253, 0.16); border: 2px solid var(--blue); }
+.couple-lan .n { flex: 1; min-width: 0; font-size: 22px; font-weight: 600; line-height: 1.35; }
+.couple-lan .s { display: block; font-size: 16px; font-weight: 400; color: var(--sub); }
+.couple-lan .big-join { width: 260px; height: 70px; flex-shrink: 0; border-radius: 16px; background: var(--blue); color: var(--pill-ink);
+  font-size: 26px; font-weight: 600; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15); }
+.couple-lan .big-join:hover:not([disabled]) { background: #c4e5ff; }
+.couple-lan .big-join.done { background: #c3ead9; color: #2b5546; cursor: default; }
+.couple-help-box { margin-top: 30px; padding-bottom: 20px; }
+/* the connection check (in a dialog) */
+.checks { display: flex; flex-direction: column; gap: 8px; }
+.check { display: flex; gap: 12px; padding: 10px 12px; border-radius: 8px; background: rgba(0, 0, 0, 0.15); font-size: 16px; line-height: 1.4; }
+.check .mark { width: 22px; flex-shrink: 0; font-weight: 700; text-align: center; }
+.check.ok .mark { color: #b8f5c2; }
+.check.bad { background: rgba(130, 50, 40, 0.35); }
+.check.bad .mark { color: var(--bad); }
+.check .t { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.check .s { font-size: 13px; color: var(--sub); opacity: 0.9; }
+.check .fix { font-size: 15px; color: var(--warn); margin-top: 4px; }

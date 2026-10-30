@@ -11,6 +11,7 @@ folder, see saves.retitle), so the game lists and loads it like any save.
 """
 import os
 import shutil
+import time
 from pathlib import Path
 
 import mods
@@ -44,6 +45,54 @@ def pack(folder: str, hashes) -> tuple[list[dict], dict, float]:
         paths[h] = f
     hashes.save()
     return files, paths, slot.stat().st_mtime
+
+
+def snapshot(folder: str) -> dict:
+    """{path: (size, mtime_ns)} of every file of a save folder (SaveGames/<folder>/ and ModSave/<folder>/): it
+    changes while the game writes a save (temp files come and go, the slot grows, pictures are rewritten)."""
+    out = {}
+    for root in (saves.SAVES / folder, saves.MODSAVE / folder):
+        for f in root.rglob("*") if root.is_dir() else []:
+            try:
+                st = f.stat()
+            except OSError:                                  # (gone between listing and stat: still being written)
+                out[str(f)] = (-1, 0)
+                continue
+            if f.is_file():
+                out[str(f)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+def wait_stable(folder: str, settle: float = 3.0, timeout: float = 90.0, poll: float = 0.5,
+                clock=time.monotonic, sleep=time.sleep) -> bool:
+    """Wait until the save folder's files stay the same (sizes and times) for `settle` seconds: the game has
+    finished writing. False: still changing after `timeout` (try again later)."""
+    end = clock() + timeout
+    last, since = snapshot(folder), clock()
+    while clock() < end:
+        if clock() - since >= settle:
+            return True
+        sleep(poll)
+        now = snapshot(folder)
+        if now != last:
+            last, since = now, clock()
+    return False
+
+
+class StillWriting(OSError):
+    """The game is (still) writing the save: nothing was packed."""
+
+
+def pack_stable(folder: str, hashes, settle: float = 3.0, timeout: float = 90.0, **kw):
+    """pack(), but only from a save the game has finished writing: waits for the files to settle first, and checks
+    nothing changed while they were read. Raises StillWriting otherwise."""
+    if not wait_stable(folder, settle, timeout, **kw):
+        raise StillWriting(f"the game is still writing {folder}")
+    before = snapshot(folder)
+    out = pack(folder, hashes)
+    if snapshot(folder) != before:
+        raise StillWriting(f"the game wrote {folder} while it was being read")
+    return out
 
 
 def install(files: list[dict], blob, folder: str | None) -> str:

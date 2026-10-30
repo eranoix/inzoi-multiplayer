@@ -29,6 +29,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import couple  # noqa: E402
 import houses  # noqa: E402
 import install  # noqa: E402
 import mods  # noqa: E402
@@ -44,7 +45,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -127,6 +128,96 @@ def loop_error(where: str, e: BaseException):
         log.warning("%s: unexpected error, carrying on: %r", where, e, exc_info=e)
     else:
         log.debug("%s: %r", where, e)
+
+
+# ------------------------------------------------------------------ support: what the diagnostics zip carries
+RECENT = collections.deque(maxlen=50)        # the latest notices and warnings/errors: {time, kind, text}
+CLOCK_MODES = ("host", "catchup")            # cfg["clock_mode"]: the leader's clock is everyone's / furthest ahead wins
+SECRET = re.compile(r"password|secret|token|^key$|admin_code", re.I)     # config keys left out of the diagnostics
+
+
+class _RecentErrors(logging.Handler):
+    def emit(self, record):
+        try:
+            RECENT.append({"time": record.created, "kind": record.levelname.lower(),
+                           "text": f"{record.name}: {record.getMessage()}"[:500]})
+        except Exception:                            # noqa: BLE001 - logging must never fail
+            pass
+
+
+if not any(isinstance(h, _RecentErrors) for h in logging.getLogger().handlers):
+    logging.getLogger().addHandler(_RecentErrors(logging.WARNING))
+
+
+def redact(v):
+    """A copy of the settings without passwords and keys (they'd be in the diagnostics zip)."""
+    if isinstance(v, dict):
+        return {k: ("***" if SECRET.search(str(k)) and isinstance(x, str) and x else redact(x)) for k, x in v.items()}
+    return [redact(x) for x in v] if isinstance(v, list) else v
+
+
+def desktop_dir() -> Path:
+    """The real Desktop (it can be redirected, e.g. into OneDrive). Tests set INZOI_MP_DESKTOP."""
+    if os.environ.get("INZOI_MP_DESKTOP"):
+        return Path(os.environ["INZOI_MP_DESKTOP"])
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            buf = ctypes.create_unicode_buffer(wintypes.MAX_PATH)
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buf) == 0:     # CSIDL_DESKTOPDIRECTORY
+                return Path(buf.value)
+        except (OSError, AttributeError):
+            pass
+    return Path.home() / "Desktop"
+
+
+def tail_bytes(f: Path, limit: int) -> bytes:
+    with open(f, "rb") as fh:
+        size = fh.seek(0, 2)
+        fh.seek(max(0, size - limit))
+        return fh.read()
+
+
+def write_diagnostics(status: dict, cfg: dict, extra: dict[str, str] | None = None, folder: Path | None = None) -> Path:
+    """inzoi-coop-diagnostico-<date>.zip on the Desktop: the program's logs, the in-game mod's reports and mailbox,
+    the game's and UE4SS's logs if found, the settings (no passwords or keys) and a status snapshot."""
+    import zipfile
+    folder = folder or desktop_dir()
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"inzoi-coop-diagnostico-{time.strftime('%Y-%m-%d_%H%M%S')}.zip"
+    files = [(f, f"logs/{f.name}", 8 << 20) for f in sorted(CONFIG_DIR.glob("*.log*"))]
+    files += [(f, f"logs/{f.name}", 1 << 20) for f in (getattr(updater, "DIR", CONFIG_DIR / "update") / "health.json",)]
+    out_dir = install.INSTALL_DIR / "out"
+    files += [(f, f"mod/out/{f.name}", 1 << 20) for f in sorted(out_dir.glob("*.cfg"))] if out_dir.exists() else []
+    files += [(install.MAILBOX_DIR / n, f"mod/mailbox/{n}", 1 << 20) for n in ("MPCmd.lua", "MPSeq.lua", "MPBulk.lua")]
+    files.append((install.INSTALL_DIR / "mod_manifest.json", "mod/mod_manifest.json", 1 << 20))
+    game_logs = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "BlueClient" / "Saved" / "Logs"
+    if game_logs.exists():
+        newest = sorted(game_logs.glob("*.log"), key=lambda f: f.stat().st_mtime, reverse=True)[:2]
+        files += [(f, f"game/{f.name}", 4 << 20) for f in newest]
+    try:
+        import ue4ss
+        binaries = ue4ss.game_binaries(cfg)
+        if binaries:
+            files += [(binaries / rel, f"game/{rel.replace('/', '_')}", 4 << 20)
+                      for rel in ("UE4SS.log", "ue4ss/UE4SS.log")]
+    except Exception as e:                           # noqa: BLE001 - one missing piece, not the whole zip
+        log.debug("diagnostics: UE4SS log: %r", e)
+    tmp = path.with_suffix(".tmp")
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for f, name, limit in files:
+            try:
+                if f.is_file():
+                    z.writestr(name, tail_bytes(f, limit))
+            except OSError as e:
+                z.writestr(name + ".error.txt", str(e))
+        z.writestr("config.json", json.dumps(redact(cfg), indent=1, ensure_ascii=False))
+        z.writestr("status.json", json.dumps(status, indent=1, ensure_ascii=False, default=str))
+        for name, text in (extra or {}).items():
+            z.writestr(name, text)
+    os.replace(tmp, path)
+    return path
 
 
 def read_config() -> dict:
@@ -240,7 +331,7 @@ class Remote:
         self.outfit = None
 
 
-class Companion(servers.Servers):
+class Companion(couple.Couple, servers.Servers):
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.version = VERSION
@@ -298,6 +389,7 @@ class Companion(servers.Servers):
         self.world_hashes = mods.Hashes(CONFIG_DIR / "world_hashes.json")
         self.world_asked = False     # offered to make my multiplayer save the shared world (once per run)
         self.servers_init(SERVER_DATA, CONFIG_DIR / "page-browser")
+        self.couple_init()                   # couple features: requests, backups, undo (couple.py)
         install.MAILBOX_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ helpers
@@ -312,6 +404,8 @@ class Companion(servers.Servers):
         """Where to connect: the server in this same program when hosting (and playing there), else the one picked."""
         if self.hosting and self.play_local:
             return "127.0.0.1", self.hosting[0], self.hosting[1]
+        if self.lan_override:                            # (the picked server, found on the home network for now)
+            return self.lan_override[0], self.lan_override[1], self.cfg.get("password", "")
         return self.cfg.get("server") or "", int(self.cfg.get("port") or 24242), self.cfg.get("password", "")
 
     async def send(self, msg: dict):
@@ -334,7 +428,7 @@ class Companion(servers.Servers):
                              "(or close it first).") from None
         self.tasks = [asyncio.create_task(self.keep_running(loop)) for loop in (
             self.game_loop, self.mailbox_loop, self.mods_loop, self.update_loop, self.menu_loop, self.directory_loop,
-            self.ingame_loop)]
+            self.ingame_loop, self.lan_loop)]
         backoff = 2
         while True:
             self.wake.clear()
@@ -495,6 +589,9 @@ class Companion(servers.Servers):
                 fut.set_result(m)
         elif t == "world":
             self.leader_world = m.get("world")
+        elif t == "event":
+            if m.get("kind") == "couple":
+                self.on_couple_event(m)
         elif t == "ping":
             await self.send({"t": "pong"})
         elif t == "kicked":
@@ -539,6 +636,7 @@ class Companion(servers.Servers):
     def update_remote(self, p: dict):
         r = self.remotes.get(p["id"]) or Remote(p["id"], p["name"])
         r.name = p["name"]
+        r.version = p.get("version") or getattr(r, "version", None)
         if p["id"] in self.puppet_ids and p["id"] not in self.despawning:
             r.spawned = True                 # the controller already has their puppet
         self.remotes[p["id"]] = r
@@ -615,6 +713,7 @@ class Companion(servers.Servers):
                     op.update({k: act[k] for k in ("obj", "ox", "oy", "oz")})
                     if st.get("anim"):
                         op["anim"] = st["anim"]
+                self.learn_bag(act)              # (couple actions: the game's own interaction ids)
                 if not act.get("player") or op["target"]:
                     self.mail.op("act", key=r.pid, **op)
         if act and act.get("npc") and st.get("anim") and st["anim"] != r.anim:
@@ -670,16 +769,21 @@ class Companion(servers.Servers):
             env = await self.g(call, "environment.get_state")
             self.my_weather = {"season": env.get("season"), "weather": env.get("weather")}
             await self.send({"t": "world", "world": self.my_weather})
-        # The clock is everyone's, the leader's too: whoever is behind moves forward to whoever is furthest ahead.
-        # Only ever forward and only within 12 h, so two players can't push each other back and forth.
+        # clock_mode "catchup": the clock is everyone's, the leader's too: whoever is behind moves forward to whoever is
+        # furthest ahead. Only ever forward and only within 12 h, so two players can't push each other back and forth.
+        # clock_mode "host" (the default): the leader's clock is the one (follow_leader_clock); the leader never moves.
         if not self.cfg.get("sync_time", True) or self.world != "play" or not self.my_clock:
             return
-        mine = self.my_clock[0] * 60 + self.my_clock[1]
-        ahead = [(c[0] * 60 + c[1] - mine) % 1440 for c in self.remote_clocks()]
-        behind = max([d for d in ahead if d < 720], default=0)  # more than 12 h "ahead" means behind me
-        if behind > 10:
-            log.info("catching up with your friends' time: %d minutes", behind)
-            await self.g(call, "environment.time_skip", minutes=behind)
+        if self.clock_mode() == "host":
+            if not leader:
+                await self.follow_leader_clock()
+        else:
+            mine = self.my_clock[0] * 60 + self.my_clock[1]
+            ahead = [(c[0] * 60 + c[1] - mine) % 1440 for c in self.remote_clocks()]
+            behind = max([d for d in ahead if d < 720], default=0)  # more than 12 h "ahead" means behind me
+            if behind > 10:
+                log.info("catching up with your friends' time: %d minutes", behind)
+                await self.g(call, "environment.time_skip", minutes=behind)
         w = self.leader_world
         if slow and w and not leader:
             env = await self.g(call, "environment.get_state")
@@ -697,7 +801,10 @@ class Companion(servers.Servers):
 
     async def keep_speed(self):
         """Game speed is everyone's: normal for all, except while every player's Zoi is asleep, when everyone's game
-        runs fast until somebody wakes. Pausing stays each player's own. Alone on the server, your speed is yours."""
+        runs fast until somebody wakes. Pausing stays each player's own. Alone on the server, your speed is yours.
+        clock_mode "host": the others take the leader's speed instead (follow_leader_speed)."""
+        if self.clock_mode() == "host" and self.leader and self.leader != self.me_id:
+            return await self.follow_leader_speed()
         others = [r for r in self.remotes.values() if r.state and time.time() - r.state_at < 10]
         clock = self.my_clock
         if not others or not clock or clock[3]:              # nobody to keep in step with / I'm paused
@@ -817,6 +924,8 @@ class Companion(servers.Servers):
             log.warning("bringing %s's Zoi in failed: %s", r.name if r else key, why or "no reason given")
             if r:
                 r.spawned, r.spawn_requested = False, time.time() - 5        # again in ~3 s (manage_puppets waits 8)
+        elif kind == "social":
+            self.on_social_report(text)
         elif kind == "log":
             log.info("[game] %s", text)
 
@@ -858,6 +967,7 @@ class Companion(servers.Servers):
                 if tick % 2 == 0:
                     a = await self.g(self.game.activity, self.my_entity)
                     act = await self.g(self.describe_act, a)
+                    self.learn_bag(act)
                     anim = a["anim"]["id"] if a.get("anim") else None
                 if tick % 10 == 1:
                     try:
@@ -891,7 +1001,8 @@ class Companion(servers.Servers):
                     self.n += 1
                     clock = list(self.my_clock[:2]) if self.my_clock and world == "play" else None
                     await self.send({"t": "state", "state": {"n": self.n, **st, "act": act, "anim": anim,
-                                                              "outfit": outfit, "clock": clock, "sleep": self.sleeping}})
+                                                              "outfit": outfit, "clock": clock, "sleep": self.sleeping,
+                                                              **self.extra_state(st)}})
                     await self.manage_puppets()
             except GameError as e:
                 log.debug("game: %s", e)
@@ -1099,6 +1210,7 @@ class Companion(servers.Servers):
 
     async def load_mp_save(self):
         mp = self.cfg["mp_save"]
+        await self.g(self.backup_save, mp.get("folder"), "before-load")     # (never fails: see couple.py)
         self.loading_save, self.auto_loaded = mp["folder"], True
         await self.g(self.game.call, "game.load", folder=mp["folder"])
 
@@ -1132,7 +1244,8 @@ class Companion(servers.Servers):
     def shared_world_on(self) -> bool:
         """The shared world is switched on once each player gets a household of their own in it (stages 2-3);
         until then only tests and cfg["shared_world"] turn it on."""
-        return bool(self.cfg.get("shared_world") or os.environ.get("INZOI_MP_SHARED_WORLD"))
+        return bool(self.cfg.get("shared_world") or self.cfg.get("shared_household")
+                    or os.environ.get("INZOI_MP_SHARED_WORLD"))
 
     def check_world(self):
         meta, mine = self.world_meta, self.local_world()
@@ -1196,6 +1309,7 @@ class Companion(servers.Servers):
                         raise ConnectionError(f"the server is missing part of the world ({why})")
             bar.finish()
             folder = (self.local_world().get("folder") or (self.cfg.get("mp_save") or {}).get("folder"))
+            await self.g(self.backup_save, folder, f"before-v{meta['version']}")
             folder = await self.g(world.install, meta["files"], lambda h: stage / h, folder)
             slot = world.newest_slot(folder)
             self.cfg["world"] = {"version": meta["version"], "folder": folder, "mtime": slot.stat().st_mtime}
@@ -1223,7 +1337,13 @@ class Companion(servers.Servers):
         self.world_busy = True
         base = self.local_world().get("version", 0) if base is None else base
         try:
-            files, paths, mtime = await self.g(world.pack, folder, self.world_hashes)
+            try:                                         # (never an autosave the game is still writing)
+                files, paths, mtime = await self.g(world.pack_stable, folder, self.world_hashes)
+            except world.StillWriting as e:
+                self.upload_wait = time.time()
+                log.info("not uploading the world yet: %s", e)
+                return
+            self.upload_wait = None
             offer = await self.world_request({"t": "world_save_offer", "files": files}, "world_save_offer")
             if offer.get("error"):
                 raise ValueError(offer["error"])
@@ -1648,6 +1768,243 @@ class Companion(servers.Servers):
             self.despawn(key)
         self.mail.flush()                                # (never raises: a held file is just skipped)
 
+    # ------------------------------------------------------------------ support: clock mode, partner cards, self-test,
+    # diagnostics (the panel's /selftest and /diag; cards in /status)
+    @property
+    def notice(self) -> str:
+        return self.__dict__.get("_notice", "")
+
+    @notice.setter
+    def notice(self, text):
+        if text and text != self.__dict__.get("_notice"):            # (kept for the diagnostics zip)
+            RECENT.append({"time": time.time(), "kind": "notice", "text": str(text)[:500]})
+        self.__dict__["_notice"] = text
+
+    def clock_mode(self) -> str:
+        m = self.cfg.get("clock_mode") or "host"
+        return m if m in CLOCK_MODES else "host"
+
+    def extra_state(self, st: dict) -> dict:
+        """What my state carries besides position and action: my lot's name (looked up once per lot), my game's time
+        and speed. clock_mode "host": only the leader shares "clock" (the one others follow); "time" is for showing."""
+        site, lots = st.get("site"), self.__dict__.setdefault("_lot_names", {})
+        if site not in (None, -1) and site not in lots:
+            lots[site] = ""
+            asyncio.get_running_loop().create_task(self.lookup_lot(site))
+        c = self.my_clock
+        out = {"lot": lots.get(site, ""), "speed": c[2] if c else None, "time": list(c[:2]) if c else None}
+        if self.clock_mode() == "host" and self.leader and self.leader != self.me_id:
+            out["clock"] = None                          # never pushes anyone's clock
+        return out
+
+    async def lookup_lot(self, site):
+        lots = self._lot_names
+        try:
+            lots[site] = await self.g(self.game.site_name, site) or ""
+        except GameError:
+            asyncio.get_running_loop().call_later(30, lots.pop, site, None)      # (loading: ask again later)
+
+    def leader_state(self) -> dict | None:
+        r = self.remotes.get(self.leader or "")
+        return r.state if r and r.state and time.time() - r.state_at < 10 else None
+
+    async def follow_leader_clock(self):
+        """clock_mode "host", not the leader: behind the leader's clock, jump forward to it; ahead of it on the same
+        day (the leader paused), go back to it. Never across midnight backwards (that would be a day earlier): wait."""
+        lc = (self.leader_state() or {}).get("clock")
+        if not lc:
+            return                                       # the leader is paused, away or not in the game
+        mine, theirs = self.my_clock[0] * 60 + self.my_clock[1], lc[0] * 60 + lc[1]
+        d = (theirs - mine) % 1440
+        if 10 < d < 720:
+            log.info("following the host's time: %d minutes forward", d)
+            await self.g(self.game.call, "environment.time_skip", minutes=d)
+        elif d >= 720 and mine - theirs > 10 and not self.__dict__.get("_no_set_time"):
+            log.info("following the host's time: back to %02d:%02d", lc[0], lc[1])
+            try:
+                await self.g(self.game.call, "environment.set_time", hour=int(lc[0]), minute=int(lc[1]))
+            except GameError as e:
+                if "isn't reachable" not in str(e):
+                    self._no_set_time = True             # (this game has no way back: wait for the host instead)
+                    log.info("this game can't turn its clock back (%s): waiting for the host's time", e)
+
+    async def follow_leader_speed(self):
+        st, clock = self.leader_state(), self.my_clock
+        if not st or not st.get("clock") or not clock or clock[3]:
+            return                                       # the leader is paused or away / I'm paused: my own speed
+        want = st.get("speed")
+        if isinstance(want, (int, float)) and 0 < want <= 10 and abs(clock[2] - want) > 0.01:
+            log.info("following the host's game speed: %s", want)
+            await self.g(self.game.call, "environment.time_speed", speed=want)
+
+    def partner_cards(self) -> list[dict]:
+        """Where each friend is and what they're doing, from their latest state (the panel's partner card)."""
+        out, now = [], time.time()
+        for r in self.remotes.values():
+            st = r.state or {}
+            act = st.get("act") or {}
+            bag = act.get("bag") or ""
+            with_ = act.get("player")
+            out.append({
+                "id": r.pid, "name": r.name, "version": getattr(r, "version", None), "leader": r.pid == self.leader,
+                "zoi": f"{r.profile['first_name']} {r.profile['last_name']}".strip() if r.profile else "",
+                "city": st.get("city") or "", "lot": st.get("lot") or "", "site": st.get("site"),
+                "action": bag or None, "action_text": re.sub(r"(?<=[a-z])(?=[A-Z])|_+", " ", bag or st.get("anim") or "").strip(),
+                "with": None if not with_ else "you" if with_ == self.me_id else
+                getattr(self.remotes.get(with_), "name", None), "npc": bool(act.get("npc")), "anim": st.get("anim"),
+                "outfit": st.get("outfit"), "sleep": bool(st.get("sleep")), "time": st.get("time") or st.get("clock"),
+                "speed": st.get("speed"), "mood": st.get("mood"), "needs": st.get("needs"),
+                "here": bool(r.pid in self.puppet_ids and not r.hidden),
+                "away": bool(st and st.get("city") != self.my_city),
+                "online": bool(r.state_at and now - r.state_at < 15),
+                "last_seen_s": int(now - r.state_at) if r.state_at else None})
+        return out
+
+    def support_status(self) -> dict:
+        return {"partners": self.partner_cards(), "clock_mode": self.clock_mode(),
+                "via_lan": servers.address_text(*self.lan_override) if self.lan_override else None}
+
+    async def self_test(self) -> list[dict]:
+        """Checks run side by side, each within a few seconds: [{id, ok (true/false, null = doesn't apply), detail,
+        hint_code (what the panel suggests when it failed), data}]."""
+        host, port, _ = self.address()
+        tailnet = False
+        try:
+            import ipaddress
+            tailnet = ipaddress.ip_address(host) in servers.netinfo.TAILNET
+        except ValueError:
+            tailnet = host.endswith(".ts.net")
+
+        def res(cid, ok, detail, hint=None, **data):
+            return {"id": cid, "ok": ok, "detail": detail, "hint_code": None if ok or ok is None else hint, "data": data}
+
+        async def game_api():
+            url = self.game.game_url()
+            mcp_port = int(url.rsplit(":", 1)[1].split("/")[0]) if url.count(":") >= 2 else None
+            try:
+                st = await asyncio.wait_for(self.g(self.game.call, "game.get_state"), 4)
+                return res("game_api", True, f"inZOI answers on {url} ({st.get('phase') or 'up'})", port=mcp_port)
+            except (GameError, asyncio.TimeoutError) as e:
+                return res("game_api", False, f"inZOI doesn't answer on {url}: {e or 'no answer'}", "start_game",
+                           port=mcp_port)
+
+        async def mod_loaded():
+            age = time.time() - self.mod["beat"] if self.mod["beat"] else None
+            if age is not None and age < 15:
+                return res("mod_loaded", True, f"the in-game mod is {self.mod['state']} (heard {age:.0f} s ago)",
+                           age_s=round(age, 1), puppets=len(self.puppet_ids))
+            if self.world == "out":
+                return res("mod_loaded", False, "the mod runs once a save is loaded", "load_save", age_s=age)
+            return res("mod_loaded", False, f"the in-game mod is quiet ({self.mod['state']})", "reload_mod", age_s=age)
+
+        async def server_reachable():
+            if not host:
+                return res("server_reachable", False, "no server picked yet", "pick_server")
+            start = time.monotonic()
+            try:
+                _, w = await asyncio.wait_for(asyncio.open_connection(host, port), 4)
+                w.close()
+                return res("server_reachable", True, f"{servers.address_text(host, port)} answers",
+                           address=servers.address_text(host, port), ms=int((time.monotonic() - start) * 1000),
+                           via_lan=bool(self.lan_override))
+            except (OSError, asyncio.TimeoutError) as e:
+                hint = "restart_program" if self.on_own_server() else "check_tailscale" if tailnet else "check_server"
+                return res("server_reachable", False, f"{servers.address_text(host, port)}: {servers.why(e)}", hint,
+                           address=servers.address_text(host, port))
+
+        async def logged_in():
+            if self.writer and self.me_id:
+                return res("logged_in", True, f"on {(self.server_info or {}).get('name') or host} as {self.cfg['name']}",
+                           players=len(self.remotes))
+            hint = {"wrong_password": "check_password", "version_mismatch": "update_partner", "banned": "banned",
+                    "full": "server_full"}.get(self.notice_code or "", "wait_connect" if host else "pick_server")
+            return res("logged_in", False, self.connect_block or self.notice or "not connected", hint,
+                       code=self.notice_code)
+
+        async def versions_match():
+            theirs = {r.name: r.version for r in self.remotes.values() if getattr(r, "version", None)}
+            if (self.server_info or {}).get("version"):
+                theirs["server"] = self.server_info["version"]
+            if not theirs:
+                return res("versions_match", None, "nobody to compare with yet", mine=VERSION)
+            diff = {k: v for k, v in theirs.items() if str(v) != VERSION}
+            if not diff:
+                return res("versions_match", True, f"everyone has {VERSION}", mine=VERSION, theirs=theirs)
+
+            def key(v):
+                return tuple(int(x) if x.isdigit() else 0 for x in str(v).split("."))
+            older = any(key(v) > key(VERSION) for v in diff.values())
+            return res("versions_match", False, f"you have {VERSION}; " + ", ".join(f"{k} has {v}" for k, v in diff.items()),
+                       "update_self" if older else "update_partner", mine=VERSION, theirs=theirs)
+
+        async def tailscale():
+            ts = await asyncio.to_thread(servers.netinfo.tailscale_status)
+            need = tailnet or bool(self.hosting)         # (the partner reaches a host over Tailscale)
+            if not ts["installed"]:
+                return res("tailscale", False if need else None, "Tailscale isn't installed", "install_tailscale")
+            if ts["running"] and ts["online"]:
+                return res("tailscale", True, f"Tailscale is on ({ts['ip']})", ip=ts["ip"])
+            return res("tailscale", False if need else None, f"Tailscale is {ts.get('state') or 'off'}",
+                       "check_tailscale", state=ts.get("state"))
+
+        async def nordvpn_running():
+            procs = await asyncio.to_thread(servers.netinfo.running_processes, ("nordvpn.exe", "nordvpn-service.exe"))
+            if "nordvpn.exe" in procs:
+                return res("nordvpn_running", False, "NordVPN is open: it can hide the other PC (LAN invisibility)",
+                           "disable_nordvpn", processes=sorted(procs))
+            return res("nordvpn_running", True, "NordVPN isn't open" + (" (only its service runs)" if procs else ""),
+                       processes=sorted(procs))
+
+        checks = (game_api, mod_loaded, server_reachable, logged_in, versions_match, tailscale, nordvpn_running)
+
+        async def guarded(fn):
+            try:
+                return await asyncio.wait_for(fn(), 8)
+            except Exception as e:                       # noqa: BLE001 - a failed check is a result too
+                return res(fn.__name__, False, f"the check failed: {e!r}")
+        return list(await asyncio.gather(*(guarded(fn) for fn in checks)))
+
+    def diag_status(self, tests: list | None = None) -> dict:
+        host, port, _ = self.address()
+        hosting = self.hosting_state() if self.hosted else None
+        if hosting:
+            hosting = {k: v for k, v in hosting.items() if k != "admin_code"}
+        import platform
+        return {
+            "time": datetime.datetime.now().isoformat(timespec="seconds"), "version": VERSION, "python": sys.version,
+            "platform": platform.platform(), "frozen": updater.frozen(), "name": self.cfg.get("name"),
+            "mode": self.cfg.get("mode"), "clock_mode": self.clock_mode(), "sync_time": self.cfg.get("sync_time", True),
+            "connection": {"connected": bool(self.writer and self.me_id), "address": servers.address_text(host, port)
+                           if host else None, "primary": self.cfg.get("server"), "port": self.cfg.get("port"),
+                           "via_lan": bool(self.lan_override), "me": self.me_id, "leader": self.leader,
+                           "connected_at": self.connected_at, "server": self.server_info, "notice": self.notice,
+                           "notice_code": self.notice_code, "blocked": self.connect_block},
+            "hosting": hosting, "lan": self.lan_view(),
+            "game": {"world": self.world, "url": self.game.game_url(), "mod": self.mod, "city": self.my_city,
+                     "entity": self.my_entity, "clock": self.my_clock, "save": self.mp_name(),
+                     "save_active": self.mp_active()},
+            "partners": self.partner_cards(),
+            "puppets": {"ids": self.puppet_ids, "despawning": list(self.despawning)},
+            "mods": self.mods_status(), "update": self.update_view(), "selftest": tests, "recent": list(RECENT)}
+
+    async def diagnostics(self) -> dict:
+        tests = await self.self_test()
+        extra = {}
+        mp = sys.modules.get("inzoi_mp_server")
+        if self.hosted and mp is not None:
+            extra["server_recent.log"] = "\n".join(map(str, mp.RECENT))
+        path = await asyncio.to_thread(write_diagnostics, self.diag_status(tests), dict(self.cfg), extra)
+        log.info("diagnostics saved: %s", path)
+        return {"ok": True, "path": str(path)}
+
+    def support_routes(self) -> dict:
+        async def selftest(_):
+            return {"ok": True, "checks": await self.self_test()}
+
+        async def diag(_):
+            return await self.diagnostics()
+        return {"/selftest": selftest, "/diag": diag}
+
     # ------------------------------------------------------------------ in-game panel
     def ui_routes(self) -> dict:
         async def status(_):
@@ -1673,7 +2030,8 @@ class Companion(servers.Servers):
                     "update": {**{k: (self.update or {}).get(k) for k in ("version", "state", "done", "total")},
                                "box": self.update_box_view()},
                     "world": {"server": (self.world_meta or {}).get("version"), "local": self.local_world().get("version"),
-                              "by": (self.world_meta or {}).get("by"), "box": self.world_status_box()}}
+                              "by": (self.world_meta or {}).get("by"), "box": self.world_status_box()},
+                    "household": self.household_view(), **self.couple_view(), **self.support_status()}
 
         async def chat(body):
             text = str(body.get("text", "")).strip()[:500]
@@ -1699,8 +2057,17 @@ class Companion(servers.Servers):
                 if k in body and (str(body[k]).strip() or k == "password") and body[k] != self.cfg.get(k):
                     self.cfg[k] = str(body[k]).strip()
                     changed = True
+            if "shared_household" in body:              # living together: the shared world, with backups and undo
+                self.cfg["shared_household"] = bool(body["shared_household"])
+                save_config(self.cfg)
+                self.world_asked = False
+                self.check_world()
             if "sync_time" in body:
                 self.cfg["sync_time"] = bool(body["sync_time"])
+                self.world_synced = 0.0
+                save_config(self.cfg)
+            if body.get("clock_mode") in CLOCK_MODES:    # "host": the leader's clock is everyone's; "catchup"
+                self.cfg["clock_mode"] = body["clock_mode"]
                 self.world_synced = 0.0
                 save_config(self.cfg)
             if "port" in body and str(body["port"]).isdigit():
@@ -1713,7 +2080,8 @@ class Companion(servers.Servers):
                 self.switch_server()             # reconnect with the new settings
             return {"ok": True, "name": self.cfg["name"],
                     "server": "this PC" if self.hosting and self.play_local else self.cfg.get("server"),
-                    "port": self.address()[1], "sync_time": bool(self.cfg.get("sync_time", True))}
+                    "port": self.address()[1], "sync_time": bool(self.cfg.get("sync_time", True)),
+                    "shared_household": bool(self.cfg.get("shared_household")), "clock_mode": self.clock_mode()}
 
         async def house_list(_):
             added = self.cfg.get("added_houses", {})
@@ -1769,7 +2137,8 @@ class Companion(servers.Servers):
 
         return {"/status": status, "/chat": chat, "/join": join, "/settings": settings,
                 "/houses": house_list, "/share": share, "/add_house": add_house, "/mods": mods_answer,
-                "/save": save_answer, "/update": update_answer, "/world": world_answer, **self.server_routes()}
+                "/save": save_answer, "/update": update_answer, "/world": world_answer, **self.server_routes(),
+                **self.couple_routes(), **self.support_routes()}
 
 
 def setup_logging(verbose: bool):

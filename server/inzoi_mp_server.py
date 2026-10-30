@@ -30,6 +30,7 @@ import asyncio
 import base64
 import collections
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -41,7 +42,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 PROTOCOL = 1
 MAX_LINE = 32 * 1024 * 1024        # house snapshots can be large (only after a successful hello)
 MAX_LINE_BEFORE_HELLO = 64 * 1024  # hello, info, directory messages: small; a stranger can't make us buffer 32 MB
@@ -63,6 +64,8 @@ ANNOUNCE_EVERY = 60                # seconds between a public server's announcem
 LISTING_TTL = 180                  # a directory drops a server it hasn't heard from for this long
 RECHECK = 300                      # seconds before a directory checks again that a listed server can be reached
 RESTART_EXIT = 75                  # exit code after an admin's restart (systemd's Restart=always starts it again)
+DISCOVER_ASK = b"INZOI-MP?"         # LAN discovery: a UDP datagram to the server's port (broadcast) gets a "discover"
+LAN_NETS = [ipaddress.ip_network("100.64.0.0/10")]   # (Tailscale's range isn't "private" to ipaddress; answered too)
 SETTINGS = {"name": "", "description": "", "motd": "", "public": False, "password": "", "max_players": 16,
             "public_address": "", "directories": [], "admins": [], "bans": {}}
 
@@ -370,6 +373,41 @@ class Client:
             pass
 
 
+class Discovery(asyncio.DatagramProtocol):
+    """LAN discovery on UDP (the same port number as TCP): b"INZOI-MP?" from the home network, broadcast or not, gets
+    {"t": "discover", name, port, version, protocol, id, password (bool), players, max_players, hosted}. Only private,
+    link-local, loopback and Tailscale addresses are answered, each at most 5 times a second."""
+
+    def __init__(self, server: "Server"):
+        self.server, self.transport, self.last = server, None, {}
+
+    def connection_made(self, transport) -> None:
+        self.transport = transport
+
+    def datagram_received(self, data: bytes, addr) -> None:
+        if data.strip() != DISCOVER_ASK:
+            return
+        try:
+            ip = ipaddress.ip_address(addr[0])
+        except ValueError:
+            return
+        if not (ip.is_private or ip.is_loopback or ip.is_link_local or any(ip in n for n in LAN_NETS)):
+            return
+        t = now()
+        if t - self.last.get(addr[0], 0) < 0.2:
+            return
+        if len(self.last) > 1000:
+            self.last.clear()
+        self.last[addr[0]] = t
+        try:
+            self.transport.sendto(json.dumps(self.server.discover_reply()).encode(), addr)
+        except OSError:
+            pass
+
+    def error_received(self, exc) -> None:          # (Windows reports an unreachable asker here: nothing to do)
+        pass
+
+
 class Server:
     def __init__(self, store: Store, password: str | None = None, max_players: int | None = None,
                  motd: str | None = None, hosted: bool = False, name: str | None = None, directory: bool = False):
@@ -398,6 +436,7 @@ class Server:
         self.world_offers: dict[str, dict] = {}   # player id -> {sha: size} of the world files they're uploading
         self.restart_requested = False
         self.claims: dict[str, collections.deque] = {}   # address -> times of its recent admin_claim attempts
+        self.udp = None                          # the LAN discovery endpoint (start())
         store.gc_blobs()
 
     @property
@@ -811,6 +850,23 @@ class Server:
     async def on_info(self, c: Client, msg: dict) -> None:
         await c.send(self.info())
 
+    def discover_reply(self) -> dict:
+        """The answer to a LAN discovery datagram (small: one UDP packet)."""
+        s = self.store.settings
+        return {"t": "discover", "name": self.name(), "port": self.port, "version": VERSION, "protocol": PROTOCOL,
+                "id": s["id"], "password": bool(s["password"]), "players": len(self.clients),
+                "max_players": self.max_players, "hosted": self.hosted}
+
+    async def hold_udp(self) -> None:
+        """Keeps the LAN discovery endpoint open for as long as the server's background tasks run (every way of
+        stopping a server cancels them)."""
+        try:
+            await asyncio.Event().wait()
+        finally:
+            if self.udp:
+                self.udp.close()
+                self.udp = None
+
     # ------------------------------------------------------------------ admin console
     async def on_admin(self, c: Client, msg: dict) -> None:
         """{op, ref, ...}: answered with {t: admin, ref, op, ok, error?, ...}. Only for the server's admins."""
@@ -1120,7 +1176,12 @@ async def start(args):
              " - public" if store.settings["public"] else "", " - keeps the public server list" if server.directory
              is not None else "")
     srv.mp_server = server
-    return srv, asyncio.gather(server.keepalive(), server.announcer())
+    try:                                         # LAN discovery (UDP, same port): every way of hosting gets it
+        server.udp, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+            lambda: Discovery(server), local_addr=(args.host or "0.0.0.0", server.port))
+    except OSError as e:
+        log.warning("LAN discovery is off (UDP port %d: %s)", server.port, e.strerror or e)
+    return srv, asyncio.gather(server.keepalive(), server.announcer(), server.hold_udp())
 
 
 async def main_async(args) -> None:

@@ -99,13 +99,13 @@ button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visibl
 .say .btn { margin-left: 6px; }
 
 .tabs { display: flex; margin: 2px 0 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.14); flex-shrink: 0; }
-.tab { font-size: 15px; padding: 4px 2px 7px; margin-right: 16px; color: #c9d0db; cursor: pointer; background: none;
+.tab { font-size: 15px; padding: 4px 2px 7px; margin-right: 12px; color: #c9d0db; cursor: pointer; background: none;
        border: 0; border-bottom: 2px solid transparent; user-select: none; }
 .tab:hover { color: #fff; }
 .tab.on { color: #fff; border-bottom-color: #7fd1b9; font-weight: bold; }
 .pane { display: none; flex: 1; min-height: 0; flex-direction: column; overflow: hidden; }
 .pane.on { display: flex; }
-#pane-houses, #pane-mods, #pane-settings { overflow-y: auto; }
+#pane-houses, #pane-mods, #pane-settings, #pane-help { overflow-y: auto; }
 .hint { font-size: 14px; color: #c9d0db; line-height: 1.4; margin-bottom: 4px; }
 .house { display: flex; align-items: center; padding: 6px 8px; margin-bottom: 5px; border-radius: 8px;
          background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12); font-size: 15px; }
@@ -137,6 +137,69 @@ button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visibl
 .mod { font-size: 15px; padding: 3px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mod .ok { color: #8fe0c8; margin-right: 6px; }
 .mod .no { color: #ffc56e; margin-right: 6px; }
+
+/* incoming requests from the partner (hug, kiss, invite...): big and impossible to miss */
+.reqs { flex-shrink: 0; }
+.req { padding: 9px 10px; margin-bottom: 8px; border-radius: 10px; font-size: 16px; line-height: 1.35; font-weight: bold;
+       background: rgba(240, 140, 190, 0.22); border: 2px solid rgba(250, 160, 205, 0.85); }
+.req .row2 { display: flex; margin-top: 7px; }
+.req .btn { flex: 1; padding: 8px 6px; font-size: 16px; }
+.req .btn.no { margin-left: 8px; background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.35); color: #eef1f6; }
+.req .left { font-size: 13px; font-weight: normal; color: #c9d0db; margin-top: 4px; }
+
+/* the partner card */
+.pcard { flex-shrink: 0; padding: 8px 10px; margin-bottom: 8px; border-radius: 10px;
+         background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.14); display: none; }
+.pcard .head { display: flex; align-items: center; cursor: pointer; }
+.pcard .pname { flex: 1; min-width: 0; font-size: 16px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pcard .pdot { width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; background: rgba(238, 241, 246, 0.5); flex-shrink: 0; }
+.pcard .pdot.on { background: #7fd1b9; }
+.pcard .fold { font-size: 13px; color: #c9d0db; margin-left: 6px; flex-shrink: 0; }
+.pcard .pline { font-size: 14px; color: #c9d0db; margin-top: 2px; line-height: 1.35; word-wrap: break-word; }
+.pcard .pline.doing { color: #eef1f6; }
+.pcard .prow { display: flex; margin: 7px -3px 0; }
+.pcard .prow .btn { flex: 1; padding: 7px 4px; font-size: 14px; white-space: normal; margin: 0 3px; }
+.pcard .acts .btn { background: rgba(240, 140, 190, 0.18); border-color: rgba(250, 160, 205, 0.6); }
+.pcard .acts .btn:hover { background: rgba(240, 140, 190, 0.32); }
+.pcard .sent { font-size: 14px; color: #ffd08a; margin-top: 6px; display: none; }
+
+/* settings sections that open and close */
+.sect { margin: 4px 0 10px; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.14); background: rgba(255, 255, 255, 0.04); }
+.sect-head { display: flex; justify-content: space-between; width: 100%; text-align: left; padding: 8px 10px; font-size: 15px; font-weight: bold; cursor: pointer;
+             background: none; border: 0; color: #eef1f6; }
+.sect-head .arrow { color: #c9d0db; margin-left: 8px; }
+.sect-body { padding: 0 10px 10px; display: none; }
+.sect.open .sect-body { display: block; }
+.choice { display: block; width: 100%; text-align: left; padding: 8px 10px; margin-bottom: 6px; border-radius: 8px; font-size: 15px;
+          cursor: pointer; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.18); color: #c9d0db; }
+.choice.on { background: rgba(127, 209, 185, 0.22); border-color: rgba(127, 209, 185, 0.8); color: #eef1f6; font-weight: bold; }
+.hh-line { font-size: 14px; line-height: 1.4; margin-bottom: 6px; }
+.hh-line.warn { color: #ffd08a; }
+.hh-line.ok { color: #8fe0c8; }
+.hh-line.bad { color: #f6a49b; }
+.wide { display: block; width: 100%; padding: 9px 10px; font-size: 15px; margin-bottom: 8px; }
+.confirm { padding: 8px 10px; margin-bottom: 8px; border-radius: 10px; font-size: 14px; line-height: 1.4; display: none;
+           background: rgba(240, 120, 110, 0.14); border: 1px solid rgba(240, 120, 110, 0.6); }
+.confirm .prow { display: flex; margin: 7px -3px 0; }
+.confirm .btn { flex: 1; padding: 7px 4px; margin: 0 3px; }
+.confirm .btn.danger { background: rgba(240, 110, 100, 0.3); border-color: rgba(240, 120, 110, 0.8); }
+.bk { display: flex; align-items: center; padding: 5px 8px; margin-bottom: 5px; border-radius: 8px; font-size: 14px;
+      background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.12); }
+.bk .t { flex: 1; min-width: 0; }
+.bk .t .s { font-size: 12px; color: #c9d0db; }
+.bk .btn { padding: 4px 8px; font-size: 13px; margin-left: 6px; }
+
+/* help: the connection check */
+.check { display: flex; align-items: flex-start; padding: 6px 8px; margin-bottom: 5px; border-radius: 8px; font-size: 15px; line-height: 1.35;
+         background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.10); }
+.check .mark { width: 22px; flex-shrink: 0; font-weight: bold; color: #c9d0db; }
+.check.ok .mark { color: #8fe0c8; }
+.check.bad { background: rgba(240, 110, 100, 0.12); border-color: rgba(240, 120, 110, 0.5); }
+.check.bad .mark { color: #f6a49b; }
+.check .t { flex: 1; min-width: 0; word-wrap: break-word; }
+.check .s { font-size: 13px; color: #c9d0db; }
+.check .fix { font-size: 14px; color: #ffd08a; margin-top: 3px; }
+.diag-out { font-size: 14px; line-height: 1.4; margin: 2px 0 10px; word-wrap: break-word; }
 </style>
 </head>
 <body>
@@ -155,11 +218,23 @@ button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visibl
       <div class="txt"><span id="status" data-i18n>Looking for the inZOI Multiplayer program...</span><span class="sub" id="conn-sub"></span>
         <button type="button" class="btn" id="conn-retry" style="display:none" data-i18n>Try again</button></div>
     </div>
+    <div class="reqs" id="reqs" role="alert" aria-live="assertive"></div>
+    <div class="pcard" id="pcard">
+      <div class="head" id="p-head" role="button" data-i18n-title="Show or hide the details"><span class="pdot" id="p-dot"></span><span class="pname" id="p-name"></span><span class="fold" id="p-fold">▾</span></div>
+      <div id="p-body">
+        <div class="pline" id="p-where"></div>
+        <div class="pline doing" id="p-doing"></div>
+        <div class="pline" id="p-seen"></div>
+        <div class="prow"><button type="button" class="btn" id="p-goto" data-i18n>Go to my partner</button><button type="button" class="btn" id="p-invite" data-i18n>Invite to my home</button></div>
+        <div class="prow acts"><button type="button" class="btn" id="a-hug" data-i18n>Hug</button><button type="button" class="btn" id="a-kiss" data-i18n>Kiss</button><button type="button" class="btn" id="a-dance" data-i18n>Dance</button><button type="button" class="btn" id="a-wave" data-i18n>Wave</button></div>
+        <div class="sent" id="p-sent"></div>
+      </div>
+    </div>
     <div class="notice" id="notice" role="alert"></div>
     <div class="save-box" id="update-box"><div id="update-text"></div><div id="update-buttons"></div></div>
     <div class="save-box" id="world-box"><div id="world-text"></div><div id="world-buttons"></div></div>
     <div class="save-box" id="save-box"><div id="save-text"></div><div id="save-buttons"></div></div>
-    <div class="tabs" role="tablist"><button type="button" role="tab" class="tab on" data-tab="people" data-i18n>People</button><button type="button" role="tab" class="tab" data-tab="houses" data-i18n>Houses</button><button type="button" role="tab" class="tab" data-tab="mods" id="tab-mods">Mods</button><button type="button" role="tab" class="tab" data-tab="settings" data-i18n>Settings</button></div>
+    <div class="tabs" role="tablist"><button type="button" role="tab" class="tab on" data-tab="people" data-i18n>People</button><button type="button" role="tab" class="tab" data-tab="houses" data-i18n>Houses</button><button type="button" role="tab" class="tab" data-tab="mods" id="tab-mods">Mods</button><button type="button" role="tab" class="tab" data-tab="settings" data-i18n>Settings</button><button type="button" role="tab" class="tab" data-tab="help" data-i18n>Help</button></div>
     <div class="pane on" id="pane-people">
       <div class="label" data-i18n>Players</div>
       <div class="players" id="players"></div>
@@ -188,6 +263,29 @@ button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visibl
       <div id="m-list"></div>
     </div>
     <div class="pane" id="pane-settings">
+      <div class="sect" id="sect-home">
+        <button type="button" class="sect-head" id="hh-head"><span data-i18n>Living together</span><span class="arrow" id="hh-arrow">▸</span></button>
+        <div class="sect-body">
+          <button type="button" class="toggle" id="hh-toggle" role="switch" aria-checked="false"><span class="box" aria-hidden="true"></span><span data-i18n>Share one household (we play in the same world and save it together)</span></button>
+          <div class="hh-line" id="hh-saved"></div>
+          <div class="hh-line warn" id="hh-behind"></div>
+          <div class="hh-line" id="hh-busy"></div>
+          <div class="hh-line" id="hh-undo"></div>
+          <button type="button" class="btn wide" id="hh-undo-btn" data-i18n>Undo the last save</button>
+          <div class="confirm" id="hh-confirm"><div id="hh-confirm-text"></div>
+            <div class="prow"><button type="button" class="btn danger" id="hh-confirm-yes" data-i18n>Yes, go back</button><button type="button" class="btn" id="hh-confirm-no" data-i18n>Cancel</button></div></div>
+          <div class="label" data-i18n>Backups on this PC</div>
+          <div id="hh-backups"></div>
+        </div>
+      </div>
+      <div class="sect" id="sect-clock">
+        <button type="button" class="sect-head" id="clock-head"><span data-i18n>Clock</span><span class="arrow" id="clock-arrow">▸</span></button>
+        <div class="sect-body">
+          <button type="button" class="choice" id="clock-host" data-i18n>Follow whoever hosts (recommended)</button>
+          <button type="button" class="choice" id="clock-catchup" data-i18n>Adjust between the two of us</button>
+          <div class="hint" data-i18n>Adjusting: whoever is behind in game time moves forward to the other.</div>
+        </div>
+      </div>
       <label class="field"><span data-i18n>Your name</span><input id="s-name" maxlength="40"></label>
       <label class="field"><span data-i18n>Server</span><input id="s-server"></label>
       <label class="field"><span data-i18n>Port</span><input id="s-port"></label>
@@ -196,6 +294,14 @@ button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visibl
       <label class="field"><span data-i18n>Language</span><select id="s-lang"><option value="pt-BR">Português (Brasil)</option><option value="en">English</option></select></label>
       <button type="button" class="btn" id="s-save" data-i18n>Save and reconnect</button>
       <div class="hint version" id="s-version"></div>
+    </div>
+    <div class="pane" id="pane-help">
+      <div class="hint" data-i18n>Something not working? Check the connection: each line says what is wrong and what to do.</div>
+      <button type="button" class="btn wide" id="help-check" data-i18n>Check connection</button>
+      <div id="help-checks"></div>
+      <div class="label" data-i18n>Still not working?</div>
+      <button type="button" class="btn wide" id="help-diag" data-i18n>Send diagnostics</button>
+      <div class="diag-out" id="help-diag-out"></div>
     </div>
   </div>
 </div>

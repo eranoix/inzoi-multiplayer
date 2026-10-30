@@ -24,11 +24,11 @@
 
     I.apply(document);
 
-    function post(path, body, cb) {
+    function post(path, body, cb, ms) {                // ms: how long to wait (default 4 s; the self-test takes longer)
         var x = new XMLHttpRequest();
         x.open('POST', API + path, true);
         x.setRequestHeader('Content-Type', 'application/json');
-        x.timeout = 4000;
+        x.timeout = ms || 4000;
         x.onreadystatechange = function () {
             if (x.readyState !== 4) { return; }
             var res = null;
@@ -238,6 +238,7 @@
                 }
             }
             subText = t('You are {name} on {server}', { name: s.name, server: s.server }) +
+                (s.via_lan ? ' - ' + t('connected through the local network') : '') +
                 (s.mod !== 'running' ? ' (' + t('getting the game ready') + ')' : '');
         } else {
             disconnectedSince = disconnectedSince || Date.now();
@@ -288,9 +289,15 @@
         renderNotice(s);
         if (!s) {
             renderTitle(null);
+            $('pcard').style.display = 'none';
             return;
         }
         renderPlayers(s);
+        renderRequests(s);
+        renderCard(s);
+        renderSent(s);
+        renderHousehold(s);
+        renderClock(s);
         renderChat(s);
         renderTitle(s);
         renderMods(s.mods);
@@ -365,6 +372,8 @@
         I.setLang($('s-lang').value);
         shownBoxes = {};
         modsKey = null;
+        backupsKey = null;
+        if (hhOpen) { loadBackups(); }
         render(lastStatus);
     });
     ['s-name', 's-server', 's-port', 's-password'].forEach(function (id) {
@@ -522,7 +531,7 @@
             tabs[i].className = 'tab' + (on ? ' on' : '') + (tabs[i].className.indexOf(' alert') >= 0 ? ' alert' : '');
             tabs[i].setAttribute('aria-selected', on ? 'true' : 'false');
         }
-        ['people', 'houses', 'mods', 'settings'].forEach(function (p) {
+        ['people', 'houses', 'mods', 'settings', 'help'].forEach(function (p) {
             $('pane-' + p).className = 'pane' + (p === name ? ' on' : '');
         });
         if (housesTimer) { clearInterval(housesTimer); housesTimer = null; }
@@ -534,6 +543,436 @@
             tabs[i].addEventListener('click', function (e) { showTab(e.currentTarget.getAttribute('data-tab')); });
         }
     })();
+
+    // ------------------------------------------------------------------ the couple: partner card, hugs and kisses,
+    // invitations, requests from the partner. Everything updated in place, like the player rows.
+    var N = function (s) { return s; };             // marks an English text as a translation key (i18n.js has it)
+    var REQ_LIFE = 90;                              // seconds a request stays open (the companion's limit)
+    var ERRORS = {
+        no_partner: N("Your partner isn't online right now."),
+        not_in_game: N('Go into the game first (load your save).'),
+        not_mp_save: N('Load your multiplayer save first.'),
+        no_position: N("We don't know where your partner is yet. Try again in a few seconds."),
+        other_city: N('Your partner is in another city ({city}). Travel there first.'),
+        no_home: N("You don't have a home in this save yet."),
+        not_connected: N('Not connected to the server.'),
+        bad_action: N("That doesn't work."),
+        expired: N('That request has expired.'),
+        not_admin: N('Only whoever hosts can undo the shared save.'),
+        no_version: N('There is no earlier save to go back to.'),
+        no_backup: N('There is no backup on this PC yet.'),
+        busy: N('Busy with the save right now. Try again in a moment.'),
+        server_refused: N('The server said no. Try again in a moment.')
+    };
+    function coupleErr(r) {
+        if (!r) { return t(NOT_RUNNING); }
+        if (r.code === 'other_city' && !r.city) { return t('Your partner is in another city. Travel there first.'); }
+        if (r.code && ERRORS[r.code]) { return t(ERRORS[r.code], { city: r.city }); }
+        return errText(r) || t('Something went wrong.');
+    }
+    var ASKS = { hug: N('{name} wants to hug you'), kiss: N('{name} wants to kiss you'),
+                 dance: N('{name} wants to dance with you'), wave: N('{name} is waving at you'),
+                 invite: N('{name} invited you to their home') };
+    var SENT_NAME = { hug: N('Hug request'), kiss: N('Kiss request'), dance: N('Dance request'), wave: N('Wave request'),
+                      invite: N('Invitation') };
+    var SENT_STATE = { waiting: N('{what}: waiting for {name} to answer...'), accepted: N('{what}: {name} said yes!'),
+                       declined: N('{what}: {name} said no.'), expired: N("{what}: {name} didn't answer."),
+                       started: N('{what}: happening now!'), done: N('{what}: done!'),
+                       failed: N("{what}: it didn't work. {msg}") };
+
+    function off(b, isOff) {                        // enable/disable a button without rebuilding it
+        var cls = b.className.replace(/ off$/, '') + (isOff ? ' off' : '');
+        if (b.className !== cls) { b.className = cls; }
+        if (isOff) { b.setAttribute('disabled', 'disabled'); } else { b.removeAttribute('disabled'); }
+    }
+    function two(n) { return (n < 10 ? '0' : '') + n; }
+    function hm(tm) { return tm && tm.length >= 2 ? tm[0] + ':' + two(tm[1]) : ''; }
+    function whenText(epoch) {                      // "hoje às 14:05" / "28/10 às 22:10"
+        if (!epoch) { return ''; }
+        var d = new Date(epoch * 1000), now = new Date();
+        var clock = two(d.getHours()) + ':' + two(d.getMinutes());
+        if (d.toDateString() === now.toDateString()) { return t('today at {time}', { time: clock }); }
+        return t('{date} at {time}', { date: two(d.getDate()) + '/' + two(d.getMonth() + 1), time: clock });
+    }
+    function seenText(sec) {
+        if (sec === null || sec === undefined) { return t('Offline'); }
+        if (sec < 90) { return t('Last seen just now'); }
+        if (sec < 5400) { return t('Last seen {n} min ago', { n: Math.round(sec / 60) }); }
+        return t('Last seen {n} h ago', { n: Math.round(sec / 3600) });
+    }
+
+    // incoming requests: a big box at the top with Accept / Decline; it goes away when answered or after 90 s
+    var reqRows = {}, answered = {};
+    function renderRequests(s) {
+        var box = $('reqs'), now = Date.now() / 1000, seen = {};
+        (s.requests || []).forEach(function (q) {
+            var left = Math.round((q.at || now) + REQ_LIFE - now);
+            if (left <= 0 || answered[q.id]) { return; }
+            seen[q.id] = true;
+            var r = reqRows[q.id];
+            if (!r) {
+                r = { row: el('div', 'req'), text: el('div'), left: el('div', 'left'),
+                      yes: btn('', t('Accept')), no: btn('no', t('Decline')) };
+                var row2 = el('div', 'row2');
+                row2.appendChild(r.yes);
+                row2.appendChild(r.no);
+                r.row.appendChild(r.text);
+                r.row.appendChild(row2);
+                r.row.appendChild(r.left);
+                (function (id, rr) {
+                    rr.yes.addEventListener('click', function () { answerRequest(id, true, rr); });
+                    rr.no.addEventListener('click', function () { answerRequest(id, false, rr); });
+                })(q.id, r);
+                box.appendChild(r.row);
+                reqRows[q.id] = r;
+                if (root._minimized && root._applyMinimize) { root._applyMinimize(false); }   // open the panel for it
+            }
+            setText(r.text, t(ASKS[q.action] || N('{name} sent you a request'), { name: q.from }));
+            setText(r.left, t('{n} seconds left to answer', { n: left }));
+            setText(r.yes, t('Accept'));
+            setText(r.no, t('Decline'));
+        });
+        for (var id in reqRows) {
+            if (reqRows.hasOwnProperty(id) && !seen[id]) { box.removeChild(reqRows[id].row); delete reqRows[id]; }
+        }
+    }
+    function answerRequest(id, yes, rr) {
+        if (rr.sending) { return; }
+        rr.sending = true;
+        off(rr.yes, true);
+        off(rr.no, true);
+        post('/partner/respond', { id: id, accept: yes }, function (r) {
+            answered[id] = true;
+            if (reqRows[id]) { $('reqs').removeChild(reqRows[id].row); delete reqRows[id]; }
+            if (!r || r.error) { flash(coupleErr(r)); return; }
+            var res = r.result;
+            if (res && res.state === 'failed') {
+                flash(t("It didn't work. {msg}", { msg: I.tr(res.message || '') }));
+            } else if (yes) {
+                flash(t('You said yes!'), 3000);
+            }
+            poll();
+        }, 15000);
+    }
+
+    // the partner card
+    var cardOpen = true, partnerKey = null;
+    try { cardOpen = localStorage.getItem('mp.card') !== '0'; } catch (e) { cardOpen = true; }
+    function pickPartner(s) {
+        var list = s.partners || [];
+        for (var i = 0; i < list.length; i++) { if (list[i].online) { return list[i]; } }
+        return list[0] || null;
+    }
+    function showCardBody() {
+        $('p-body').style.display = cardOpen ? '' : 'none';
+        setText($('p-fold'), cardOpen ? '▾' : '▸');
+    }
+    showCardBody();
+    $('p-head').addEventListener('click', function () {
+        cardOpen = !cardOpen;
+        try { localStorage.setItem('mp.card', cardOpen ? '1' : '0'); } catch (e) {}
+        showCardBody();
+    });
+    function renderCard(s) {
+        var p = pickPartner(s);
+        $('pcard').style.display = p ? 'block' : 'none';
+        partnerKey = p ? p.id : null;
+        if (!p) { return; }
+        setText($('p-name'), p.zoi ? p.name + ' (' + p.zoi + ')' : p.name);
+        var dotCls = 'pdot' + (p.online ? ' on' : '');
+        if ($('p-dot').className !== dotCls) { $('p-dot').className = dotCls; }
+        var place = p.lot && p.city ? p.lot + ', ' + p.city : (p.lot || p.city || '');
+        var where = place ? t('Where: {place}', { place: place }) : t('Where: not known yet');
+        if (p.here) { where += ' - ' + t('near you'); } else if (p.away) { where += ' - ' + t('in another city'); }
+        setText($('p-where'), where);
+        var doing = p.sleep ? t('Sleeping') : (prettyAction(p.action) || String(p.action_text || '').toLowerCase());
+        var withText = p['with'] === 'you' ? t('with you') : (p['with'] ? t('with {name}', { name: p['with'] }) : '');
+        setText($('p-doing'), doing ? (p.sleep ? doing : t('Doing: {what}', { what: doing })) + (withText ? ' ' + withText : '')
+            : (withText ? t('Together') + ' ' + withText : ''));
+        var seen = p.online ? '' : seenText(p.last_seen_s);
+        // their clock only matters when the two clocks can differ (each one's own, or "adjust between the two")
+        if (p.time && (s.clock_mode === 'catchup' || !s.sync_time)) {
+            seen = t('Time in their game: {time}', { time: hm(p.time) }) + (seen ? ' - ' + seen : '');
+        }
+        setText($('p-seen'), seen);
+        $('p-seen').style.display = seen ? '' : 'none';
+        var cant = !s.connected || !p.online;
+        off($('p-goto'), cant);
+        off($('p-invite'), cant);
+        ['hug', 'kiss', 'dance', 'wave'].forEach(function (a) { off($('a-' + a), cant); });
+    }
+    function partnerCall(path, body, okText) {
+        if (partnerKey) { body.key = partnerKey; }
+        post(path, body, function (r) {
+            if (!r || r.error) { flash(coupleErr(r)); return; }
+            if (okText) { flash(okText(r), 4000); }
+            poll();
+        }, 15000);
+    }
+    function partnerName() {
+        var p = lastStatus ? pickPartner(lastStatus) : null;
+        return p ? p.name : t('your partner');
+    }
+    $('p-goto').addEventListener('click', function () {
+        partnerCall('/partner/goto', {}, function () { return t('Going to {name}...', { name: partnerName() }); });
+    });
+    $('p-invite').addEventListener('click', function () {
+        partnerCall('/partner/invite', {}, null);
+    });
+    ['hug', 'kiss', 'dance', 'wave'].forEach(function (a) {
+        $('a-' + a).addEventListener('click', function () { partnerCall('/partner/action', { action: a }, null); });
+    });
+
+    // what happened to what I asked for (shown while waiting, then for a few seconds)
+    var sentSeen = {};
+    function renderSent(s) {
+        var box = $('p-sent'), list = (s.couple && s.couple.sent) || [], best = null, now = Date.now(), text = '';
+        list.forEach(function (x) { if (!best || (x.at || 0) > (best.at || 0)) { best = x; } });
+        if (best && now / 1000 - (best.at || 0) < 600) {
+            var k = best.id + '|' + best.state;
+            if (!sentSeen[k]) { sentSeen[k] = now; }
+            var showIt = best.state === 'waiting' ? now / 1000 - (best.at || 0) < REQ_LIFE : now - sentSeen[k] < 12000;
+            if (showIt) {
+                text = t(SENT_STATE[best.state] || N('{what}: {state}'), {
+                    what: t(SENT_NAME[best.action] || best.action), name: best.to, state: best.state,
+                    msg: I.tr(best.message || '') }).replace(/\s+$/, '');
+            }
+        }
+        box.style.display = text ? 'block' : 'none';
+        setText(box, text);
+    }
+
+    // ------------------------------------------------------------------ settings: living together (shared household)
+    var hhOpen = false, clockOpen = false, pending = {}, backupsKey = null, lastBackups = null, lastUndoAt = null;
+    function pendingOr(key, value) {                 // a choice just clicked wins over a /status that predates it
+        var p = pending[key];
+        return p && Date.now() < p.until ? p.v : value;
+    }
+    function setPending(key, v) { pending[key] = { v: v, until: Date.now() + 3000 }; }
+    function openSect(id, arrow, open) {
+        $(id).className = 'sect' + (open ? ' open' : '');
+        setText($(arrow), open ? '▾' : '▸');
+    }
+    $('hh-head').addEventListener('click', function () {
+        hhOpen = !hhOpen;
+        openSect('sect-home', 'hh-arrow', hhOpen);
+        if (hhOpen) { backupsKey = null; loadBackups(); }
+    });
+    $('clock-head').addEventListener('click', function () {
+        clockOpen = !clockOpen;
+        openSect('sect-clock', 'clock-arrow', clockOpen);
+    });
+    function lineClass(node, cls) { if (node.className !== cls) { node.className = cls; } }
+    function showLine(node, text, cls) {
+        setText(node, text);
+        node.style.display = text ? '' : 'none';
+        if (cls) { lineClass(node, 'hh-line ' + cls); }
+    }
+    function renderHousehold(s) {
+        var h = s.household || {};
+        var on = pendingOr('hh', !!h.on);
+        $('hh-toggle').className = 'toggle' + (on ? ' on' : '');
+        $('hh-toggle').setAttribute('aria-checked', on ? 'true' : 'false');
+        var saved = '';
+        if (h.saved_at) {
+            saved = h.saved_by_me ? t('Last save: you, {when}', { when: whenText(h.saved_at) })
+                : t('Last save: {name}, {when}', { name: h.saved_by || t('your partner'), when: whenText(h.saved_at) });
+        } else if (h.on) {
+            saved = t('No shared save yet: it starts with the next save.');
+        }
+        showLine($('hh-saved'), saved);
+        showLine($('hh-behind'), h.behind ? t('Your world is out of date: there is a newer save. Load it when the panel asks.') : '');
+        var busy = '';
+        if (h.job) {
+            busy = I.tr(h.job.what) + (h.job.total ? ' (' + Math.floor(100 * (h.job.done || 0) / h.job.total) + '%)' : '...');
+        } else if (h.busy) {
+            busy = t('Working on the save...');
+        }
+        if (h.waiting_for_game_save) {
+            busy += (busy ? ' ' : '') + t('Waiting for the game to save (save the game, or wait for the autosave).');
+        }
+        showLine($('hh-busy'), busy);
+        var u = h.undo, undoText = '', undoCls = '';
+        if (u && (u.state === 'working' || Date.now() / 1000 - (u.at || 0) < 180)) {
+            var msg = I.tr(u.message || '');
+            if (u.state === 'working') { undoText = t('Going back... {msg}', { msg: msg }); undoCls = 'warn'; }
+            else if (u.state === 'done') { undoText = t('Done: {msg}', { msg: msg }); undoCls = 'ok'; }
+            else { undoText = t("Couldn't go back: {msg}", { msg: msg }); undoCls = 'bad'; }
+        }
+        showLine($('hh-undo'), undoText.replace(/[:\s]+$/, ''), undoCls);
+        var can = h.can_undo || {};
+        off($('hh-undo-btn'), !(can.server || can.local) || !!h.busy || !!(u && u.state === 'working'));
+        // the backup list: reload when the number of backups changes or an undo finished
+        if (hhOpen && (h.backups !== lastBackups || (u && u.at !== lastUndoAt))) { backupsKey = null; loadBackups(); }
+        lastBackups = h.backups;
+        lastUndoAt = u ? u.at : null;
+    }
+    $('hh-toggle').addEventListener('click', function () {
+        var on = $('hh-toggle').className.indexOf(' on') < 0;
+        setPending('hh', on);
+        $('hh-toggle').className = 'toggle' + (on ? ' on' : '');
+        post('/settings', { shared_household: on }, function (r) {
+            if (!r || r.error) { pending.hh = null; flash(r ? errText(r) : t(NOT_RUNNING)); }
+        });
+    });
+
+    var confirmAction = null;
+    function askConfirm(text, fn) {
+        confirmAction = fn;
+        setText($('hh-confirm-text'), text);
+        $('hh-confirm').style.display = 'block';
+    }
+    function closeConfirm() { confirmAction = null; $('hh-confirm').style.display = 'none'; }
+    $('hh-confirm-no').addEventListener('click', closeConfirm);
+    $('hh-confirm-yes').addEventListener('click', function () {
+        var f = confirmAction;
+        closeConfirm();
+        if (f) { f(); }
+    });
+    function doUndo(body) {
+        post('/world/undo', body, function (r) {
+            if (!r || r.error) { flash(coupleErr(r)); return; }
+            flash(r.source === 'server' ? t('Done: the shared world went back to the save before. Loading it...')
+                : t('Going back to the backup... the game reloads by itself.'), 8000);
+            poll();
+        }, 30000);
+    }
+    $('hh-undo-btn').addEventListener('click', function () {
+        if ($('hh-undo-btn').getAttribute('disabled')) { return; }
+        var h = (lastStatus && lastStatus.household) || {};
+        askConfirm((h.can_undo && h.can_undo.server)
+            ? t('The shared world goes back to how it was before the last save, for both of you. The game leaves without saving and loads it. What you did since then is lost. Go back?')
+            : t('Your save goes back to the last backup on this PC. The game leaves without saving and loads it. What you did since then is lost. Go back?'),
+            function () { doUndo({ source: 'auto' }); });
+    });
+    function reasonText(r) {
+        var m = /^before-v(\d+)$/.exec(r || '');
+        if (m) { return t('before loading save number {v}', { v: m[1] }); }
+        if (r === 'before-load') { return t('before loading the save'); }
+        if (r === 'before-undo') { return t('before going back'); }
+        return r || '';
+    }
+    function loadBackups() {
+        post('/world/backups', {}, function (r) {
+            var box = $('hh-backups');
+            if (!r || r.error) { backupsKey = null; clear(box); box.appendChild(el('div', 'empty', r ? coupleErr(r) : t(NOT_RUNNING))); return; }
+            var list = r.backups || [];
+            var key = I.lang() + JSON.stringify(list);
+            if (key === backupsKey) { return; }                   // unchanged: keep the buttons under the cursor
+            backupsKey = key;
+            clear(box);
+            if (!list.length) { box.appendChild(el('div', 'empty', t('No backups yet. One is made before a save is loaded.'))); }
+            list.slice(0, 8).forEach(function (b) {
+                var row = el('div', 'bk'), tt = el('div', 't', whenText(b.created));
+                tt.appendChild(el('div', 's', reasonText(b.reason) + ' - ' + sizeText(b.size)));
+                row.appendChild(tt);
+                var bt = btn('', t('Go back to this one'));
+                bt.addEventListener('click', function () {
+                    askConfirm(t('Go back to the backup from {when}? The game leaves without saving and loads it. What you did since then is lost.',
+                        { when: whenText(b.created) }), function () { doUndo({ source: 'local', backup: b.name }); });
+                });
+                row.appendChild(bt);
+                box.appendChild(row);
+            });
+        }, 10000);
+    }
+
+    // ------------------------------------------------------------------ settings: the clock
+    function renderClock(s) {
+        var m = pendingOr('clock', s.clock_mode || 'host');
+        lineClass($('clock-host'), 'choice' + (m === 'host' ? ' on' : ''));
+        lineClass($('clock-catchup'), 'choice' + (m === 'catchup' ? ' on' : ''));
+    }
+    ['host', 'catchup'].forEach(function (m) {
+        $('clock-' + m).addEventListener('click', function () {
+            setPending('clock', m);
+            if (lastStatus) { renderClock(lastStatus); }
+            post('/settings', { clock_mode: m }, function (r) {
+                if (!r || r.error) { pending.clock = null; flash(r ? errText(r) : t(NOT_RUNNING)); }
+            });
+        });
+    });
+
+    // ------------------------------------------------------------------ help: check the connection, diagnostics
+    var CHECKS = { game_api: N('The game is open'), mod_loaded: N('The mod is running in the game'),
+                   server_reachable: N('The server answers'), logged_in: N('Signed in to the server'),
+                   versions_match: N('Same version as your partner'), tailscale: N('Tailscale is on'),
+                   nordvpn_running: N('NordVPN is not in the way') };
+    var HINTS = {
+        start_game: N('Open inZOI and wait until it reaches the menu or your game.'),
+        load_save: N('Load your multiplayer save in the game.'),
+        reload_mod: N("The mod isn't answering. Close inZOI and open it again."),
+        pick_server: N('Choose a server: click "Servers" at the top of this panel.'),
+        check_server: N("The server isn't answering. Ask whoever hosts to check that the inZOI Multiplayer program is open."),
+        check_tailscale: N('Open Tailscale and check that it says Connected, on both computers.'),
+        restart_program: N('Close the inZOI Multiplayer program and open it again.'),
+        check_password: N('The password is wrong. Check it with your partner (Settings tab).'),
+        update_partner: N('Your partner has an older version. Ask them to update inZOI Multiplayer.'),
+        update_self: N('Your version is older. Update inZOI Multiplayer.'),
+        banned: N('You were banned from this server. Talk to whoever hosts.'),
+        server_full: N('The server is full.'),
+        wait_connect: N('Still connecting. Wait a few seconds and check again.'),
+        install_tailscale: N("Install Tailscale and sign in to the same account as your partner."),
+        disable_nordvpn: N('Turn off NordVPN, or turn off its "Invisibility on LAN" option.')
+    };
+    function checkExtra(c) {
+        var d = c.data || {};
+        if (c.ok === null) { return t('Not needed here'); }
+        if (c.id === 'server_reachable' && d.address) {
+            return d.address + (d.ms !== null && d.ms !== undefined ? ' - ' + d.ms + ' ms' : '') +
+                (d.via_lan ? ' - ' + t('local network') : '');
+        }
+        if (c.id === 'versions_match' && d.mine) {
+            return t('You: {mine} - partner: {theirs}', { mine: d.mine, theirs: d.theirs || '?' });
+        }
+        if (c.id === 'tailscale' && d.ip) { return d.ip; }
+        return '';
+    }
+    var checking = false;
+    $('help-check').addEventListener('click', function () {
+        if (checking) { return; }
+        checking = true;
+        off($('help-check'), true);
+        setText($('help-check'), t('Checking...'));
+        post('/selftest', {}, function (r) {
+            checking = false;
+            off($('help-check'), false);
+            setText($('help-check'), t('Check connection'));
+            var box = $('help-checks');
+            clear(box);
+            if (!r || r.error) { box.appendChild(el('div', 'empty', r ? errText(r) : t(NOT_RUNNING))); return; }
+            var bad = 0;
+            (r.checks || []).forEach(function (c) {
+                var row = el('div', 'check' + (c.ok === true ? ' ok' : (c.ok === false ? ' bad' : '')));
+                row.appendChild(el('span', 'mark', c.ok === true ? '✓' : (c.ok === false ? '✘' : '—')));
+                var tt = el('div', 't', t(CHECKS[c.id] || c.id));
+                var extra = checkExtra(c);
+                if (extra) { tt.appendChild(el('div', 's', extra)); }
+                if (c.ok === false) {
+                    bad++;
+                    tt.appendChild(el('div', 'fix', c.hint_code && HINTS[c.hint_code] ? t(HINTS[c.hint_code]) : I.tr(c.detail)));
+                }
+                row.appendChild(tt);
+                box.appendChild(row);
+            });
+            box.appendChild(el('div', 'hint', bad ? t('{n} problem(s) found: follow the yellow tips, then check again.', { n: bad })
+                : t('Everything looks fine.')));
+        }, 30000);
+    });
+    var diagBusy = false;
+    $('help-diag').addEventListener('click', function () {
+        if (diagBusy) { return; }
+        diagBusy = true;
+        off($('help-diag'), true);
+        setText($('help-diag-out'), t('Making the file... this takes a few seconds.'));
+        post('/diag', {}, function (r) {
+            diagBusy = false;
+            off($('help-diag'), false);
+            if (!r || r.error) { setText($('help-diag-out'), r ? errText(r) : t(NOT_RUNNING)); return; }
+            var name = String(r.path || '').split(/[\\\/]/).pop();
+            setText($('help-diag-out'), t('File saved on the Desktop: {name}. Send this file to Arthur.', { name: name }));
+        }, 90000);
+    });
 
     poll();
     setInterval(function () { if (!root._minimized) { poll(); } }, 1000);

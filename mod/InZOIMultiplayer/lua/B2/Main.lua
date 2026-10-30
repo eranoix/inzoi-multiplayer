@@ -15,6 +15,10 @@
 --   hide    {key, on}                                          remote player is elsewhere (other city, loading...)
 --   admit   {key, door, site}                                  let the puppet through a lot's doors like a guest
 --   despawn {key}
+--   social  {rid, bag, entity?, key?}   couple actions: the player's own Zoi (`entity`, else the possessed one) runs
+--           interaction `bag` on the puppet of `key` (or on its own without key); "anim:<id>" plays a motion instead.
+--           Reports "social <rid> ok|fail <text>".
+--   goto_point {entity?, x, y, z}       teleport the player's own Zoi to a spot ("go to my partner" without a puppet)
 --   debug ops: walk {entity, x, y, z}, status {entity}, reset {entity}, probe {entity, r}
 --
 -- Everything learned the hard way (see project notes): walks use ClickMove_NonCancelable with no target, redirects
@@ -557,6 +561,41 @@ local OPS = {
         if p and op.how then p.faceHow = op.how end
         face(c, op.yaw, op.how)
         return string.format("face %s -> %.0f (now %.0f)", op.how or "tp", op.yaw, c:GetRotation().Yaw)
+    end,
+    -- Couple actions (hug, kiss, dance, wave): the player's own Zoi does it, on the partner's puppet or alone.
+    -- The same engine calls as the puppets' own actions (interaction.execute / motion.play).
+    social = function(op)
+        local me = tonumber(op.entity) or S.me
+        local rid, bag = tostring(op.rid or "?"), tostring(op.bag or "")
+        local function done(ok, text)
+            report("social", string.format("%s %s %s", rid, ok and "ok" or "fail", tostring(text or ""):sub(1, 160)))
+            return string.format("social %s %s: %s", rid, bag, ok and "ok" or ("failed: " .. tostring(text)))
+        end
+        if not me then return done(false, "no Zoi to act with") end
+        if not bag:match("^[%w_:]+$") then return done(false, "bad interaction id") end
+        local target
+        if op.key then
+            local p = PUPPETS[op.key]
+            if not p then return done(false, "no puppet for " .. tostring(op.key)) end
+            target = p.id
+        end
+        local anim = bag:match("^anim:([%w_]+)$")
+        local ok, msg
+        if anim then
+            ok, msg = cli(string.format("motion.play entity_id=%d anim_id=%s", me, anim))
+        elseif target then
+            ok, msg = cli(string.format("interaction.execute entity_id=%d interaction_bag_id=%s target_entity_id=%d insert_front=true",
+                me, bag, target))
+        else
+            ok, msg = cli(string.format("interaction.execute entity_id=%d interaction_bag_id=%s insert_front=true", me, bag))
+        end
+        return done(ok, msg)
+    end,
+    goto_point = function(op)
+        local me = tonumber(op.entity) or S.me
+        if not me then error("no Zoi to move") end
+        teleport(me, op.x, op.y, op.z)
+        return string.format("moved %d to %.0f,%.0f", me, op.x, op.y)
     end,
     -- debugging
     walk = function(op) return "walk " .. tostring(order_walk(char(op.entity), op.x, op.y, op.z, op.bag)) end,

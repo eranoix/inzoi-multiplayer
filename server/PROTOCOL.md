@@ -68,6 +68,17 @@ pooled (the newest build of a mod wins).
 | `dir_remove` | `{id, secret}`: unlist (the server went private). |
 | `dir_list` | `dir_list {servers: [{id, name, address, ...}]}`: the listed servers that can be reached. A server on the directory's own machine is given at the address the asker used. |
 
+## LAN discovery (UDP)
+
+Every server started through `start()` (stand-alone, "Host and play", "Host only") also listens on **UDP** at the same
+port number (24242). A datagram `INZOI-MP?` (9 bytes, broadcast or not) gets one JSON datagram back:
+`{"t":"discover","name","port","version","protocol","id","password":bool,"players","max_players","hosted"}`.
+Only private, link-local, loopback and Tailscale (100.64.0.0/10) addresses are answered, each at most 5 times a
+second. The companion broadcasts it on every IPv4 interface (and 255.255.255.255) when the picked server can't be
+reached for ~15 s, or no server is picked, and plays on the answer whose `id` it joined last (or the only answer),
+remembering that address as an alternate (`cfg["lan_alt"]`) without replacing the picked one. The firewall must allow
+UDP 24242 in too.
+
 ## Admin console
 
 The server's admins (data/server.json `admins`; the host of a "Host and play" server always is one) send
@@ -96,15 +107,18 @@ From the server's own machine (127.0.0.1), before hello: `{"t":"make_admin","who
 
 ## What the companion puts in messages (the server relays them as-is)
 
-- `state.state` = `{n, x, y, z, yaw, city, site, act, anim, outfit, clock, sleep}`: sample counter, world position (cm) and facing
+- `state.state` = `{n, x, y, z, yaw, city, site, act, anim, outfit, clock, sleep, lot, time, speed}`: sample counter, world position (cm) and facing
   (degrees) of the player's Zoi, its city map and lot, and
   - `act`: what it's doing, or null: `{bag}` alone, `{bag, player}` with another player's Zoi,
     `{bag, obj, ox, oy, oz}` with an object (table id + world position), `{bag, npc: true}` with someone only that
     world has
   - `anim`: the motion playing (shown when the action itself can't be copied)
   - `outfit`: the outfit category worn (Everyday, Sports, Swimwear...)
-  - `clock`: `[hour, minute]` of the player's game while it runs (null while paused); a player who's behind catches
-    up with whoever is furthest ahead
+  - `clock`: `[hour, minute]` of the player's game while it runs (null while paused). With `clock_mode` "catchup" a
+    player who's behind catches up with whoever is furthest ahead; with "host" (the default) only the leader sends it
+    (the others send null) and the others follow the leader's clock and `speed`
+  - `lot`: the name of the lot the Zoi is on ("" if unknown); `time`: `[hour, minute]` always (for showing, never
+    followed); `speed`: the game's time scale
   - `sleep`: the player's Zoi is asleep; while everyone's is, everyone's game runs fast, otherwise at normal speed
 - `profile.profile` = `{first_name, last_name, gender, growth_step, personality, characteristics, voice,
   gender_identity, look}` (look = the game's appearanceSetting JSON).
@@ -114,8 +128,12 @@ From the server's own machine (127.0.0.1), before hello: `{"t":"make_admin","who
 
 ## Event kinds used by the companion (relayed opaquely by the server)
 
-Defined by the companion app; the server never needs to know them. Planned: `visit_request`, `visit_reply`,
-`interact` (one Zoi starts a social interaction with another player's Zoi), `interact_reply`, `emote`.
+Defined by the companion app; the server never needs to know them.
+
+- `couple` (client/couple.py), always with `to`: `data` = `{"type":"request","id","action","name","site"?}` (action
+  `hug`, `kiss`, `dance`, `wave` or `invite`) or `{"type":"reply","id","accept"}`. On accept the asker's Zoi starts a
+  hug/kiss on the partner's puppet (the partner's PC replays it through `state.act`); dance/wave start on both PCs;
+  an accepted `invite` takes the guest's Zoi to the host's.
 
 ## Storage
 

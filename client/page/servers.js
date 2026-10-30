@@ -866,6 +866,7 @@
       const n = S.players || 0;
       st.append(h('span', { class: 'ico' }, '✓'), h('span', { class: 'txt' },
         t('Connected to {server} as {name}', { server: where, name: S.name }),
+        S.via_lan ? h('span', { class: 'sub' }, t('Connected through your local network')) : null,
         h('span', { class: 'sub' }, n ? (n === 1 ? t('Your partner is online.') : t('{n} other players online.', { n })) : t('Waiting for your partner to join...'))));
     } else if (S.error && S.current) {
       st.classList.add('bad');
@@ -880,6 +881,16 @@
       st.append(h('span', { class: 'ico' }, 'i'), h('span', { class: 'txt' }, t('Not on a server yet: one of you hosts, the other joins.')));
     }
     box.appendChild(st);
+    // servers that answered on the home network: one big button each
+    const lan = (S && S.lan) || [];
+    lan.forEach((r) => {
+      const on = !!(r.current && S.connected);
+      box.appendChild(h('div', { class: 'couple-lan' },
+        h('div', { class: 'n' }, t('Found on your network: {name}', { name: r.name || r.address }),
+          h('span', { class: 's' }, (r.players ? t('{n} playing now', { n: r.players }) + ' - ' : '') + r.address)),
+        h('button', { class: 'big-join' + (on ? ' done' : ''), disabled: on, onclick: () => joinLan(r) },
+          on ? t('Connected') : t('Join'))));
+    });
 
     const cols = h('div', { class: 'couple-cols' });
     // host
@@ -910,6 +921,88 @@
     }
     cols.append(host, jn);
     box.appendChild(cols);
+    box.appendChild(helpBox());
+  }
+  function joinLan(r) {
+    if (r.current && S && S.connected) return;
+    join({ ...r, online: true, password_saved: !!r.saved, connected: false, here: false });
+  }
+
+  // ---------------------------------------------------------------- help: check the connection, diagnostics
+  const N = (s) => s;                // marks an English text as a translation key (i18n.js has it)
+  const CHECKS = { game_api: N('The game is open'), mod_loaded: N('The mod is running in the game'),
+                   server_reachable: N('The server answers'), logged_in: N('Signed in to the server'),
+                   versions_match: N('Same version as your partner'), tailscale: N('Tailscale is on'),
+                   nordvpn_running: N('NordVPN is not in the way') };
+  const HINTS = {
+    start_game: N('Open inZOI and wait until it reaches the menu or your game.'),
+    load_save: N('Load your multiplayer save in the game.'),
+    reload_mod: N("The mod isn't answering. Close inZOI and open it again."),
+    pick_server: N('Choose a server: one of you hosts, the other joins (buttons above).'),
+    check_server: N("The server isn't answering. Ask whoever hosts to check that the inZOI Multiplayer program is open."),
+    check_tailscale: N('Open Tailscale and check that it says Connected, on both computers.'),
+    restart_program: N('Close the inZOI Multiplayer program and open it again.'),
+    check_password: N('The password is wrong. Check it with your partner.'),
+    update_partner: N('Your partner has an older version. Ask them to update inZOI Multiplayer.'),
+    update_self: N('Your version is older. Update inZOI Multiplayer.'),
+    banned: N('You were banned from this server. Talk to whoever hosts.'),
+    server_full: N('The server is full.'),
+    wait_connect: N('Still connecting. Wait a few seconds and check again.'),
+    install_tailscale: N('Install Tailscale and sign in to the same account as your partner.'),
+    disable_nordvpn: N('Turn off NordVPN, or turn off its "Invisibility on LAN" option.'),
+  };
+  function checkExtra(c) {
+    const d = c.data || {};
+    if (c.ok === null) return t('Not needed here');
+    if (c.id === 'server_reachable' && d.address) {
+      return d.address + (d.ms !== null && d.ms !== undefined ? ' - ' + d.ms + ' ms' : '') + (d.via_lan ? ' - ' + t('local network') : '');
+    }
+    if (c.id === 'versions_match' && d.mine) return t('You: {mine} - partner: {theirs}', { mine: d.mine, theirs: d.theirs || '?' });
+    if (c.id === 'tailscale' && d.ip) return d.ip;
+    return '';
+  }
+  let checking = false, diagBusy = false;
+  async function runSelfTest() {
+    if (checking) return;
+    checking = true;
+    toast(t('Checking...'), 2500);
+    const res = await api('/selftest', {});
+    checking = false;
+    if (res.error) return toast(errText(res));
+    const list = h('div', { class: 'checks' });
+    let bad = 0;
+    (res.checks || []).forEach((c) => {
+      if (c.ok === false) bad++;
+      const extra = checkExtra(c);
+      list.appendChild(h('div', { class: 'check' + (c.ok === true ? ' ok' : c.ok === false ? ' bad' : '') },
+        h('span', { class: 'mark' }, c.ok === true ? '✔' : c.ok === false ? '✘' : '—'),
+        h('div', { class: 't' }, t(CHECKS[c.id] || c.id),
+          extra ? h('div', { class: 's' }, extra) : null,
+          c.ok === false ? h('div', { class: 'fix' }, c.hint_code && HINTS[c.hint_code] ? t(HINTS[c.hint_code]) : I.tr(c.detail || '')) : null)));
+    });
+    openModal(h('div', {}, h('h2', {}, t('Check connection')),
+      h('div', { class: 'lead' }, bad ? t('{n} problem(s) found: follow the yellow tips, then check again.', { n: bad }) : t('Everything looks fine.')),
+      list,
+      h('div', { class: 'buttons' }, button(t('Close'), '', closeModal), button(t('Check again'), 'primary', () => { closeModal(); runSelfTest(); }))));
+  }
+  async function sendDiagnostics() {
+    if (diagBusy) return;
+    diagBusy = true;
+    toast(t('Making the file... this takes a few seconds.'), 15000);
+    const res = await api('/diag', {});
+    diagBusy = false;
+    if (res.error) return toast(errText(res), 7000);
+    const name = String(res.path || '').split(/[\\/]/).pop();
+    const text = t('File saved on the Desktop: {name}. Send this file to Arthur.', { name });
+    toast(text, 4000);
+    openModal(h('div', {}, h('h2', {}, t('Send diagnostics')), h('div', { class: 'lead' }, text),
+      h('div', { class: 'buttons' }, button(t('OK'), 'primary', closeModal))));
+  }
+  function helpBox() {
+    return h('div', { class: 'couple-help-box' }, h('h3', {}, t('Something not working?')),
+      h('div', { class: 'couple-buttons' },
+        button(t('Check connection'), 'fill', runSelfTest, false, 'refresh'),
+        button(t('Send diagnostics'), '', sendDiagnostics)));
   }
   function setCouple(on) {
     couple = !!on;
@@ -986,6 +1079,7 @@
     if (changed('actions', [r, tab, S.admin, S.connected, !!S.hosting, S.error, S.name, S.server && S.server.name])) renderActions();
     if (couple && changed('couple', [S.connected, S.error, S.notice_code, S.current, S.name, S.players, S.server && S.server.name,
       S.hosting && [S.hosting.port, S.hosting.playing_here, S.hosting.addresses, S.hosting.settings.password, S.hosting.public_status],
+      S.via_lan, (S.lan || []).map((x) => [x.address, x.name, x.players, x.current, x.saved, x.password]),
       savedPartnerRows().map((x) => [x.address, x.name, x.online, x.connected])])) renderCouple();
   }
   async function poll(force) {

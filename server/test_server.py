@@ -120,6 +120,7 @@ async def run():
     await mods_hosted()
     await shared_world()
     await servers_page()
+    await lan_discovery()
     print("all server tests passed")
 
 
@@ -443,6 +444,50 @@ async def mods_hosted():
         for x in (guest, host):
             x.w.close()
         srv.close()
+        await srv.wait_closed()
+
+
+async def lan_discovery():
+    """start() (every way of hosting) also answers b"INZOI-MP?" on UDP, same port; stopping its tasks closes it."""
+    import argparse
+    import socket
+    with tempfile.TemporaryDirectory() as tmp:
+        args = argparse.Namespace(host="127.0.0.1", port=0, password="pw", motd=None, max_players=None, data=tmp,
+                                  hosted=False, name="Casa")
+        srv, tasks = await mp.start(args)
+        server = srv.mp_server
+        assert server.udp is not None
+        loop = asyncio.get_running_loop()
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.setblocking(False)
+        s.bind(("127.0.0.1", 0))
+        try:
+            s.sendto(b"hello?", ("127.0.0.1", server.port))           # not the question: no answer
+            s.sendto(mp.DISCOVER_ASK, ("127.0.0.1", server.port))
+            data = await asyncio.wait_for(loop.sock_recv(s, 4096), 3)
+            info = json.loads(data)
+            assert info["t"] == "discover" and info["name"] == "Casa" and info["port"] == server.port, info
+            assert info["password"] is True and info["id"] == server.store.settings["id"] and info["players"] == 0
+            assert info["version"] == mp.VERSION and info["protocol"] == mp.PROTOCOL
+            s.sendto(mp.DISCOVER_ASK, ("127.0.0.1", server.port))     # again at once: rate limited (0.2 s)
+            try:
+                await asyncio.wait_for(loop.sock_recv(s, 4096), 0.15)
+                raise AssertionError("answered twice within 0.2 s")
+            except asyncio.TimeoutError:
+                pass
+        finally:
+            s.close()
+        a = Fake(server.port, "Ana", password="pw")
+        await a.connect()
+        assert server.discover_reply()["players"] == 1
+        a.w.close()
+        srv.close()
+        tasks.cancel()
+        try:
+            await tasks
+        except asyncio.CancelledError:
+            pass
+        assert server.udp is None                                       # closed with the server's tasks
         await srv.wait_closed()
 
 

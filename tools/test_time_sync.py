@@ -42,7 +42,8 @@ def friend(comp, pid, clock, sleep=False):
 
 
 def make(game, leader=False):
-    comp = companion.Companion({"key": "k" * 20, "name": "me", "server": "x", "port": 1, "password": ""})
+    comp = companion.Companion({"key": "k" * 20, "name": "me", "server": "x", "port": 1, "password": "",
+                                "clock_mode": "catchup"})       # (tools/test_support.py: "host")
     comp.game, comp.me_id, comp.world = game, "me", "play"
     comp.leader = "me" if leader else "host"
     t = game.t

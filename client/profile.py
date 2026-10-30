@@ -10,6 +10,12 @@ from lua_data import Converter, Registry
 
 
 def read_profile(call, entity_id: int) -> dict:
+    # Names/gender/growth come from the official CLI: entity.get_character_info entity_id
+    # (https://mod-docs.playinzoi.com/docs/modkit-docs/wiki/cli/entity/entity-get-character-info).
+    # Traits, voice and the full look stay on entity.reflect: the CLI catalog (inZOI 0.11) has no getter for traits or
+    # voice, and its appearance category (https://mod-docs.playinzoi.com/docs/modkit-docs/wiki/cli/appearance/) only
+    # gets/sets single parts (hair, skin, garments, body sliders...), with no whole-look export/import. Rebuilding a
+    # puppet needs the whole FB1CustomizedCharacterInfo, so the reflected struct is still the only complete source.
     info = call("entity.get_character_info", entity_id=entity_id)
     trait = call("entity.reflect", entity_id=entity_id, component="FB2TraitComponent")
     bio = call("entity.reflect", entity_id=entity_id, component="FB2BioComponent")

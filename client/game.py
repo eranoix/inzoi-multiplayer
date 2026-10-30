@@ -21,6 +21,56 @@ class GameError(Exception):
     pass
 
 
+class GameUnreachable(GameError):
+    """Nothing answered at all (game closed, wrong port): no point trying another route right away."""
+
+
+class CliUnavailable(GameError):
+    """The CLI command isn't in this game build's catalog (cli.list), or INZOI_MP_USE_CLI=0."""
+
+
+# The official CLI (inZOI 0.11+) is one catalog of documented commands, reachable from UI-mod JS (inzoi.cli.execute),
+# Lua and this MCP server, where every command is its own tool (dots sent as underscores). Catalog and per-command
+# pages: CLI_DOCS + "<category>/<category>-<command>" (underscores as dashes), e.g. CLI_DOCS + "entity/entity-get-possessed".
+CLI_DOCS = "https://mod-docs.playinzoi.com/docs/modkit-docs/wiki/cli/"
+CLI_RELIST = 30         # s between catalog attempts while it can't be read
+
+
+def use_cli_flag() -> bool:
+    """INZOI_MP_USE_CLI=0 forces the legacy (pre-CLI-catalog) paths everywhere."""
+    return os.environ.get("INZOI_MP_USE_CLI", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _tool(name) -> str:
+    return str(name).strip().replace(".", "_")
+
+
+def cli_names(listing) -> set:
+    """Command names out of a cli.list answer, whatever its shape (list of names or of {name|id|command: ...},
+    maybe nested under "commands"/"categories", or plain text), as MCP tool names (dots -> underscores)."""
+    out = set()
+
+    def walk(v, depth=0):
+        if depth > 6:
+            return
+        if isinstance(v, str):
+            out.update(_tool(m) for m in re.findall(r"\b[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\b", v))
+        elif isinstance(v, list):
+            for x in v:
+                walk(x, depth + 1)
+        elif isinstance(v, dict):
+            for k in ("name", "id", "command", "command_id"):
+                if isinstance(v.get(k), str) and "." in v[k]:
+                    out.add(_tool(v[k]))
+            for k, x in v.items():
+                if isinstance(x, (list, dict)) or k == "_text":
+                    walk(x, depth + 1)
+                elif isinstance(k, str) and re.fullmatch(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*", k):
+                    out.add(_tool(k))            # {"entity.get_possessed": "description", ...}
+    walk(listing)
+    return out
+
+
 def mcp_port_flag() -> int | None:
     """-climcpport=N from the running game's command line (None: not given, no game running, or not Windows)."""
     if os.name != "nt":
@@ -68,6 +118,10 @@ class Game:
         self._port_at = None            # when the game's command line was last looked at (None: not yet)
         self._port_lock = threading.Lock()
         self._templates = None          # (gender, growth) -> entity id of a local Zoi to build puppets on
+        self.use_cli = use_cli_flag()
+        self._cli = None                # names of the CLI commands this game build has (None: not read yet)
+        self._cli_at = 0.0              # when the catalog was last tried (0: never)
+        self._cli_lock = threading.Lock()
 
     # ------------------------------------------------------------------ transport
     def game_url(self, failed: bool = False) -> str:
@@ -82,9 +136,8 @@ class Game:
                 self.url = f"http://127.0.0.1:{mcp_port_flag() or MCP_PORT}/mcp"
         return self.url
 
-    def call(self, tool: str, **args):
-        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                           "params": {"name": tool.replace(".", "_"), "arguments": args}}).encode()
+    def _post(self, method: str, params: dict) -> str:
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
         req = urllib.request.Request(self.game_url(), body, {"Content-Type": "application/json",
                                                              "Accept": "application/json, text/event-stream"})
         try:
@@ -92,10 +145,15 @@ class Game:
         except (OSError, http.client.HTTPException) as e:      # (IncompleteRead, BadStatusLine... are HTTPExceptions)
             if isinstance(getattr(e, "reason", e), ConnectionRefusedError):     # (nothing on that port)
                 self.game_url(failed=True)
-            raise GameError(f"inZOI isn't reachable ({e})") from None
+                self._cli = None        # the game may come back as another build: read its catalog again
+            raise GameUnreachable(f"inZOI isn't reachable ({e})") from None
+        if raw.startswith(("event:", "data:")):
+            raw = "\n".join(l[5:].strip() for l in raw.splitlines() if l.startswith("data:"))
+        return raw
+
+    def call(self, tool: str, **args):
+        raw = self._post("tools/call", {"name": tool.replace(".", "_"), "arguments": args})
         try:
-            if raw.startswith(("event:", "data:")):
-                raw = "\n".join(l[5:].strip() for l in raw.splitlines() if l.startswith("data:"))
             res = json.loads(raw).get("result") or {}
             if res.get("structuredContent") is not None:
                 out = res["structuredContent"]
@@ -111,7 +169,57 @@ class Game:
             raise GameError(str(out))
         return out
 
+    # ------------------------------------------------------------------ official CLI catalog
+    def cli_list(self, refresh: bool = False) -> set:
+        """Names (as MCP tool names, dots -> underscores) of the CLI commands this game build has: cli.list
+        (CLI_DOCS + "cli/cli-list") plus the server's tools/list. Read once and cached; while it can't be read (game
+        not up yet), tried again at most every CLI_RELIST s. Always empty with INZOI_MP_USE_CLI=0."""
+        if not self.use_cli:
+            return set()
+        with self._cli_lock:
+            if self._cli is not None and not refresh:
+                return self._cli
+            if not refresh and self._cli_at and time.monotonic() - self._cli_at < CLI_RELIST:
+                return set()
+            self._cli_at = time.monotonic()
+            names = set()
+            try:
+                names |= cli_names(self.call("cli.list"))
+            except GameError:
+                pass
+            try:
+                tools = (json.loads(self._post("tools/list", {})).get("result") or {}).get("tools") or []
+                names |= {_tool(t["name"]) for t in tools if isinstance(t, dict) and t.get("name")}
+            except (GameError, ValueError, AttributeError, TypeError):
+                pass
+            self._cli = names or None       # (nothing read: try again later)
+            return names
+
+    def has_cli(self, command: str) -> bool:
+        return self.use_cli and _tool(command) in self.cli_list()
+
+    def cli(self, command: str, **params):
+        """Run an official CLI command (e.g. "environment.get_time"). Raises CliUnavailable when this build doesn't
+        list it (or INZOI_MP_USE_CLI=0) and GameError when it fails: every caller keeps a legacy path for both."""
+        if not self.has_cli(command):
+            raise CliUnavailable(f"CLI command {command} not available")
+        return self.call(command, **params)
+
+    def _cli_or(self, legacy, attempt):
+        """attempt() through the CLI; on a missing command, an error or an odd answer, legacy() (the pre-CLI code,
+        unchanged). An unreachable game isn't retried the legacy way: that would only wait out a second timeout."""
+        if self.use_cli:
+            try:
+                return attempt()
+            except GameUnreachable:
+                raise
+            except (GameError, KeyError, TypeError, ValueError, AttributeError):
+                pass
+        return legacy()
+
     def lookup(self, struct: str) -> str:
+        # Stays on lua_api_lookup (an MCP tool outside the CLI catalog): entity.schema (CLI_DOCS + "entity/entity-schema")
+        # documents names/types/enum values but not the C++ container/struct types lua_data.Converter needs.
         r = self.call("lua_api_lookup", type=struct)
         return r.get("_text", "") if isinstance(r, dict) else str(r)
 
@@ -144,6 +252,19 @@ class Game:
         return json.loads(body) if body.strip().startswith("[") else []
 
     def possessed(self) -> int:
+        # CLI: entity.get_possessed, no params -> entity_id (CLI_DOCS + "entity/entity-get-possessed"); on a build
+        # without it, game.get_state's possessed_entity_id (CLI_DOCS + "game/").
+        def attempt():
+            if self.has_cli("entity.get_possessed"):
+                eid = int(self.cli("entity.get_possessed")["entity_id"])
+            else:
+                eid = int(self.cli("game.get_state")["possessed_entity_id"])
+            if eid <= 0:
+                raise ValueError(eid)
+            return eid
+        return self._cli_or(self._possessed_legacy, attempt)
+
+    def _possessed_legacy(self) -> int:
         try:
             return int(self.call("entity.get_possessed")["entity_id"])
         except (KeyError, TypeError, ValueError) as e:
@@ -151,6 +272,23 @@ class Game:
 
     def clock(self) -> tuple:
         """(hour, minute, speed, paused) of the game's clock."""
+        # CLI: environment.get_time -> hour, minute, day (CLI_DOCS + "environment/environment-get-time"). Speed and
+        # pause are documented on environment.get_simulation (CLI_DOCS + "environment/environment-get-simulation"):
+        # read from there when get_time doesn't carry them.
+        def attempt():
+            c = self.cli("environment.get_time")
+            h, m = int(c["hour"]), int(c["minute"])
+            speed, paused = c.get("time_scale"), c.get("paused")
+            if (speed is None or paused is None) and self.has_cli("environment.get_simulation"):
+                sim = self.cli("environment.get_simulation")
+                if speed is None:
+                    speed = next((sim[k] for k in ("time_scale", "time_speed", "speed") if k in sim), None)
+                if paused is None:
+                    paused = next((sim[k] for k in ("paused", "is_paused") if k in sim), None)
+            return h, m, 1 if speed is None else speed, bool(paused)
+        return self._cli_or(self._clock_legacy, attempt)
+
+    def _clock_legacy(self) -> tuple:
         c = self.call("environment.get_time")
         try:
             return int(c["hour"]), int(c["minute"]), c.get("time_scale", 1), bool(c.get("paused"))
@@ -204,7 +342,36 @@ class Game:
 
     def go_to(self, entity_id: int):
         """Teleport the player's Zoi next to another character."""
-        self.call("movement.teleport_to", entity_id=entity_id)
+        # CLI: movement.teleport_to entity_id (required) (CLI_DOCS + "movement/movement-teleport-to")
+        self._cli_or(lambda: self.call("movement.teleport_to", entity_id=entity_id),
+                     lambda: self.cli("movement.teleport_to", entity_id=int(entity_id)))
+
+    # ------------------------------------------------------------------ environment (season, weather, time)
+    def environment(self) -> dict:
+        """{"season", "weather", ...} of the world now."""
+        # CLI: environment.get_state, no params -> time, season, weather... (CLI_DOCS + "environment/environment-get-state")
+        return self._cli_or(lambda: self.call("environment.get_state"), lambda: self.cli("environment.get_state"))
+
+    def set_time_speed(self, speed: float):
+        # CLI: environment.time_speed speed (float, required, 0-30) (CLI_DOCS + "environment/environment-time-speed")
+        self._cli_or(lambda: self.call("environment.time_speed", speed=speed),
+                     lambda: self.cli("environment.time_speed", speed=max(0.0, min(30.0, float(speed)))))
+
+    def time_skip(self, minutes: int):
+        # CLI: environment.time_skip days/hours/minutes (int, optional) (CLI_DOCS + "environment/environment-time-skip")
+        self._cli_or(lambda: self.call("environment.time_skip", minutes=minutes),
+                     lambda: self.cli("environment.time_skip", minutes=int(minutes)))
+
+    def change_season(self, season: str):
+        # CLI: environment.change_season season (string, required) (CLI_DOCS + "environment/environment-change-season")
+        self._cli_or(lambda: self.call("environment.change_season", season=season),
+                     lambda: self.cli("environment.change_season", season=str(season)))
+
+    def override_weather(self, weather: str, step: int = 0):
+        # CLI: environment.override_weather weather (name), step (int), both required
+        # (CLI_DOCS + "environment/environment-override-weather")
+        self._cli_or(lambda: self.call("environment.override_weather", weather=weather, step=step),
+                     lambda: self.cli("environment.override_weather", weather=str(weather), step=int(step)))
 
     def template_for(self, gender: str, growth: str, exclude=()) -> int | None:
         """A local Zoi with the same gender and age: puppets borrow its body meshes and skeleton."""
