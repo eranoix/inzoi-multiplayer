@@ -974,8 +974,8 @@
     (res.checks || []).forEach((c) => {
       if (c.ok === false) bad++;
       const extra = checkExtra(c);
-      list.appendChild(h('div', { class: 'check' + (c.ok === true ? ' ok' : c.ok === false ? ' bad' : '') },
-        h('span', { class: 'mark' }, c.ok === true ? '✔' : c.ok === false ? '✘' : '—'),
+      list.appendChild(h('div', { class: 'selfcheck' + (c.ok === true ? ' ok' : c.ok === false ? ' bad' : '') },
+        h('span', { class: 'mark' }),                  // (a coloured dot: the game's font may lack check glyphs)
         h('div', { class: 't' }, t(CHECKS[c.id] || c.id),
           extra ? h('div', { class: 's' }, extra) : null,
           c.ok === false ? h('div', { class: 'fix' }, c.hint_code && HINTS[c.hint_code] ? t(HINTS[c.hint_code]) : I.tr(c.detail || '')) : null)));

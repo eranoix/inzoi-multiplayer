@@ -39,8 +39,8 @@ async def main(a):
         print("partner not on the server:", [p.get("name") for p in welcome.get("players", [])])
         return
     prof = (target.get("profile") or {})
-    zoi = next((m["entity_id"] for m in members if m.get("first_name") == prof.get("first_name")
-                and m.get("last_name") == prof.get("last_name")), None)
+    zoi = a.zoi or next((m["entity_id"] for m in members if m.get("first_name") == prof.get("first_name")
+                         and m.get("last_name") == prof.get("last_name")), None)
     print(f"watching {a.name} ({prof.get('first_name')} {prof.get('last_name')}), their Zoi here: {zoi}")
     states = []          # (arrival, ts, x, y, act)
     samples = []         # (t, x, y)
@@ -128,4 +128,5 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=24242)
     ap.add_argument("--name", default="Chey")
     ap.add_argument("--seconds", type=float, default=60)
+    ap.add_argument("--zoi", type=int, help="their Zoi's entity here (default: the family member with their name)")
     asyncio.run(main(ap.parse_args()))

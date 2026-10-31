@@ -440,6 +440,11 @@
         });
     });
     var updateAsked = false;
+    $('h-sync').addEventListener('click', function () {
+        post('/partner/house', {}, function (r) {
+            flash(!r || r.error ? coupleErr(r) : t("Asked for {name}'s house: what's different shows up in a moment.", { name: partnerName() }), 5000);
+        });
+    });
     $('s-update').addEventListener('click', function () {
         var out = $('s-update-out');
         updateAsked = true;

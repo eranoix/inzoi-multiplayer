@@ -312,6 +312,8 @@ class Couple:
                 self.mark(s, "failed", why)
                 self.system_line(f"{s['to']}: it didn't work in their save ({ACTION_NAMES.get(s['action'], s['action'])}): {why}")
                 log.warning("%s's save: %s failed: %s", s["to"], s["action"], why)
+        elif data.get("type") == "house_request":     # (housesync.py: the partner wants our home as it is)
+            asyncio.get_running_loop().create_task(self.on_house_request(frm))
         elif data.get("type") == "house":             # (housesync.py: the partner changed our home)
             self.on_house(frm, data)
         elif data.get("type") == "update_request":       # (the partner: "get the newest version")
@@ -925,6 +927,12 @@ class Couple:
                              "data": {"type": "update_request", "id": secrets.token_hex(6)}})
             return {"ok": True}
 
-        return {"/partner/update": partner_update, "/partner/log": partner_log, "/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
+        async def partner_house(body):
+            r = self.partner(body.get("key"))
+            if not r:
+                return {"error": "your partner isn't online", "code": "no_partner"}
+            return await self.request_house(r)
+
+        return {"/partner/house": partner_house, "/partner/update": partner_update, "/partner/log": partner_log, "/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
                 "/partner/goto": goto, "/partner/invite": invite, "/partner/action": action,
                 "/partner/respond": respond, "/world/undo": undo, "/world/backups": backups}

@@ -46,7 +46,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.17"
+VERSION = "0.9.18"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -790,6 +790,9 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
                 self.despawn(r.pid)                      # (the copy goes; next round the family member is adopted)
                 r.spawned, r.spawn_requested = False, 0.0
                 continue
+            if r.spawned and here and not r.__dict__.get("house_asked") and time.time() - r.spawn_requested > 20:
+                r.house_asked = True                     # (once a session: compare our home with theirs)
+                asyncio.get_running_loop().create_task(self.request_house(r))
             if fam and not r.spawned and time.time() - r.spawn_requested > 8:
                 st = r.state
                 extra = {"home_door": self.home["door"], "home_site": self.home["site"]} if self.home else {}

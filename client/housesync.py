@@ -114,6 +114,30 @@ class HouseSync:
                                   "site_id": b["site_id"], "objects": objs}})
         log.info("sent the house to %s (%d objects)", r.name, len(objs))
 
+    async def request_house(self, r) -> dict:
+        """Ask the partner's program for their home as it is now (they needn't be in build mode)."""
+        if not (self.writer and self.me_id):
+            return {"error": "not connected to the server", "code": "not_connected"}
+        await self.send({"t": "event", "kind": "couple", "to": r.pid,
+                         "data": {"type": "house_request", "id": secrets.token_hex(6)}})
+        log.info("asked %s for their house", r.name)
+        return {"ok": True}
+
+    async def on_house_request(self, frm: str):
+        """The partner wants our home as it is now: read it (my Zoi must be on the home lot) and send it."""
+        try:
+            st = await self.g(self.game.call, "build.get_mode_state") or {}
+            home = await self.g(self.my_home_site)
+            site = st.get("site_entity_id")
+            if not home or not site or int(site) != int(home):
+                log.info("asked for the house, but your Zoi isn't at home: not sent")
+                return
+            objs = await self.g(self.scan_site)
+        except Exception as e:                           # noqa: BLE001
+            log.info("couldn't read the house for the partner: %s", e)
+            return
+        await self.send_house({"site": int(site), "site_id": st.get("site_id"), "objects": objs})
+
     def on_house(self, frm: str, data: dict):
         """The partner left build mode on our home: compare, and ask before changing anything here."""
         r = self.remotes.get(frm)

@@ -127,6 +127,15 @@ async def main():
     assert len([1 for q in ana.requests.values() if q.get("action") == "house"]) == n
     print("Ana's changes reach Ben: asked, applied in build mode, not sent back: ok")
 
+    # Ben asks for Ana's house as it is now (she isn't in build mode): it's read and sent, and what differs is asked
+    ga.objects.append(obj(6, "Rug01", 700, 700))
+    for q in [q for q in list(ben.requests.values()) if q.get("action") == "house"]:
+        ben.requests.pop(q["id"], None)
+    assert (await ben.request_house(ben.remotes[ana.me_id]))["ok"]
+    assert await until(lambda: any(q.get("action") == "house" and q.get("label") == "1 new, 0 removed"
+                                   for q in ben.requests.values()))
+    print("asking for the partner's house as it is now: ok")
+
     # another lot (not Ben's home): ignored; "always yes": applied without asking
     gb.home = 2000
     ben.on_house(ana.me_id, {"site": 1038, "site_id": "X", "objects": [housesync.object_key(obj(0, "Lamp09", 1, 1))]})

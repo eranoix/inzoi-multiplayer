@@ -78,6 +78,7 @@ end
 local function em() return inzoi.getB2Manager("FB2EntityManager") end
 local function char(n) local m = em(); return m:FindCharacter(eid(n)) end
 local function cli(cmd) return inzoi.cli.execute(cmd) end
+local ATAN2 = math.atan2 or math.atan
 local function dist2(ax, ay, bx, by) return math.sqrt((ax - bx) ^ 2 + (ay - by) ^ 2) end
 
 -- ---------------------------------------------------------------- data -> engine struct builder
@@ -343,6 +344,11 @@ local function despawn_puppet(op)
     local p = PUPPETS[op.key]
     if not p then return "no puppet " .. tostring(op.key) end
     if p.adopted then
+        pcall(function()
+            local mc = char(p.id):GetMovementComponent()
+            mc.InputVector = UE.FVector(0, 0, 0)
+            mc.WalkSpeed = 190
+        end)
         freeze(p.id, false)                             -- their player left: the game looks after them again
         pcall(clear_all, p.id)
         pcall(function() char(p.id):SetCharacterHiddenInGame(false, "mp_away") end)
@@ -380,7 +386,13 @@ local REAIM, SPRINT, TELEPORT, MIN_GAP = 150, 600, 600, 0.15
 -- Where they are, exactly: closer than ARRIVED cm is there; a walk that stopped short (refused, a door, someone's
 -- home) is finished with a teleport after SNAP_AFTER s, a walk going nowhere after STUCK_FOR s.
 local ARRIVED, SNAP_AFTER, STUCK_FOR = 70, 1.2, 2.2
-local LEAP_AT, LEAP_EVERY = 250, 1.5      -- running and this far behind: a small leap to 1 m behind them
+local LEAP_AT, LEAP_EVERY = 250, 1.5
+-- Direct drive (how networked games move remote players): every tick the puppet walks, with the game's own
+-- locomotion (the movement component's InputVector, like WASD, and its WalkSpeed), towards where its player was
+-- RENDER_DELAY s ago, interpolated between the two trail points around that moment (by the sender's clock), or a short
+-- extrapolation past the newest one. No path orders, so no stop-and-go. Another floor or DIRECT_TP away: placed there.
+local DIRECT, RENDER_DELAY, EXTRAPOLATE, DIRECT_TP, DIRECT_K, DIRECT_MAX = true, -0.25, 0.45, 350, 6.0, 900
+local STANDING_AFTER = 0.35   -- no new point for this long: they're standing (velocity 0, no more prediction)      -- running and this far behind: a small leap to 1 m behind them
 -- Realtime: the player's own position goes out from here ME_EVERY s (read straight from the engine); a puppet aims
 -- where its player will be LATENCY s from now (their speed, from the sender's clock on each point) and walks at their
 -- speed; anything it starts on its own while its player is online is cancelled (only what they do is done).
@@ -455,6 +467,43 @@ local function straight_on(p, aim)
     return (ax * bx + ay * by) / (la * lb) > STRAIGHT_COS
 end
 
+-- Where the player was RENDER_DELAY s ago (sender's clock), and their velocity (cm/s). nil without sender times.
+local function interp_target(p)
+    local n = #p.trail
+    local last = p.trail[n]
+    if not last or not last.st then return nil end
+    local now_st = last.st + (S.clock - last.at)
+    local t = now_st - RENDER_DELAY
+    local vx, vy = 0, 0
+    for i = n - 1, math.max(1, n - 8), -1 do
+        local q = p.trail[i]
+        if q.st and last.st - q.st >= 0.15 then
+            vx, vy = (last.x - q.x) / (last.st - q.st), (last.y - q.y) / (last.st - q.st)
+            break
+        end
+    end
+    if S.clock - last.at > STANDING_AFTER then vx, vy = 0, 0 end   -- (no new point for a while: standing)
+    if t >= last.st then
+        local ahead = math.min(EXTRAPOLATE, t - last.st)
+        return { x = last.x + vx * ahead, y = last.y + vy * ahead, z = last.z, yaw = last.yaw }, vx, vy
+    end
+    for i = n - 1, 1, -1 do
+        local a, b = p.trail[i], p.trail[i + 1]
+        if a.st and b.st and a.st <= t and t <= b.st then
+            local k = (b.st > a.st) and (t - a.st) / (b.st - a.st) or 1
+            return { x = a.x + (b.x - a.x) * k, y = a.y + (b.y - a.y) * k, z = a.z + (b.z - a.z) * k, yaw = b.yaw }, vx, vy
+        end
+    end
+    return { x = last.x, y = last.y, z = last.z, yaw = last.yaw }, vx, vy
+end
+
+local function stop_direct(c)
+    pcall(function()
+        local mc = c:GetMovementComponent()
+        mc.InputVector = UE.FVector(0, 0, 0)
+    end)
+end
+
 local function start_act(c, p)
     local a = p.actQueued
     p.actQueued = nil
@@ -503,6 +552,36 @@ local function drive(key, p, dt)
         if moved and doing and far < ACT_WITH then return end
         if doing then clear_all(p.id) end
         p.act, p.actQueued = nil, nil
+    end
+    if DIRECT and pick.st then
+        local tgt, vx, vy = interp_target(p)
+        if tgt then
+            local dx, dy = tgt.x - me.X, tgt.y - me.Y
+            local err = math.sqrt(dx * dx + dy * dy)
+            local mc = c:GetMovementComponent()
+            local bag = current_bag(c)
+            if bag and bag:match("^ClickMove") then cancel_walk(c) end     -- (no path orders while driven)
+            if math.abs(me.Z - tgt.z) > 150 or err > DIRECT_TP then
+                mc.InputVector = UE.FVector(0, 0, 0)
+                teleport(p.id, tgt.x, tgt.y, tgt.z)
+                log_limited(string.format("%s placed where they are (%.1f m, %s)", key, err / 100,
+                    math.abs(me.Z - tgt.z) > 150 and "another floor" or "too far"), 10)
+                return
+            end
+            local spd = math.sqrt(vx * vx + vy * vy)
+            if err < 18 and spd < 25 then
+                mc.InputVector = UE.FVector(0, 0, 0)
+                if tgt.yaw and yaw_gap(c:GetRotation().Yaw, tgt.yaw) > FACE_GAP and S.clock - (p.facedT or -10) > 0.5 then
+                    p.facedT = S.clock
+                    face(c, tgt.yaw, "simul")
+                end
+                return
+            end
+            mc.WalkSpeed = math.max(60, math.min(DIRECT_MAX, spd + err * DIRECT_K))
+            face(c, math.deg(ATAN2(dy, dx)), "simul")
+            mc.InputVector = UE.FVector(1, 0, 0)
+            return
+        end
     end
     if far > TELEPORT then
         teleport(p.id, pick.x, pick.y, pick.z)
@@ -653,6 +732,7 @@ local OPS = {
             end
         end
         p.pending = nil
+        stop_direct(c)
         if is_walking(c) or p.act then cancel_walk(c) end
         p.act = { bag = op.bag, x = op.x, y = op.y }
         p.actQueued = { bag = op.bag, target = target, t = 0 }
