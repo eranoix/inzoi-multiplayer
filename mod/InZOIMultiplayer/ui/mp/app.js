@@ -42,7 +42,7 @@
         applyScale();
     });
     setInterval(function () {
-        var cls = root._minimized ? 'min' : '';
+        var cls = modalWas ? 'modal' : (root._minimized ? 'min' : '');
         if (root.className !== cls) { root.className = cls; if (lastStatus) { renderTitle(lastStatus); } }
     }, 150);
     [2500, 5000].forEach(function (ms) {
@@ -680,7 +680,8 @@
                  engage: N('{name} wants to get engaged to you'), marry: N('{name} wants to marry you'),
                  baby: N('{name} wants to have a baby with you'),
                  interaction: N('{name} wants to interact with you: {what}'),
-                 game: N('{name} wants to interact with you: {what}') };
+                 game: N('{name} wants to interact with you: {what}'),
+                 house: N('{name} changed the house ({what}). Apply it in your game?') };
     var SENT_NAME = { hug: N('Hug request'), kiss: N('Kiss request'), dance: N('Dance request'), wave: N('High five request'),
                       holdhands: N('Hold hands request'), selfie: N('Selfie request'), spin: N('Spin request'),
                       invite: N('Invitation'), movein: N('Moving in together'), engage: N('Engagement'),
@@ -754,7 +755,7 @@
                 })(q.id, r);
                 box.appendChild(r.row);
                 reqRows[q.id] = r;
-                if (root._minimized && root._applyMinimize) { root._applyMinimize(false); }   // open the panel for it
+
             }
             setText(r.text, t(ASKS[q.action] || N('{name} sent you a request'), { name: q.from, what: q.label || '' }));
             setText(r.left, t('{n} seconds left to answer', { n: left }));
@@ -765,6 +766,33 @@
         });
         for (var id in reqRows) {
             if (reqRows.hasOwnProperty(id) && !seen[id]) { box.removeChild(reqRows[id].row); delete reqRows[id]; }
+        }
+        modal(box.firstChild !== null);
+    }
+
+    // A request is a dialog in the middle of the screen (the window itself moves there: clicks only reach it inside
+    // its own rectangle); answered, the window goes back exactly where it was, open or closed (nothing is saved).
+    var modalWas = null;
+    function modal(on) {
+        if (on && !modalWas) {
+            modalWas = { left: root.style.left, top: root.style.top, min: !!root._minimized, transform: root.style.transform };
+            if (root._minimized && root._applyMinimize) { root._applyMinimize(false); }
+            root.className = 'modal';
+            var w = 600, vw = window.innerWidth || 1920, vh = window.innerHeight || 1080;
+            root.style.left = Math.max(0, Math.round((vw - w) / 2)) + 'px';
+            root.style.top = Math.round(vh * 0.26) + 'px';
+            $('dim').className = 'on';
+            if (root._reportContentRect) { root._reportContentRect(); }
+        } else if (!on && modalWas) {
+            var was = modalWas;
+            modalWas = null;
+            $('dim').className = '';
+            root.className = '';
+            root.style.left = was.left;
+            root.style.top = was.top;
+            root.style.transform = was.transform;
+            if (was.min && root._applyMinimize) { root._applyMinimize(true); }
+            if (root._reportContentRect) { root._reportContentRect(); }
         }
     }
     function answerRequest(id, yes, rr, always) {

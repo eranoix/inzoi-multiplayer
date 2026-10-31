@@ -271,6 +271,7 @@
     }
 
     // Expose for float/resize/minimize snippets.
+    root._reportContentRect = _reportContentRect;      // (app.js: the popup moves the window to the screen's centre)
     root._saveWindowStateSoon = saveWindowStateSoon;
     root._saveWindowState     = saveWindowState;
 

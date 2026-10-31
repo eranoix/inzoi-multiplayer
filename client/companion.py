@@ -29,7 +29,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import couple  # noqa: E402
+import couple
+import housesync  # noqa: E402
 import houses  # noqa: E402
 import install  # noqa: E402
 import mods  # noqa: E402
@@ -45,7 +46,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.14"
+VERSION = "0.9.15"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -333,7 +334,7 @@ class Remote:
         self.outfit = None
 
 
-class Companion(couple.Couple, servers.Servers):
+class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.version = VERSION
@@ -396,7 +397,8 @@ class Companion(couple.Couple, servers.Servers):
         self.world_hashes = mods.Hashes(CONFIG_DIR / "world_hashes.json")
         self.world_asked = False     # offered to make my multiplayer save the shared world (once per run)
         self.servers_init(SERVER_DATA, CONFIG_DIR / "page-browser")
-        self.couple_init()                   # couple features: requests, backups, undo (couple.py)
+        self.couple_init()
+        self.house_init()                   # couple features: requests, backups, undo (couple.py)
         self.forget_shared_world()
 
     def forget_shared_world(self):
@@ -867,6 +869,17 @@ class Companion(couple.Couple, servers.Servers):
             return await self.follow_leader_speed()
         others = [r for r in self.remotes.values() if r.state and time.time() - r.state_at < 10]
         clock = self.my_clock
+        if others and clock and clock[3] and self.cfg.get("never_pause", True)                 and not self.__dict__.get("in_build_mode"):
+            # coop-casal: time never stops while the partner is on (a pause on one side breaks the sync for both);
+            # build mode pauses the game by itself and is left alone
+            if time.time() - self.__dict__.get("_unpaused_at", 0) > 5:
+                self._unpaused_at = time.time()
+                if not self.__dict__.get("_unpause_said"):
+                    self._unpause_said = True
+                    self.system_line("Time keeps running while your partner is online")
+                log.info("the game was paused: time runs again (your partner is online)")
+                await self.g(self.game.call, "environment.time_speed", speed=1)
+            return
         if not others or not clock or clock[3]:              # nobody to keep in step with / I'm paused
             return
         asleep = self.sleeping and all(r.state.get("sleep") for r in others)
@@ -1067,7 +1080,7 @@ class Companion(couple.Couple, servers.Servers):
                 if tick % 5 == 2:
                     self.my_clock = await self.g(self.game.clock)
                     self.sleeping = bool(SLEEPING.search(f"{(act or {}).get('bag', '')} {anim or ''}"))
-                    if world == "play" and self.writer and self.me_id and active:
+                    if world in ("play", "stopped") and self.writer and self.me_id and active:
                         await self.keep_speed()
                 if tick % 5 == 0 and time.time() - self.mod["beat"] > 10 \
                         and time.time() - self.mod.get("tried", 0) > 20:
@@ -1138,6 +1151,9 @@ class Companion(couple.Couple, servers.Servers):
         """What my Zoi is doing, 4 times a second, apart from the slower loop: a change goes out right away."""
         while True:
             try:
+                self._house_n = self.__dict__.get("_house_n", 0) + 1
+                if self._house_n % 8 == 0 and self.world != "out" and self.my_entity:
+                    await self.house_tick()                  # (every 2 s, paused too: build mode pauses the game)
                 if self.world == "play" and self.my_entity:
                     a = await self.g(self.game.activity, self.my_entity)
                     act = await self.g(self.describe_act, a)

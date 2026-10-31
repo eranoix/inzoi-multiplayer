@@ -312,6 +312,8 @@ class Couple:
                 self.mark(s, "failed", why)
                 self.system_line(f"{s['to']}: it didn't work in their save ({ACTION_NAMES.get(s['action'], s['action'])}): {why}")
                 log.warning("%s's save: %s failed: %s", s["to"], s["action"], why)
+        elif data.get("type") == "house":             # (housesync.py: the partner changed our home)
+            self.on_house(frm, data)
         elif data.get("type") == "update_request":       # (the partner: "get the newest version")
             log.info("%s asked this program to update", self.remotes[frm].name if frm in self.remotes else frm)
             asyncio.get_running_loop().create_task(self.update_now())
@@ -376,6 +378,10 @@ class Couple:
                 log.info("always yes from now on: %s", key)
         if accept:
             self.__dict__.setdefault("_accepted", {})[q["from_id"]] = time.time() + ACCEPTED_FOR
+        if q.get("local") and q.get("action") == "house":
+            if not accept:
+                return {"ok": True, "result": {"state": "declined"}}
+            return {"ok": True, "result": await self.apply_house(q)}
         if q.get("local"):                               # their Zoi already did it in their game: show it here or not
             if accept:
                 self.mail.op("act", key=q["from_id"], **q["op"])

@@ -138,7 +138,19 @@ async def main():
     g = StandIn(9, 0, speed=3, paused=True)
     comp, _ = make(g)
     friend(comp, "a", [9, 0])
-    await comp.keep_speed()                                   # paused: my own business
+    await comp.keep_speed()                                   # paused with the partner on: time runs again
+    assert commands(g, "environment.time_speed") == [{"speed": 1}]
+    g = StandIn(9, 0, speed=3, paused=True)
+    comp, _ = make(g)
+    friend(comp, "a", [9, 0])
+    comp.in_build_mode = True
+    await comp.keep_speed()                                   # build mode pauses by itself: left alone
+    assert not commands(g, "environment.time_speed")
+    g = StandIn(9, 0, speed=3, paused=True)
+    comp, _ = make(g)
+    friend(comp, "a", [9, 0])
+    comp.cfg["never_pause"] = False
+    await comp.keep_speed()                                   # (switched off: pausing is each one's own)
     assert not commands(g, "environment.time_speed")
 
     # A friend whose game isn't running (no fresh state) doesn't count.
