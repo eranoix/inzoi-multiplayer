@@ -147,6 +147,9 @@ button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visibl
        background: rgba(240, 140, 190, 0.22); border: 2px solid rgba(250, 160, 205, 0.85); }
 .req .row2 { display: flex; margin-top: 7px; }
 .req .btn { flex: 1; padding: 8px 6px; font-size: 16px; }
+#save-buttons .btn:first-child, #world-buttons .btn:first-child, #update-buttons .btn:first-child {
+    background: rgba(127, 209, 185, 0.42); border-color: #7fd1b9; }   /* the recommended answer */
+.req .btn:not(.no) { background: rgba(127, 209, 185, 0.42); border-color: #7fd1b9; }
 .req .btn.no { margin-left: 8px; background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.35); color: #eef1f6; }
 .req .left { font-size: 13px; font-weight: normal; color: #c9d0db; margin-top: 4px; }
 
@@ -223,6 +226,11 @@ button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visibl
         <button type="button" class="btn" id="conn-retry" style="display:none" data-i18n>Try again</button></div>
     </div>
     <div class="reqs" id="reqs" role="alert" aria-live="assertive"></div>
+    <!-- questions and warnings first: multiplayer may be waiting on them -->
+    <div class="notice" id="notice" role="alert"></div>
+    <div class="save-box" id="update-box"><div id="update-text"></div><div id="update-buttons"></div></div>
+    <div class="save-box" id="world-box"><div id="world-text"></div><div id="world-buttons"></div></div>
+    <div class="save-box" id="save-box"><div id="save-text"></div><div id="save-buttons"></div></div>
     <div class="pcard" id="pcard">
       <div class="head" id="p-head" role="button" data-i18n-title="Show or hide the details"><span class="pdot" id="p-dot"></span><span class="pname" id="p-name"></span><span class="fold" id="p-fold">-</span></div>
       <div id="p-body">
@@ -235,10 +243,6 @@ button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visibl
         <div class="sent" id="p-sent"></div>
       </div>
     </div>
-    <div class="notice" id="notice" role="alert"></div>
-    <div class="save-box" id="update-box"><div id="update-text"></div><div id="update-buttons"></div></div>
-    <div class="save-box" id="world-box"><div id="world-text"></div><div id="world-buttons"></div></div>
-    <div class="save-box" id="save-box"><div id="save-text"></div><div id="save-buttons"></div></div>
     <div class="tabs" role="tablist"><button type="button" role="tab" class="tab on" data-tab="people" data-i18n>People</button><button type="button" role="tab" class="tab" data-tab="houses" data-i18n>Houses</button><button type="button" role="tab" class="tab" data-tab="mods" id="tab-mods">Mods</button><button type="button" role="tab" class="tab" data-tab="settings" data-i18n>Settings</button><button type="button" role="tab" class="tab" data-tab="help" data-i18n>Help</button></div>
     <div class="pane on" id="pane-people">
       <div class="label" data-i18n>Players</div>
