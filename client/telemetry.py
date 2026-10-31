@@ -30,8 +30,8 @@ class Telemetry:
         self.lock = threading.Lock()
         self.f = None
 
-    def rec(self, kind: str, **data):
-        line = json.dumps({"t": round(time.time(), 3), "k": kind, **data}, ensure_ascii=False, default=str)
+    def rec(self, k: str, **data):
+        line = json.dumps({"t": round(time.time(), 3), "k": k, **data}, ensure_ascii=False, default=str)
         with self.lock:
             try:
                 if self.f is None:
