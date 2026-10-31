@@ -763,7 +763,7 @@
                 reqRows[q.id] = r;
 
             }
-            setText(r.text, t(ASKS[q.action] || N('{name} sent you a request'), { name: q.from, what: q.label || '' }));
+            setText(r.text, t(ASKS[q.action] || N('{name} sent you a request'), { name: q.from, what: q.label ? I.tr(q.label) : '' }));
             setText(r.left, t('{n} seconds left to answer', { n: left }));
             setText(r.yes, t('Accept'));
             setText(r.no, t('Decline'));

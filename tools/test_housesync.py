@@ -3,10 +3,13 @@
 - Ana rearranges the home in build mode and leaves it: Ben is asked ("2 new, 1 removed"), says yes, and his game
   enters build mode, removes and places what differs, and leaves it; that doesn't send the house back
 - a house that isn't Ben's home is ignored; "always yes" applies it without asking
+- walls: one long wall and the two short ones that make it up are the same; Ana builds a room and knocks a wall
+  down, raises the ceiling: Ben's game deletes and builds those walls (before placing doors) and sets the height
 
     python tools/test_housesync.py
 """
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -22,6 +25,10 @@ import companion  # noqa: E402
 import housesync  # noqa: E402
 
 
+def wall(x0, y0, x1, y1, floor=0):
+    return {"floor_level": floor, "left": {"x": x0, "y": y0}, "right": {"x": x1, "y": y1}}
+
+
 def obj(eid, table, x, y, yaw=0.0, floor=0, z=7.5):
     return {"entity_id": eid, "table_id": table, "floor_level": floor, "location": {"x": x, "y": y, "z": z}, "yaw": yaw}
 
@@ -29,8 +36,10 @@ def obj(eid, table, x, y, yaw=0.0, floor=0, z=7.5):
 class StandIn:
     """A game: a home lot (site 1038) with objects, build mode, and the calls the house sync makes."""
 
-    def __init__(self, objects, home=1038):
+    def __init__(self, objects, home=1038, walls=(), height=300.0):
         self.objects, self.home, self.phase, self.calls, self.next_id = list(objects), home, "none", [], 900
+        self.walls, self.height = list(walls), height
+        self.where = home                               # the lot my Zoi is on
 
     def call(self, tool, **kw):
         self.calls.append((tool, kw))
@@ -53,6 +62,27 @@ class StandIn:
             self.next_id += 1
             self.objects.append(obj(self.next_id, kw["object_table_id"], kw["X"], kw["Y"], kw["Yaw"], kw["floor_level"],
                                     kw["Z"]))
+            return {}
+        if tool == "entity.reflect":
+            return {"worldTransform": {"translation": {"x": 0, "y": 0, "z": 0}, "rotation": {"x": 0, "y": 0, "z": 0,
+                                                                                             "w": 1}},
+                    "locatedCityName": "Dowon", "locatedSiteId": {"value": self.where}}
+        if tool == "build.get_site_info":
+            return {"site_id": "RedCity_Residence_Free03"}
+        if tool == "build.scan_walls":
+            return {"_text": "Truncated: (as the game answers)" + chr(10) + json.dumps({"walls": self.walls})}
+        if tool == "build.scan_floors":
+            return {"floors": [{"floor_level": 0, "heights": [{"wall_height": self.height, "floor_height": 0.0,
+                                                               "base_height": 0.0}] if self.walls else []}]}
+        if tool == "building.construct_wall":
+            w = wall(kw["start_x"], kw["start_y"], kw["end_x"], kw["end_y"], kw["floor_level"])
+            if kw.get("is_delete"):
+                self.walls = [o for o in self.walls if housesync.wall_key(o) != housesync.wall_key(w)]
+            else:
+                self.walls.append(w)
+            return {}
+        if tool == "building.set_storey_wall_height":
+            self.height = kw["target_height"]
             return {}
         if tool == "household.get_members":
             return {"household_id": 1, "members": []}
@@ -87,6 +117,14 @@ async def main():
     place, remove = housesync.diff(a, b)
     assert [o["table_id"] for o in place] == ["Lamp01"] and sorted(o["entity_id"] for o in remove) == [8, 9]
     print("compare: same kind within 10 cm / 5 degrees is the same object: ok")
+    k = housesync.wall_key
+    long_ = [k(wall(12.5, 12.5, 512.5, 12.5))]
+    halves = [k(wall(512.5, 12.5, 212.5, 12.5)), k(wall(12.5, 12.5, 212.5, 12.5))]
+    assert housesync.wall_diff(long_, halves) == ([], []) and housesync.wall_diff(halves, long_) == ([], [])
+    build, delete = housesync.wall_diff([k(wall(12.5, 12.5, 312.5, 12.5))], long_)
+    assert build == [k(wall(12.5, 12.5, 312.5, 12.5))] and delete == long_
+    assert housesync.wall_diff(long_, [k(wall(12.5, 12.5, 512.5, 12.5, floor=1))])[0] == long_
+    print("compare walls: the same line however it's split; a shorter wall is rebuilt; floors apart: ok")
 
     import inzoi_mp_server as mp
     server = mp.Server(mp.Store(TMP / "server"))
@@ -136,6 +174,16 @@ async def main():
                                    for q in ben.requests.values()))
     print("asking for the partner's house as it is now: ok")
 
+    # Ana's Zoi is out on another lot (the scans would read that lot, not the home): nothing is sent
+    ga.where = 839
+    for q in [q for q in list(ben.requests.values()) if q.get("action") == "house"]:
+        ben.requests.pop(q["id"], None)
+    await ben.request_house(ben.remotes[ana.me_id])
+    await asyncio.sleep(1)
+    assert not [q for q in ben.requests.values() if q.get("action") == "house"]
+    ga.where = 1038
+    print("asked while out of the home: not sent (it would be the wrong lot): ok")
+
     # another lot (not Ben's home): ignored; "always yes": applied without asking
     gb.home = 2000
     ben.on_house(ana.me_id, {"site": 1038, "site_id": "X", "objects": [housesync.object_key(obj(0, "Lamp09", 1, 1))]})
@@ -147,6 +195,28 @@ async def main():
                              [housesync.object_key(obj(0, "Lamp09", 1, 1))]})
     assert await until(lambda: any(o["table_id"] == "Lamp09" for o in gb.objects))
     print("another lot ignored; always yes applies by itself: ok")
+
+    # walls: Ana builds a room (4 walls), knocks the old wall down, puts a door in, raises the storey to 3.9 m
+    ben.cfg["always_yes"] = []
+    room = [wall(1012.5, 1012.5, 1312.5, 1012.5), wall(1312.5, 1012.5, 1312.5, 1312.5),
+            wall(1312.5, 1312.5, 1012.5, 1312.5), wall(1012.5, 1312.5, 1012.5, 1012.5)]
+    gb.walls = [wall(12.5, 12.5, 512.5, 12.5)] + room[:1]
+    gb.calls.clear()
+    lot = {"site": 1038, "site_id": "X", "objects": [housesync.object_key(o) for o in gb.objects] +
+           [housesync.object_key(obj(0, "Door01", 1100, 1012.5))],
+           "walls": [housesync.wall_key(w) for w in room], "heights": {"0": {"wall_height": 390.0}}}
+    ben.on_house(ana.me_id, lot)
+    assert await until(lambda: any(q.get("action") == "house" and q.get("label") for q in ben.requests.values()))
+    q = next(q for q in ben.requests.values() if q["action"] == "house")
+    assert q["label"] == "1 new, 0 removed, 4 walls", q
+    out = await ben.couple_respond(q["id"], True)
+    assert out["result"]["walls"] == 4 and not out["result"]["failed"], out
+    assert sorted(map(str, map(housesync.wall_key, gb.walls))) == sorted(map(str, map(housesync.wall_key, room)))
+    assert gb.height == 390.0
+    tools = [c[0] for c in gb.calls]
+    assert tools.index("building.construct_wall") < tools.index("building.place_object")
+    assert any(o["table_id"] == "Door01" for o in gb.objects)
+    print("walls: built and knocked down like hers, storey height set, doors placed after the walls: ok")
     for t in tasks:
         t.cancel()
     print("house sync tests passed")
