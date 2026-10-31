@@ -245,18 +245,31 @@ end
 -- the puppet is standing on (public places are identical in every game).
 local function find_object(c, table_id, x, y, z)
     local m = em()
+    -- what the puppet carries first (the dish it took out of the microwave is its own, in its hands)
+    local okK, kids = pcall(function() return c:GetChildEntityIds() end)
+    if okK and kids then
+        for i = 1, kids:Num() do
+            local id = kids:Get(i)
+            local o = m:FindGameObject(id)
+            if o and tostring(o:GetObjectTableId()) == table_id then return id.Value end
+        end
+    end
     local site = m:FindSite(c:GetLocatedSiteId())
     if not site then return nil end
     local objs = site:GetObjects()
     local best, bestD = nil, 150
-    for i = 1, objs:Num() do
-        local id = objs:Get(i)
-        local o = m:FindGameObject(id)
-        if o and tostring(o:GetObjectTableId()) == table_id then
-            local l = o:GetLocation()
-            local d = math.sqrt((l.X - x) ^ 2 + (l.Y - y) ^ 2 + (l.Z - z) ^ 2)
-            if d < bestD then best, bestD = id.Value, d end
+    for pass = 1, 2 do                                  -- (then a wider look: food put down on another table...)
+        for i = 1, objs:Num() do
+            local id = objs:Get(i)
+            local o = m:FindGameObject(id)
+            if o and tostring(o:GetObjectTableId()) == table_id then
+                local l = o:GetLocation()
+                local d = math.sqrt((l.X - x) ^ 2 + (l.Y - y) ^ 2 + (l.Z - z) ^ 2)
+                if d < bestD then best, bestD = id.Value, d end
+            end
         end
+        if best then return best end
+        bestD = 400
     end
     return best
 end
@@ -757,6 +770,9 @@ local OPS = {
         if not p then return nil end
         local c = char(p.id)
         local target = op.target
+        if not target and not op.obj and tostring(op.bag):match("^Self_") then
+            target = p.id                               -- (on oneself: queued without a target, the game drops it)
+        end
         if op.obj then
             target = find_object(c, op.obj, op.ox, op.oy, op.oz)
             if not target then                          -- something only their world has (a plate they cooked...)
