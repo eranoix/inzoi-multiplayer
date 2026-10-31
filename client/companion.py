@@ -34,6 +34,7 @@ import housesync  # noqa: E402
 import houses  # noqa: E402
 import install  # noqa: E402
 import telemetry  # noqa: E402
+import posesync  # noqa: E402
 import mods  # noqa: E402
 import saves  # noqa: E402
 import servers  # noqa: E402
@@ -47,7 +48,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.33"
+VERSION = "0.9.34"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -336,7 +337,7 @@ class Remote:
         self.outfit = None
 
 
-class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
+class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, servers.Servers):
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.version = VERSION
@@ -402,6 +403,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
         self.couple_init()
         self.house_init()                   # couple features: requests, backups, undo (couple.py)
         self.tele = telemetry.Telemetry()   # everything sent, received and shown, for tools/telemetry_report.py
+        self.pose_init()                    # skeleton mirroring (posesync.py + lua/B1/Main.lua)
         self.forget_shared_world()
 
     def forget_shared_world(self):
@@ -457,7 +459,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
                              "(or close it first).") from None
         self.tasks = [asyncio.create_task(self.keep_running(loop)) for loop in (
             self.game_loop, self.act_loop, self.mailbox_loop, self.mods_loop, self.update_loop, self.menu_loop, self.directory_loop,
-            self.ingame_loop, self.lan_loop)]
+            self.ingame_loop, self.lan_loop, self.pose_loop)]
         backoff = 2
         while True:
             self.wake.clear()
@@ -625,6 +627,8 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
                 self.on_couple_event(m)
             elif m.get("kind") == "presence":
                 self.on_presence(m)
+            elif m.get("kind") == "pose":
+                self.on_pose(m)
         elif t == "ping":
             await self.send({"t": "pong"})
         elif t == "kicked":
@@ -745,8 +749,14 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
         if r.pid not in self.puppet_ids:
             return                       # puppet not confirmed yet; actions wait for it
         act = st.get("act")
-        sig = json.dumps(act, sort_keys=True) if act else None
-        if sig != r.act_sig:
+        if self.pose_live(r) and not (act and act.get("player") == self.me_id):
+            act = None                   # (their skeleton drives their Zoi: only interactions with me are acted out)
+            if r.act_sig is None:
+                act = "skip"
+        sig = json.dumps(act, sort_keys=True) if act and act != "skip" else None
+        if act == "skip":
+            pass
+        elif sig != r.act_sig:
             r.act_sig, r.anim = sig, None
             r.act_tries, r.act_sent_at, r.act_changed_at, r.act_snapped = 0, time.time(), time.time(), False
             if act is None:
@@ -765,6 +775,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
             self.mail.op("anim", key=r.pid, anim=st["anim"])
         if st.get("outfit") and st["outfit"] != r.outfit:
             r.outfit = st["outfit"]
+            r.outfit_ver = r.__dict__.get("outfit_ver", 0) + 1         # (the skeleton rig is rebuilt on the new clothes)
             self.mail.op("outfit", key=r.pid, category=st["outfit"])
 
     def act_op(self, r: Remote, st: dict) -> dict | None:
@@ -789,7 +800,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
         st = r.state or {}
         act = st.get("act") or {}
         want = act.get("bag")
-        if not want or act.get("npc") or act.get("player") == self.me_id:
+        if not want or act.get("npc") or act.get("player") == self.me_id or self.pose_live(r):
             return
         if shown and (shown == want or shown.startswith(want)):
             return
@@ -1248,7 +1259,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
         for r in list(self.remotes.values()):
             e = self.puppet_ids.get(r.pid)
             st = r.state or {}
-            if not e or not r.spawned or r.hidden or "motions" not in st or now - (r.state_at or 0) > 2.0:
+            if not e or not r.spawned or r.hidden or "motions" not in st or now - (r.state_at or 0) > 2.0                     or self.pose_live(r):
                 continue
             want = {m["id"]: m for m in st.get("motions") or [] if isinstance(m, dict) and m.get("id")}
             pose = any(not re.search(r"Arm|Hand|Face|Head|Eye|Mouth|Additive|Upper", m.get("g") or "", re.I)
