@@ -28,8 +28,7 @@
     try { scale = parseFloat(localStorage.getItem('mp.scale')) || 0.8; } catch (e) { scale = 0.8; }
     function applyScale() {
         scale = Math.max(0.55, Math.min(1.3, Math.round(scale * 100) / 100));
-        var right = (root.offsetLeft || 0) > (window.innerWidth || 1920) / 2;
-        root.style.transformOrigin = right ? 'top right' : 'top left';
+        root.style.transformOrigin = 'top left';       // (always the same corner: the panel stays where it was left)
         root.style.transform = 'scale(' + scale + ')';
         try { localStorage.setItem('mp.scale', String(scale)); } catch (e) {}
     }
@@ -42,7 +41,6 @@
         scale += (e.deltaY < 0 ? 0.05 : -0.05);
         applyScale();
     });
-    document.addEventListener('mouseup', function () { setTimeout(applyScale, 0); });   // (moved: keep the corner it grows from)
     setInterval(function () {
         var cls = root._minimized ? 'min' : '';
         if (root.className !== cls) { root.className = cls; if (lastStatus) { renderTitle(lastStatus); } }
@@ -56,14 +54,6 @@
     $('title-bar').addEventListener('click', function () { userOpened = true; });
     setTimeout(function () {
         if (!root._minimized && root._applyMinimize && !document.querySelector('.req')) { root._applyMinimize(true); }
-        // the new layout starts clear of the game's compass (an older saved spot sat on it); moved by hand, it stays
-        var moved = false;
-        try { moved = localStorage.getItem('mp.layout2') === '1'; localStorage.setItem('mp.layout2', '1'); } catch (e) {}
-        if (!moved) {
-            root.style.left = '24px';
-            root.style.top = '160px';
-            if (root._saveWindowState) { root._saveWindowState(); }
-        }
     }, 900);
 
     function post(path, body, cb, ms) {                // ms: how long to wait (default 4 s; the self-test takes longer)
@@ -386,6 +376,16 @@
         renderBox('world', s.world && s.world.box);
         setText($('s-version'), t('inZOI Multiplayer {v}', { v: s.version }) +
             (s.save && s.save.name ? t(' - multiplayer save: {name}', { name: s.save.name }) : ''));
+        // the update under way: on the button itself (a download takes a while; it mustn't look like nothing happens)
+        var u = s.update || {};
+        if (u.state === 'downloading' || u.state === 'restarting') {
+            var pct = u.total ? Math.round(100 * (u.done || 0) / u.total) : 0;
+            setText($('s-update'), u.state === 'restarting' ? t('Restarting...') : t('Downloading {v}... {pct}%', { v: u.version, pct: pct }));
+            off($('s-update'), true);
+        } else if ($('s-update').disabled && !updateAsked) {
+            setText($('s-update'), t('Update now'));
+            off($('s-update'), false);
+        }
         $('s-sync').className = 'toggle' + (s.sync_time ? ' on' : '');
         $('s-sync').setAttribute('aria-checked', s.sync_time ? 'true' : 'false');
         $('s-sync').style.display = s.host ? 'none' : '';
@@ -438,11 +438,15 @@
             flash(r ? (errText(r) || t('Saved - reconnecting...')) : t(NOT_RUNNING));
         });
     });
+    var updateAsked = false;
     $('s-update').addEventListener('click', function () {
         var out = $('s-update-out');
+        updateAsked = true;
         setText(out, t('Looking for a new version...'));
         off($('s-update'), true);
         post('/update/now', {}, function (r) {
+            updateAsked = false;
+            if (r && !r.error && !r.latest) { poll(); return; }        // (the button shows the download from now on)
             off($('s-update'), false);
             if (!r || r.error) { setText(out, r ? errText(r) : t(NOT_RUNNING)); return; }
             setText(out, r.latest ? t('You already have the newest version ({v}).', { v: r.version })

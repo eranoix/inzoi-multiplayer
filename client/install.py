@@ -82,6 +82,8 @@ def install(src: Path | None = None) -> bool:
     for sub in ("lua", "ui"):                           # files a newer version dropped
         for f in list((INSTALL_DIR / sub).rglob("*")) if (INSTALL_DIR / sub).exists() else []:
             rel = f.relative_to(INSTALL_DIR).as_posix()
+            if "/saved/" in "/" + rel:                    # the panel's own state (where it was left, its size)
+                continue
             if f.is_file() and f.name not in MAILBOX_FILES and rel not in shipped:
                 f.unlink()
                 changed = True
