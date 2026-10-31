@@ -73,6 +73,7 @@ def direction(title, sender_rows, receiver_rows, sender_name, out):
     t0 = pups[0]["t"]
     errs, site_bad, act_total, act_ok = [], 0, 0, 0
     mot_total, mot_ok = 0, 0
+    look_total, look_ok = 0, 0
     wrong = Counter()
     wrong_as = defaultdict(Counter)
     reasons = defaultdict(Counter)
@@ -89,9 +90,10 @@ def direction(title, sender_rows, receiver_rows, sender_name, out):
             site_bad += 1
         tb = bag_of(st.get("act"))
         want_m = {m.get("id") for m in st.get("motions") or [] if isinstance(m, dict)}
+        motions_ok = bool(want_m) and want_m <= set(p.get("motions") or [])
         if want_m:
             mot_total += 1
-            mot_ok += want_m <= set(p.get("motions") or [])
+            mot_ok += motions_ok
         shown = p.get("bag") or "-"
         if tb:
             act_total += 1
@@ -111,6 +113,9 @@ def direction(title, sender_rows, receiver_rows, sender_name, out):
                 verdict = "WRONG ACTION"
         else:
             verdict = "ok" if not p.get("bag") or (p.get("bag") or "").startswith(("ClickMove", "Move")) else "EXTRA ACTION"
+        if tb or want_m:
+            look_total += 1
+            look_ok += (verdict == "ok" or motions_ok) and err <= 100
         pos = "far" if err > 150 else ""
         line = (f"{fmt_t(p['t'], t0)}  real: {tb or 'walking/idle':38.38} anim {str(st.get('anim') or '-'):28.28}"
                 f" | shown: {shown:38.38} anim {str(p.get('anim') or '-'):28.28} | {err / 100:5.1f} m  "
@@ -124,6 +129,9 @@ def direction(title, sender_rows, receiver_rows, sender_name, out):
     out.append(f"  position: median {pct(0.5):.2f} m, 90% under {pct(0.9):.2f} m, worst {errs[-1] / 100:.1f} m; "
                f"within 1 m {100 * sum(e <= 100 for e in errs) / len(errs):.0f}% of the time; "
                f"on another lot {100 * site_bad / len(errs):.0f}%")
+    if look_total:
+        out.append(f"  looks the same (same action, or every animation of theirs playing, within 1 m): "
+                   f"{100 * look_ok / look_total:.0f}% of the time they were doing something")
     if mot_total:
         out.append(f"  poses: every animation they played was playing here {100 * mot_ok / mot_total:.0f}% of the time")
     if act_total:
