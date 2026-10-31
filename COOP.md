@@ -36,9 +36,12 @@ Se usar NordVPN, desligue-o ou desative a "Invisibilidade na LAN".
 
 ## No painel do jogo
 
-- **Card do par:** onde o outro está e o que está fazendo, com os botões **Ir até meu par** e **Convidar para minha casa**.
-- **Ações a dois:** Abraçar, Beijar, Dançar e Acenar. O outro recebe um pedido com **Aceitar** / **Recusar**.
-  Na primeira vez, faça cada ação uma vez à mão para o programa aprender a interação certa.
+- **Card do par:** onde o outro está e o que está fazendo, com os botões **Ir até meu par** e **Convidar para casa**.
+  Se o Zoi do outro ainda não apareceu, o card diz o motivo: está no menu, com o jogo pausado, em outro save,
+  com uma pergunta na tela... ou é o **seu** jogo que está pausado.
+- **Ações a dois:** Abraçar, Beijar, Dançar, Toca aqui, Dar as mãos, Selfie e Rodopiar. O outro recebe um pedido com
+  **Aceitar** / **Recusar**. Testadas no jogo: o programa escolhe a interação que o próprio jogo oferece para o casal
+  (os dois Zois ficam com relacionamento alto quando o Zoi do par entra no mundo).
 - **Ajustes → Seu save multijogador:** cópias de segurança automáticas e **Desfazer último save** (do seu próprio save).
 - **Ajustes → Relógio:** seguir quem hospeda (padrão) ou ajustar entre os dois.
 - **Ajuda:** **Verificar conexão** (diz o que está errado e como resolver) e **Enviar diagnóstico**, que gera um zip
@@ -47,6 +50,12 @@ Se usar NordVPN, desligue-o ou desative a "Invisibilidade na LAN".
   O firewall é liberado sozinho na primeira vez que alguém hospeda (o Windows pergunta uma vez: clique em **Sim**).
 
 ## Proteções automáticas
+
+- **Queda rápida de conexão** (Wi-Fi, atualização do programa): o Zoi do outro fica até 10 segundos esperando e não some.
+- **Reinício do programa com o jogo aberto:** ele lembra que você estava no save multijogador e continua, sem perguntar.
+- **Ir até meu par** passa por uma tela de carregamento: o programa sabe que é o mesmo save e não pausa o multijogador.
+- **Zoi do par gravado no seu save** (o jogo salva sozinho a cada 15 min): ao carregar, se o par estiver online o Zoi
+  é reaproveitado; se não, é removido.
 
 - **Reversão automática:** se uma versão nova não abrir direito duas vezes seguidas, o programa volta sozinho para a anterior.
 - **Botão Multiplayer no menu (UE4SS):** se o inZOI fechar logo depois de abrir duas vezes seguidas, o UE4SS é removido sozinho.
