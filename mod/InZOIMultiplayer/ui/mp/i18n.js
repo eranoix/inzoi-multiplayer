@@ -470,6 +470,7 @@
         [/^(\d+) new, (\d+) removed, (\d+) walls$/, '$1 novos, $2 removidos, $3 paredes'],
         [/^(\d+) new, (\d+) removed$/, '$1 novos, $2 removidos'],
         [/^finishes$/, 'acabamentos (pintura, pisos, telhado)'],
+        [/^Couldn't load your multiplayer save \((.*)\): load it in the game's Load menu, or pick it again on the servers page$/, 'Não foi possível carregar o seu save do multiplayer ($1): carregue pelo menu Carregar do jogo, ou escolha de novo na página de servidores'],
         [/^(.*) changed the house: finishes$/, '$1 mudou a casa: acabamentos (pintura, pisos, telhado)'],
         [/^(.*)'s exact house \(paint, floors, roof\) comes in when you reopen the game$/, 'A casa exata de $1 (pintura, pisos, telhado) entra quando você reabrir o jogo'],
         [/^House now exactly like (.*)'s$/, 'Casa agora idêntica à de $1'],

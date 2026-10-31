@@ -46,7 +46,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.24"
+VERSION = "0.9.25"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -1475,6 +1475,9 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
             await self.load_mp_save()
         except GameError as e:
             log.warning("couldn't load the multiplayer save: %s", e)
+            # (say it where the player looks: playing another save, nothing lines up with the partner's world)
+            self.system_line(f"Couldn't load your multiplayer save ({self.mp_name()}): load it in the game's "
+                             "Load menu, or pick it again on the servers page")
 
     # ------------------------------------------------------------------ the shared world
     # The server keeps one world save that every player plays (docs/shared-world.md). This PC's copy of it is the
