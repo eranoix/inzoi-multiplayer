@@ -323,6 +323,10 @@ class Couple:
         elif data.get("type") == "update_request":       # (the partner: "get the newest version")
             log.info("%s asked this program to update", self.remotes[frm].name if frm in self.remotes else frm)
             asyncio.get_running_loop().create_task(self.update_now())
+        elif data.get("type") == "telemetry_request":
+            asyncio.get_running_loop().create_task(self.send_telemetry(frm, data))
+        elif data.get("type") == "telemetry":
+            self.save_partner_telemetry(frm, data)
         elif data.get("type") == "log_request":
             asyncio.get_running_loop().create_task(self.send_log(frm, rid))
         elif data.get("type") == "log":
@@ -555,6 +559,31 @@ class Couple:
         await self.send({"t": "event", "kind": "couple", "to": to,
                          "data": {"type": "log", "id": rid, "version": self.version, "lines": lines}})
         log.info("sent the last %d log lines to %s (asked for)", len(lines), self.remotes[to].name if to in self.remotes else to)
+
+    async def send_telemetry(self, to: str, data: dict):
+        """The partner asked for this game's telemetry (the last minutes): sent compressed."""
+        import telemetry
+        minutes = max(1.0, min(float(data.get("minutes") or 15), 120.0))
+        lines = await self.g(self.tele.recent, minutes)
+        await self.send({"t": "event", "kind": "couple", "to": to,
+                         "data": {"type": "telemetry", "id": data.get("id"), "version": self.version,
+                                  "data": telemetry.pack(lines)}})
+        log.info("sent %d telemetry lines (%.0f min) to %s", len(lines), minutes,
+                 self.remotes[to].name if to in self.remotes else to)
+
+    def save_partner_telemetry(self, frm: str, data: dict):
+        import telemetry
+        from companion import CONFIG_DIR
+        r = self.remotes.get(frm)
+        name = re.sub(r"[^A-Za-z0-9_-]", "_", r.name if r else frm)[:30]
+        path = CONFIG_DIR / f"partner-{name}-telemetry.jsonl"
+        try:
+            lines = telemetry.unpack(data.get("data") or "")
+        except Exception as e:                           # noqa: BLE001
+            log.warning("couldn't read %s's telemetry: %s", name, e)
+            return
+        path.write_text("\n".join(lines) + "\n", "utf-8")
+        log.info("saved %s's telemetry (%d lines): %s", name, len(lines), path)
 
     def family_report(self) -> list[str]:
         """Read-only facts about families and homes in this game, sent along with the log (what the partner needs to
@@ -947,12 +976,21 @@ class Couple:
         async def house_exact_now(body):
             return await self.apply_lot_now()
 
+        async def partner_telemetry(body):
+            r = self.partner(body.get("key"))
+            if not r:
+                return {"error": "your partner isn't online", "code": "no_partner"}
+            await self.send({"t": "event", "kind": "couple", "to": r.pid,
+                             "data": {"type": "telemetry_request", "id": secrets.token_hex(6),
+                                      "minutes": body.get("minutes") or 15}})
+            return {"ok": True}
+
         async def partner_house(body):
             r = self.partner(body.get("key"))
             if not r:
                 return {"error": "your partner isn't online", "code": "no_partner"}
             return await self.request_house(r)
 
-        return {"/partner/house/exact-now": house_exact_now, "/partner/house": partner_house, "/partner/update": partner_update, "/partner/log": partner_log, "/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
+        return {"/partner/telemetry": partner_telemetry, "/partner/house/exact-now": house_exact_now, "/partner/house": partner_house, "/partner/update": partner_update, "/partner/log": partner_log, "/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
                 "/partner/goto": goto, "/partner/invite": invite, "/partner/action": action,
                 "/partner/respond": respond, "/world/undo": undo, "/world/backups": backups}

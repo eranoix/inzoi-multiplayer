@@ -33,6 +33,7 @@ import couple
 import housesync  # noqa: E402
 import houses  # noqa: E402
 import install  # noqa: E402
+import telemetry  # noqa: E402
 import mods  # noqa: E402
 import saves  # noqa: E402
 import servers  # noqa: E402
@@ -46,7 +47,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.25"
+VERSION = "0.9.26"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -400,6 +401,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
         self.servers_init(SERVER_DATA, CONFIG_DIR / "page-browser")
         self.couple_init()
         self.house_init()                   # couple features: requests, backups, undo (couple.py)
+        self.tele = telemetry.Telemetry()   # everything sent, received and shown, for tools/telemetry_report.py
         self.forget_shared_world()
 
     def forget_shared_world(self):
@@ -434,6 +436,8 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
         return self.cfg.get("server") or "", int(self.cfg.get("port") or 24242), self.cfg.get("password", "")
 
     async def send(self, msg: dict):
+        if msg.get("t") == "state":
+            self.tele.rec("out", st=msg.get("state"))
         if self.writer:
             self.writer.write((json.dumps(msg, separators=(",", ":")) + "\n").encode())
             await self.writer.drain()
@@ -719,7 +723,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
         first = r.profile_hash is None
         r.profile, r.profile_hash, r.building = profile, h, None
         self.mail.set_member(r.pid, lua)
-        if r.spawned and not first:      # their Zoi really changed (new look, name...): rebuild the puppet
+        if r.spawned and not first and not r.adopted:    # their copy really changed (new look...): rebuild it
             self.despawn(r.pid)
             r.spawned = False
         log.info("got %s's Zoi: %s %s (%s)", r.name, profile.get("first_name"), profile.get("last_name"),
@@ -733,6 +737,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
 
     def set_state(self, r: Remote, st: dict):
         r.state, r.state_at = st, time.time()
+        self.tele.rec("in", p=r.name, st=st)
         if not r.spawned:
             return
         if "n" in st:
@@ -956,6 +961,8 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
 
     def on_report(self, kind: str, text: str):
         self.mod["beat"] = time.time()       # any report means the controller is there (on_begin runs even paused)
+        if kind not in ("me", "beat", "status"):
+            self.tele.rec("lua", kind=kind, text=str(text)[:500])
         if kind == "restart":
             self.mod["instance"] = text
             self.mod["state"] = "starting"   # its first heartbeat says which puppets it found
@@ -1162,6 +1169,8 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
                     await self.follow_leader_speed()
                 if self._house_n % 8 == 0 and self.world != "out" and self.my_entity:
                     await self.house_tick()                  # (every 2 s, paused too: build mode pauses the game)
+                if self._house_n % 2 == 0 and self.world == "play":
+                    await self.sample_puppets()              # (twice a second: the telemetry's view of them)
                 if self.world == "play" and self.my_entity:
                     a = await self.g(self.game.activity, self.my_entity)
                     act = await self.g(self.describe_act, a)
@@ -1182,6 +1191,25 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
                 loop_error("action loop", e)
                 await asyncio.sleep(1)
             await asyncio.sleep(0.25)
+
+    async def sample_puppets(self):
+        """Telemetry: each partner's Zoi as this game shows it, next to where their newest state says they are."""
+        for r in list(self.remotes.values()):
+            e = self.puppet_ids.get(r.pid)
+            if not e or not r.spawned:
+                continue
+            try:
+                s = await self.g(self.game.state_of, e)
+                a = await self.g(self.game.activity, e)
+            except Exception:                            # noqa: BLE001
+                continue
+            st = r.state or {}
+            err = None
+            if all(isinstance(st.get(k), (int, float)) for k in ("x", "y")):
+                err = round(((s["x"] - st["x"]) ** 2 + (s["y"] - st["y"]) ** 2) ** 0.5)
+            self.tele.rec("pup", p=r.name, e=e, x=s["x"], y=s["y"], z=s["z"], yaw=s["yaw"], site=s["site"],
+                          bag=a.get("bag"), action=a.get("action"), target=a.get("target"),
+                          anim=(a.get("anim") or {}).get("id"), err=err, hidden=bool(r.hidden))
 
     async def mailbox_loop(self):
         inject = install.MAILBOX_DIR / "inject.json"       # debugging: extra ops dropped in by tools
