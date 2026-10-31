@@ -58,6 +58,8 @@ WITH_PARTNER = {
 ALONE_BAGS = {"dance": "Next_Dance_Start"}  # (checked in the real game)
 LEARN = {"hug": re.compile(r"hug", re.I), "kiss": re.compile(r"kiss", re.I), "dance": re.compile(r"dance", re.I),
          "wave": re.compile(r"(?<!micro)wave", re.I)}             # (not Use_Microwave)
+ACTION_NAMES = {"hug": "hug", "kiss": "kiss", "dance": "dance", "wave": "high five", "holdhands": "hold hands",
+                "selfie": "selfie", "spin": "spin", "invite": "invitation"}       # (chat lines)
 VERBS = {"hug": "hug you", "kiss": "kiss you", "dance": "dance with you", "wave": "high-five you",
          "holdhands": "hold your hand", "selfie": "take a selfie with you", "spin": "spin you around in a hug",
          "invite": "invite you to their home"}
@@ -228,7 +230,8 @@ class Couple:
             if not s or s["to_id"] != frm or s["state"] != "waiting":
                 return
             s["state"] = "accepted" if data.get("accept") else "declined"
-            self.system_line(f"{s['to']} {'said yes' if data.get('accept') else 'said no'} ({s['action']})")
+            self.system_line(f"{s['to']} {'said yes' if data.get('accept') else 'said no'} "
+                             f"({ACTION_NAMES.get(s['action'], s['action'])})")
             if data.get("accept"):
                 asyncio.get_running_loop().create_task(self.couple_perform(s, initiator=True))
 
