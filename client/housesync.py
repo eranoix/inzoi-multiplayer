@@ -6,24 +6,32 @@ save. This keeps the two in step: the walls (segments per floor, and each storey
 (only written), so those stay as each save has them:
 
 - While a player is in build mode on their home lot, the lot is read every few seconds (build.scan_objects: table
-  id, site-relative position, yaw, floor; build.scan_walls: segment ends per floor; build.scan_floors: heights). When they leave build mode, the last reading goes
-  to the partner: {"t":"event","kind":"couple","data":{"type":"house","site","site_name","objects":[...]}}.
+  id, site-relative position, yaw, floor; build.scan_walls: segment ends per floor; build.scan_floors: heights).
+  When they leave build mode, the last reading goes to the partner:
+  {"t":"event","kind":"couple","data":{"type":"house","site","site_id","objects":[...],"walls":[...],"heights":{}}}.
 - The partner's program compares it with the same lot in its own save (same map, same lot id): objects of the same
   kind within 10 cm and 5 degrees are the same object; the rest is new (to place) or gone (to remove). A wall is
-  there when every point along it lies on a wall of the other save (so one long wall and two short ones that make it
-  up are the same); walls not covered are deleted or built. A popup asks
-  "<name> changed the house: N new, M removed - apply?" (or "always yes": key "house").
+  there when every point along it lies on a wall of the other save (so one long wall and the two short ones that make
+  it up are the same); walls not covered are deleted or built. A popup asks "<name> changed the house: N new,
+  M removed - apply?" (or "always yes": key "house").
 - Applying enters build mode on that lot (build.enter_mode, the game pauses), removes the objects that are gone,
   deletes and builds walls (building.construct_wall, is_delete for deleting), sets storey heights, reads the lot again
   and places what's still missing (building.place_object; doors and windows snap onto the new walls), and leaves build
-  mode (which saves the lot). Leaving build mode after applying doesn't send the house back (it's the partner's version already).
+  mode (which saves the lot). Leaving build mode after applying doesn't send the house back (it's the partner's
+  version already).
+- Outside build mode the scans read the lot my Zoi is on, so the home is only read while my Zoi is on it. The last
+  reading is kept (home-lot.json: from build mode, after applying, and every few minutes while my Zoi is at home), so
+  a partner who asks while my Zoi is out still gets it, and my side compares with it when I'm out. Each side asks
+  again when its Zoi gets home.
 """
 import asyncio
 import json
 import logging
 import math
+import os
 import secrets
 import time
+from pathlib import Path
 
 log = logging.getLogger("housesync")
 
@@ -33,6 +41,9 @@ MAX_OBJECTS = 2000
 MAX_WALLS = 2000
 ON_WALL_CM = 4.0          # a point this close to a wall's centre line is on it (centre lines sit on 25*k+12.5)
 WALL_STEP = 12.5          # cm between the points checked along a wall
+LOT_FILE = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp" / "home-lot.json"
+REFRESH_EVERY = 300       # s between readings of the home while my Zoi is there (things bought in play mode)
+ASK_AGAIN = 120           # s at least between asking the partner again on getting home
 
 
 def object_key(o: dict) -> dict:
@@ -120,6 +131,30 @@ class HouseSync:
     def house_init(self):
         self.build_site = None        # {"site_id", "site": entity, "objects": [...]} while in build mode
         self.applying_house = False   # (leaving build mode after applying the partner's house: not sent back)
+        self.lot_file = LOT_FILE
+        self.was_home = None          # my Zoi was on the home lot at the last tick
+        self.asked_at = 0.0
+
+    def saved_lot(self, site) -> dict | None:
+        """The last reading of the home (if it's lot `site`)."""
+        try:
+            lot = json.loads(self.lot_file.read_text("utf-8"))
+            return lot if site and int(lot.get("site") or -1) == int(site) else None
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def keep_lot(self, lot: dict):
+        try:
+            self.lot_file.parent.mkdir(parents=True, exist_ok=True)
+            self.lot_file.write_text(json.dumps(dict(lot, at=time.time())), "utf-8")
+        except OSError as e:
+            log.debug("keeping the house: %s", e)
+
+    async def home_site_cached(self):
+        cached = self.__dict__.get("_home_cache")
+        if not cached or time.time() - cached[1] > 30:
+            cached = self._home_cache = (await self.g(self.my_home_site), time.time())
+        return cached[0]
 
     def scan_site(self) -> list[dict]:
         out, offset = [], 0
@@ -181,11 +216,8 @@ class HouseSync:
         building = self.in_build_mode and st.get("phase") == "ready"
         if building:
             site = st.get("site_entity_id")
-            cached = self.__dict__.get("_home_cache")
-            if not cached or time.time() - cached[1] > 30:
-                cached = self._home_cache = (await self.g(self.my_home_site), time.time())
-            home = cached[0]
-            if site and home and int(site) == int(home):
+            home = await self.home_site_cached()
+            if site and home and int(site) == int(home) and not self.applying_house:
                 b = self.build_site
                 if not b or time.time() - b.get("at", 0) > SCAN_EVERY:
                     try:
@@ -196,9 +228,34 @@ class HouseSync:
             return
         b, self.build_site = self.build_site, None
         if b and not self.applying_house and st.get("phase") in ("none", None):
+            self.keep_lot(b)
             await self.send_house(b)
         if not st.get("in_build_mode"):
             self.applying_house = False
+            await self.home_tick()
+
+    async def home_tick(self):
+        """Play mode: keep the reading of the home fresh while my Zoi is there, and ask the partner for theirs on
+        getting home (their answer is compared while my Zoi is on the lot)."""
+        home = await self.home_site_cached()
+        here = (self.last_full_state or {}).get("site")
+        at_home = bool(home and here is not None and int(here) == int(home))
+        arrived = at_home and self.was_home is False
+        self.was_home = at_home
+        if not at_home:
+            return
+        lot = self.saved_lot(home)
+        if not lot or time.time() - lot.get("at", 0) > REFRESH_EVERY:
+            if await self.g(self.at_home_now, home):
+                try:
+                    info = await self.g(self.game.call, "build.get_site_info") or {}
+                    self.keep_lot(dict(await self.g(self.scan_lot), site=int(home), site_id=info.get("site_id")))
+                except Exception as e:                   # noqa: BLE001
+                    log.debug("reading the house: %s", e)
+        r = self.partner(None) if hasattr(self, "partner") else None
+        if arrived and r and time.time() - self.asked_at > ASK_AGAIN:
+            self.asked_at = time.time()
+            await self.request_house(r)
 
     async def send_house(self, b: dict):
         r = self.partner(None) if hasattr(self, "partner") else None
@@ -226,7 +283,12 @@ class HouseSync:
             st = await self.g(self.game.call, "build.get_mode_state") or {}
             home = await self.g(self.my_home_site)
             if not await self.g(self.at_home_now, home):
-                log.info("asked for the house, but your Zoi isn't at home: not sent")
+                lot = self.saved_lot(home)
+                if lot:
+                    log.info("asked for the house while your Zoi is out: sending the last reading of it")
+                    await self.send_house(lot)
+                else:
+                    log.info("asked for the house, but your Zoi isn't at home (and it was never read): not sent")
                 return
             site = home
             info = await self.g(self.game.call, "build.get_site_info") or {}     # (the lot my Zoi is on)
@@ -234,7 +296,9 @@ class HouseSync:
         except Exception as e:                           # noqa: BLE001
             log.info("couldn't read the house for the partner: %s", e)
             return
-        await self.send_house(dict(lot, site=int(site), site_id=info.get("site_id") or st.get("site_id")))
+        lot = dict(lot, site=int(site), site_id=info.get("site_id") or st.get("site_id"))
+        self.keep_lot(lot)
+        await self.send_house(lot)
 
     def on_house(self, frm: str, data: dict):
         """The partner left build mode on our home: compare, and ask before changing anything here."""
@@ -271,11 +335,13 @@ class HouseSync:
             log.info("%s's house is lot %s, mine is %s: not the same home, nothing to do", q["from"], h.get("site"), home)
             return
         mine = None
-        if await self.g(self.at_home_now, home):         # (elsewhere the scan would read another lot: compare later)
+        if await self.g(self.at_home_now, home):         # (elsewhere the scan would read another lot: kept reading)
             try:
                 mine = await self.g(self.scan_lot)
             except Exception as e:                       # noqa: BLE001
                 log.debug("reading my house: %s", e)
+        if mine is None:
+            mine = self.saved_lot(home)
         if mine is not None:
             place, remove = diff(h["objects"], mine["objects"])
             build, delete = wall_diff(h["walls"], mine["walls"]) if h["walls"] else ([], [])
@@ -353,6 +419,10 @@ class HouseSync:
                 except Exception as e:                   # noqa: BLE001
                     failed += 1
                     log.debug("couldn't place %s: %s", o["table_id"], e)
+            try:
+                self.keep_lot(dict(await self.g(self.scan_lot), site=int(h["site"]), site_id=h.get("site_id")))
+            except Exception as e:                       # noqa: BLE001
+                log.debug("reading the house after applying: %s", e)
             await self.g(call, "build.exit_mode")
             for _ in range(60):
                 await asyncio.sleep(0.5)

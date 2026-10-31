@@ -105,6 +105,7 @@ def player(name, port, game):
     comp.world, comp.my_city, comp.my_entity = "play", "Dowon", 10
     comp.game.call = game.call
     comp.save_cfg = lambda: None
+    comp.lot_file = TMP / f"{name}-lot.json"
     return comp
 
 
@@ -174,15 +175,37 @@ async def main():
                                    for q in ben.requests.values()))
     print("asking for the partner's house as it is now: ok")
 
-    # Ana's Zoi is out on another lot (the scans would read that lot, not the home): nothing is sent
+    # Ana's Zoi is out on another lot (the scans would read that lot, not the home): never read -> nothing is sent;
+    # read before (kept) -> that reading is sent
+    def clear():
+        for q in [q for q in list(ben.requests.values()) if q.get("action") == "house"]:
+            ben.requests.pop(q["id"], None)
     ga.where = 839
-    for q in [q for q in list(ben.requests.values()) if q.get("action") == "house"]:
-        ben.requests.pop(q["id"], None)
+    kept = ana.lot_file.read_text("utf-8")
+    ana.lot_file.unlink()
+    clear()
     await ben.request_house(ben.remotes[ana.me_id])
     await asyncio.sleep(1)
     assert not [q for q in ben.requests.values() if q.get("action") == "house"]
+    ana.lot_file.write_text(kept, "utf-8")
+    await ben.request_house(ben.remotes[ana.me_id])
+    assert await until(lambda: any(q.get("action") == "house" and q.get("label") == "1 new, 0 removed"
+                                   for q in ben.requests.values()))
     ga.where = 1038
-    print("asked while out of the home: not sent (it would be the wrong lot): ok")
+    clear()
+    print("asked while out of the home: the kept reading, never another lot: ok")
+
+    # Ben's Zoi gets home: he asks Ana again (once; not again within ASK_AGAIN)
+    ben.last_full_state = {"site": 839}
+    await ben.home_tick()
+    ben.last_full_state = {"site": 1038}
+    await ben.home_tick()
+    asked = ben.asked_at
+    assert asked
+    await ben.home_tick()
+    assert ben.asked_at == asked
+    assert ben.saved_lot(1038), "the home was read and kept on getting there"
+    print("getting home: asks the partner again and keeps a reading of the home: ok")
 
     # another lot (not Ben's home): ignored; "always yes": applied without asking
     gb.home = 2000
