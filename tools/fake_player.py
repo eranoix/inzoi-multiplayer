@@ -11,6 +11,7 @@ doing, what it's wearing - exactly what a real friend's companion would send.
 import argparse
 import asyncio
 import json
+import re
 import secrets
 import sys
 import time
@@ -36,7 +37,8 @@ async def main(a):
         writer.write((json.dumps(m) + "\n").encode())
         await writer.drain()
 
-    await send({"t": "hello", "protocol": 1, "key": key, "name": a.name, "password": a.password})
+    version = re.search(r'^VERSION = "(.+)"', (ROOT / "client" / "companion.py").read_text("utf-8"), re.M).group(1)
+    await send({"t": "hello", "protocol": 1, "key": key, "name": a.name, "password": a.password, "version": version})
     welcome = json.loads(await reader.readline())
     me = welcome.get("id")
     others = [p["id"] for p in welcome.get("players", [])]
@@ -67,6 +69,8 @@ async def main(a):
                 st = {**spot, "yaw": round((turned + 180) % 360 - 180, 1)}
             else:
                 st = await asyncio.to_thread(game.state_of, a.moves)
+            if a.offset:
+                st = {**st, "x": st["x"] + a.offset * 100}        # (game units are cm)
             n += 1
             if n % 2 == 0 and not spot:
                 act_raw = await asyncio.to_thread(game.activity, a.moves)
@@ -83,6 +87,10 @@ async def main(a):
             await send({"t": "state", "state": {"n": n, **st, "act": act, "anim": anim, "outfit": outfit}})
         except GameError as e:
             print("game:", e, flush=True)
+        if a.seconds and time.time() - start > a.seconds:
+            writer.close()
+            print("fake player left", flush=True)
+            return
         await asyncio.sleep(0.2)
 
 
@@ -98,4 +106,6 @@ if __name__ == "__main__":
     ap.add_argument("--chat", help="chat line to send 4 s in")
     ap.add_argument("--share-house", help="library folder id of a saved lot to share")
     ap.add_argument("--still", action="store_true", help="stand still and turn 90 degrees every 6 s")
+    ap.add_argument("--offset", type=float, default=0, help="metres to the side of 'moves' (stream your own Zoi)")
+    ap.add_argument("--seconds", type=float, default=0, help="leave after this many seconds (0: never)")
     asyncio.run(main(ap.parse_args()))

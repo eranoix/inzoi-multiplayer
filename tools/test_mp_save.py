@@ -167,6 +167,32 @@ async def main():
         comp.save_session["checked"] = 0
         await comp.watch_save(entered=False)
         assert comp.cfg["mp_save"]["folder"] == "20260202-020202"
+
+        # Moving to another lot ("go to my partner"): a loading screen, no main menu, same Zoi and map: same save.
+        game.saw_lobby, game.last_state = True, {"possessed_entity_id": 7, "level_name": "RedCity_Map"}
+        comp.loading_save = "20260202-020202"
+        await comp.watch_save(entered=True)
+        assert comp.mp_active()
+        game.saw_lobby = False
+        await comp.watch_save(entered=True)                       # (nothing loaded by the program)
+        assert comp.mp_active() and comp.save_box is None, "a lot change keeps multiplayer on"
+        # Another save loaded from the game's own menu (no main menu either), another Zoi: not taken for it.
+        game.saw_lobby, game.last_state = False, {"possessed_entity_id": 99, "level_name": "RedCity_Map"}
+        await comp.watch_save(entered=True)
+        assert not comp.mp_active(), "a different Zoi means another save: multiplayer waits"
+        print("  ok: a lot change keeps the save; another save loaded in the game doesn't pass for it")
+
+        # A server that still keeps a shared world (from "living together", now gone): a friend without a
+        # multiplayer save is still asked to make their own copy (it used to be a silent dead end).
+        os.environ["APPDATA"] = str(Path(tmp) / "appdata2")
+        friend = companion.Companion({"key": "f" * 20, "name": "friend", "server": "x", "port": 1, "password": ""})
+        friend.game = game
+        friend.world_meta = {"version": 3, "by": "host", "files": [], "name": "Host's world"}
+        game.loaded = "20260101-000000"
+        await friend.watch_save(entered=True)
+        await friend.watch_save(entered=False)
+        assert friend.save_box and friend.save_box["key"] == "setup", friend.save_box
+        print("  ok: a stale shared world on the server doesn't block a friend's own save")
     print("multiplayer save tests passed")
 
 

@@ -321,6 +321,7 @@ class Remote:
         self.profile_hash = None
         self.state = None
         self.state_at = 0.0          # when their last state arrived
+        self.presence = None         # why their Zoi isn't coming (menu, paused, another save...): {world, box, at}
         self.spawned = False
         self.spawn_requested = 0.0
         self.seen_at = 0.0           # when the controller's heartbeat last listed their puppet
@@ -592,6 +593,8 @@ class Companion(couple.Couple, servers.Servers):
         elif t == "event":
             if m.get("kind") == "couple":
                 self.on_couple_event(m)
+            elif m.get("kind") == "presence":
+                self.on_presence(m)
         elif t == "ping":
             await self.send({"t": "pong"})
         elif t == "kicked":
@@ -845,7 +848,17 @@ class Companion(couple.Couple, servers.Servers):
             return
         if alive:
             log.info("mod updated: reloading it in the game")
+            before = self.mod.get("instance")
             await self.g(install.reload, self.game.call)
+            for _ in range(16):                       # a reload restarts the controller (a new instance reports)
+                await asyncio.sleep(0.5)
+                if self.mod.get("instance") != before:
+                    return
+            if self.world == "play":                  # (paused, nothing runs: the quiet check mounts it later)
+                log.info("the controller didn't restart after the reload: mounting it again")
+                self.mod["beat"] = 0.0
+                await self.ensure_mod()
+            return
         else:
             self.mod["state"] = "loading"
             log.info("loading the multiplayer mod into the game: %s", await self.g(install.mount, self.game.call))
@@ -946,6 +959,7 @@ class Companion(couple.Couple, servers.Servers):
                 self.mail.paused = world in ("paused", "stopped")      # (no controller ticks: ops wait)
                 if world in ("paused", "stopped"):
                     self.mod["beat"] = max(self.mod["beat"], time.time() - 3)   # no ticks while paused: not dead
+                await self.send_presence(world)
                 if world == "out":
                     if was_in_world:
                         log.info("left the world (menu / loading)")
@@ -983,7 +997,9 @@ class Companion(couple.Couple, servers.Servers):
                     self.sleeping = bool(SLEEPING.search(f"{(act or {}).get('bag', '')} {anim or ''}"))
                     if world == "play" and self.writer and self.me_id and active:
                         await self.keep_speed()
-                if tick % 25 == 0 and time.time() - self.mod["beat"] > 10:
+                if tick % 5 == 0 and time.time() - self.mod["beat"] > 10 \
+                        and time.time() - self.mod.get("tried", 0) > 20:
+                    self.mod["tried"] = time.time()
                     log.info("the mod went quiet: loading it again")
                     await self.ensure_mod()
                 if not active and any(r.spawned for r in self.remotes.values()):
@@ -1045,6 +1061,24 @@ class Companion(couple.Couple, servers.Servers):
     # Multiplayer plays in a save of its own (cfg["mp_save"]), so a player's normal saves stay untouched. At the main
     # menu the program loads it; in any other save, multiplayer pauses (no friends' Zois, no shared clock). A save the
     # game loaded without me is identified by the next save it writes (game.list_saves), or by asking the player.
+    async def send_presence(self, world: str):
+        """While my Zoi isn't being sent (menu, paused, another save, a question on screen), tell the others why,
+        every few seconds: their panel says it instead of a bare "waiting"."""
+        if not (self.writer and self.me_id and self.remotes) or time.time() - self.__dict__.get("_presence_at", 0) < 4:
+            return
+        if world == "play" and self.mp_active():
+            return                                       # (my state says it all)
+        self._presence_at = time.time()
+        box = (self.save_box or {}).get("key")
+        await self.send({"t": "event", "kind": "presence",
+                         "data": {"world": world, "box": box, "busy": bool(self.save_busy or self.world_busy),
+                                  "mp": self.save_session.get("mp")}})
+
+    def on_presence(self, m: dict):
+        r = self.remotes.get(m.get("from"))
+        if r and isinstance(m.get("data"), dict):
+            r.presence = {**m["data"], "at": time.time()}
+
     def mp_active(self) -> bool:
         return self.save_session["mp"] is True
 
@@ -1056,7 +1090,17 @@ class Companion(couple.Couple, servers.Servers):
         mp = self.cfg.get("mp_save")
         if entered:
             folder, self.loading_save = self.loading_save, None
-            self.save_session = {"started": time.time(), "folder": folder, "checked": 0.0,
+            lobby, self.game.saw_lobby = getattr(self.game, "saw_lobby", True), False
+            prev, gs = self.save_session, getattr(self.game, "last_state", {}) or {}
+            where = (gs.get("possessed_entity_id"), gs.get("level_name"))
+            if not folder and not lobby and prev.get("started") and prev.get("where") == where and where[0]:
+                # a loading screen without the main menu (moving to another lot, "go to my partner"): same save
+                log.info("back in the world after a loading screen: still the same save")
+                self.save_session = {**prev, "started": time.time(), "checked": time.time()}
+                if prev.get("mp") is False:
+                    self.show_paused()
+                return
+            self.save_session = {"started": time.time(), "folder": folder, "checked": 0.0, "where": where,
                             "mp": (folder == mp["folder"]) if folder and mp and mp.get("folder") else None}
             self.save_box = None
             if self.save_session["mp"] is False:
@@ -1866,6 +1910,8 @@ class Companion(couple.Couple, servers.Servers):
                 "here": bool(r.pid in self.puppet_ids and not r.hidden),
                 "away": bool(st and st.get("city") != self.my_city),
                 "online": bool(r.state_at and now - r.state_at < 15),
+                "presence": {k: r.presence[k] for k in ("world", "box", "busy", "mp")}
+                if r.presence and now - r.presence["at"] < 15 and not (r.state_at and now - r.state_at < 5) else None,
                 "last_seen_s": int(now - r.state_at) if r.state_at else None})
         return out
 
@@ -2031,7 +2077,7 @@ class Companion(couple.Couple, servers.Servers):
                     or self.cfg.get("server") or "no server",
                     "name": self.cfg["name"], "mod": self.mod["state"], "notice": self.notice,
                     "notice_code": self.notice_code,
-                    "paused": self.world in ("paused", "stopped"), "port": self.address()[1],
+                    "paused": self.world in ("paused", "stopped"), "game": self.world, "port": self.address()[1],
                     "host": self.leader == self.me_id, "sync_time": bool(self.cfg.get("sync_time", True)),
                     "players": players, "chat": list(self.chat)[-30:], "mods": self.mods_status(),
                     "save": {"name": self.mp_name() if self.cfg.get("mp_save") else None,

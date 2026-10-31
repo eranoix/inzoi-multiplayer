@@ -481,6 +481,10 @@ class Servers:
         for c in list(server.conns):
             await c.close()
         tasks.cancel()
+        try:
+            await tasks                                # (retrieved: no "exception was never retrieved" in the log)
+        except (asyncio.CancelledError, Exception):     # noqa: BLE001
+            pass
         self.hosted, self.hosting = None, None
         self.cfg["mode"] = "play"
         self.save_cfg()

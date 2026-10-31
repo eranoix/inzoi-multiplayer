@@ -135,6 +135,8 @@ class Game:
         self._cli = None                # names of the CLI commands this game build has (None: not read yet)
         self._cli_at = 0.0              # when the catalog was last tried (0: never)
         self._cli_lock = threading.Lock()
+        self.saw_lobby = True           # set at the main menu; the companion clears it when a world is entered
+        self.last_state = {}            # the latest game.get_state (world() reads it)
 
     # ------------------------------------------------------------------ transport
     def game_url(self, failed: bool = False) -> str:
@@ -247,6 +249,9 @@ class Game:
             s = self.call("game.get_state")
         except GameError:
             return "out"
+        self.last_state = s
+        if s.get("is_lobby"):
+            self.saw_lobby = True               # the main menu: whatever loads next may be another save
         if s.get("phase") not in ("in_game", "map_view") or (s.get("possessed_entity_id") or -1) <= 0:
             return "out"
         if s.get("phase") != "in_game" or (s.get("blocking") or {}).get("pause_reasons"):

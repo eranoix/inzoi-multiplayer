@@ -595,6 +595,18 @@
         if (d.toDateString() === now.toDateString()) { return t('today at {time}', { time: clock }); }
         return t('{date} at {time}', { date: two(d.getDate()) + '/' + two(d.getMonth() + 1), time: clock });
     }
+    function presenceText(p) {                      // why their Zoi isn't here yet, as their program says
+        var q = p.presence;
+        if (!q) { return ''; }
+        var v = { name: p.name };
+        if (q.busy) { return t('{name} is getting their multiplayer save ready...', v); }
+        if (q.box === 'setup' || q.box === 'confirm') { return t('{name} has a question on screen about their multiplayer save: they need to answer it.', v); }
+        if (q.box === 'paused' || q.mp === false) { return t('{name} is playing another save: multiplayer is paused for them until they switch.', v); }
+        if (q.world === 'out') { return t('{name} is at the main menu or loading.', v); }
+        if (q.world === 'stopped') { return t("{name}'s game is paused.", v); }
+        if (q.world === 'paused') { return t('{name} is in a menu or build mode.', v); }
+        return '';
+    }
     function seenText(sec) {
         // still on the server (the card only lists connected friends) but nothing from their game yet
         if (sec === null || sec === undefined) { return t('Connected, waiting for their game to start'); }
@@ -691,10 +703,15 @@
         var withText = p['with'] === 'you' ? t('with you') : (p['with'] ? t('with {name}', { name: p['with'] }) : '');
         setText($('p-doing'), doing ? (p.sleep ? doing : t('Doing: {what}', { what: doing })) + (withText ? ' ' + withText : '')
             : (withText ? t('Together') + ' ' + withText : ''));
-        var seen = p.online ? '' : seenText(p.last_seen_s);
+        var seen = p.online ? '' : (presenceText(p) || seenText(p.last_seen_s));
         // their clock only matters when the two clocks can differ (each one's own, or "adjust between the two")
         if (p.time && (s.clock_mode === 'catchup' || !s.sync_time)) {
             seen = t('Time in their game: {time}', { time: hm(p.time) }) + (seen ? ' - ' + seen : '');
+        }
+        // my own game holds everything up: nothing runs in it while paused (their Zoi can't come in or move)
+        if (p.online && !p.here && (s.game === 'stopped' || s.game === 'paused')) {
+            seen = s.game === 'stopped' ? t('Your game is paused: {name} shows up when time runs again.', { name: p.name })
+                : t('Close the menu or build mode: {name} shows up when your game runs again.', { name: p.name });
         }
         setText($('p-seen'), seen);
         $('p-seen').style.display = seen ? '' : 'none';

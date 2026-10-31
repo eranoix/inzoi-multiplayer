@@ -150,6 +150,19 @@ async def test_couple():
         r.spawned, r.state = True, {"city": "Dowon", "x": 100.0, "y": 200.0, "z": 30.0}
     ana_routes, ben_routes = ana.ui_routes(), ben.ui_routes()
 
+    # --- presence: Ben's Zoi isn't being sent (a question on screen): Ana's card says why
+    ben.save_session["mp"], ben.save_box = None, {"key": "setup", "text": "", "buttons": []}
+    rb.state_at = 0.0
+    await ben.send_presence("play")
+    assert await until(lambda: (ana.partner_cards()[0].get("presence") or {}).get("box") == "setup")
+    card = (await ana_routes["/status"]({}))["partners"][0]
+    assert card["presence"]["box"] == "setup" and not card["online"], card
+    ben.save_session["mp"], ben.save_box, ben._presence_at = True, None, 0
+    await ben.send_presence("play")                                # in the multiplayer save, playing: nothing sent
+    rb.state_at = time.time()
+    assert ana.partner_cards()[0]["presence"] is None, "a fresh state wins over an old presence"
+    print("presence: ok")
+
     # --- hug: Ana asks, Ben accepts; only Ana's PC starts it (Ben's sees it through the live sync)
     res = await ana_routes["/partner/action"]({"action": "hug"})       # (no key: the only partner)
     assert res.get("ok"), res
