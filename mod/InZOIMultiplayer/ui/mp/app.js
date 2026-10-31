@@ -173,10 +173,8 @@
     function renderTitle(s) {
         var n = s ? s.players.length : 0;
         dot.className = 'dot' + (s && s.connected ? ' on' : (s ? ' wait' : ''));
-        var text = t('inZOI Multiplayer');
-        if (s && s.connected) {
-            text += ' - ' + (n ? (n === 1 ? t('1 friend online') : t('{n} friends online', { n: n })) : t('online'));
-        }
+        var text = t('inZOI Multiplayer');           // (short: the window is narrow, the buttons sit next to it)
+        if (s && s.connected) { text = n ? t('Multiplayer - {n} online', { n: n }) : t('Multiplayer - online'); }
         clear(label);
         label.appendChild(document.createTextNode(text));
         if (unread && root._minimized) { label.appendChild(el('span', 'badge', t('{n} new', { n: unread }))); }
@@ -311,7 +309,8 @@
         $('s-sync').style.display = s.host ? 'none' : '';
         if (!lastStatus) {
             $('s-name').value = s.name;
-            $('s-server').value = s.server;
+            $('s-server').value = srv(s);
+            $('s-server').readOnly = $('s-port').readOnly = s.server === 'this PC';   // (hosting: it's this PC)
             $('s-port').value = s.port;
             seenUpTo = s.chat.length ? s.chat[s.chat.length - 1].time : 0;
         }
@@ -567,7 +566,7 @@
     function coupleErr(r) {
         if (!r) { return t(NOT_RUNNING); }
         if (r.code === 'other_city' && !r.city) { return t('Your partner is in another city. Travel there first.'); }
-        if (r.code && ERRORS[r.code]) { return t(ERRORS[r.code], { city: r.city }); }
+        if (r.code && ERRORS[r.code]) { return t(ERRORS[r.code], { city: cityName(r.city) }); }
         return errText(r) || t('Something went wrong.');
     }
     var ACTS = ['hug', 'kiss', 'dance', 'wave', 'holdhands', 'selfie', 'spin'];
@@ -590,6 +589,9 @@
         if (isOff) { b.setAttribute('disabled', 'disabled'); } else { b.removeAttribute('disabled'); }
     }
     function srv(s) { return s.server === 'this PC' ? t('this PC') : s.server; }   // hosting here
+    function cityName(c) {                          // the game's map id ("RedCity_Map") -> "Red City"
+        return String(c || '').replace(/_Map$/i, '').replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+    }
     function two(n) { return (n < 10 ? '0' : '') + n; }
     function hm(tm) { return tm && tm.length >= 2 ? tm[0] + ':' + two(tm[1]) : ''; }
     function whenText(epoch) {                      // "hoje às 14:05" / "28/10 às 22:10"
@@ -699,7 +701,7 @@
         setText($('p-name'), p.zoi ? p.name + ' (' + p.zoi + ')' : p.name);
         var dotCls = 'pdot' + (p.online ? ' on' : '');
         if ($('p-dot').className !== dotCls) { $('p-dot').className = dotCls; }
-        var place = p.lot && p.city ? p.lot + ', ' + p.city : (p.lot || p.city || '');
+        var place = p.lot && p.city ? p.lot + ', ' + cityName(p.city) : (p.lot || cityName(p.city) || '');
         var where = place ? t('Where: {place}', { place: place }) : t('Where: not known yet');
         if (p.here) { where += ' - ' + t('near you'); } else if (p.away) { where += ' - ' + t('in another city'); }
         setText($('p-where'), where);
