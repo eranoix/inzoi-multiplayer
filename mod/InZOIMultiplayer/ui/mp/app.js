@@ -23,6 +23,21 @@
     var CHAT_KEEP = 100;
 
     I.apply(document);
+    setInterval(function () {
+        var cls = root._minimized ? 'min' : '';
+        if (root.className !== cls) { root.className = cls; if (lastStatus) { renderTitle(lastStatus); } }
+    }, 150);
+    setTimeout(function () {
+        if (!root._minimized && root._applyMinimize && !document.querySelector('.req')) { root._applyMinimize(true); }
+        // the new layout starts clear of the game's compass (an older saved spot sat on it); moved by hand, it stays
+        var moved = false;
+        try { moved = localStorage.getItem('mp.layout2') === '1'; localStorage.setItem('mp.layout2', '1'); } catch (e) {}
+        if (!moved) {
+            root.style.left = '24px';
+            root.style.top = '160px';
+            if (root._saveWindowState) { root._saveWindowState(); }
+        }
+    }, 900);
 
     function post(path, body, cb, ms) {                // ms: how long to wait (default 4 s; the self-test takes longer)
         var x = new XMLHttpRequest();
@@ -188,15 +203,28 @@
     }
 
     function renderTitle(s) {
-        var n = s ? s.players.length : 0;
-        dot.className = 'dot' + (s && s.connected ? ' on' : (s ? ' wait' : ''));
-        var text = t('inZOI Multiplayer');           // (short: the window is narrow, the buttons sit next to it)
-        if (s && s.connected) { text = n ? t('Multiplayer - {n} online', { n: n }) : t('Multiplayer - online'); }
-        clear(label);
-        label.appendChild(document.createTextNode(text));
-        if (unread && root._minimized) { label.appendChild(el('span', 'badge', t('{n} new', { n: unread }))); }
-        var chatTab = document.querySelector('.tab[data-tab="people"]');
-        if (chatTab) { setText(chatTab, unread && currentTab !== 'people' ? t('Chat ({n})', { n: unread }) : t('Chat')); }
+        var p = s ? pickPartner(s) : null;
+        var on = !!(s && s.connected);
+        dot.className = 'dot' + (on && p && p.online ? ' on' : (s && !on ? ' wait' : ''));
+        var name = t('inZOI Co-op'), sub = '';
+        if (!s) { sub = t('Looking for the inZOI Multiplayer program...'); }
+        else if (!on) { sub = t('Not connected'); }
+        else if (!p) { sub = t('Waiting for your partner'); }
+        else {
+            name = p.name;
+            sub = !p.online ? t('Offline') : (p.here ? (p.sleep ? t('Sleeping') : (prettyAction(p.action) || t('Near you')))
+                : (p.away ? t('In another city') : t('Online')));
+        }
+        setText(label, name);
+        setText($('title-sub'), sub);
+        setText($('t-initial'), p ? String(p.name || '?').charAt(0).toUpperCase() : '+');
+        var waiting = unread + ((s && s.requests) || []).length;
+        var badge = $('t-badge');
+        setText(badge, waiting ? String(waiting) : '');
+        badge.className = 'badge' + (waiting && root._minimized ? ' on' : '');
+        var tb = $('tb-chat');
+        setText(tb, unread && currentTab !== 'people' ? String(unread) : '');
+        tb.className = 'tb' + (unread && currentTab !== 'people' ? ' on' : '');
     }
 
     // ------------------------------------------------------------------ notices
@@ -308,6 +336,7 @@
         if (!s) {
             renderTitle(null);
             $('pcard').style.display = 'none';
+            renderCouple(null, null);
             return;
         }
         renderPlayers(s);
@@ -469,7 +498,8 @@
         $('m-bar').style.display = bar ? 'block' : 'none';
         $('m-fill').style.width = Math.floor(100 * Math.min(1, frac)) + '%';
         var tab = $('tab-mods'), alert = o && o.state === 'ask';
-        setText(tab, alert ? t('Mods ({n})', { n: o.names.length }) : t('Mods'));
+        setText($('tb-mods'), alert ? String(o.names.length) : '');
+        $('tb-mods').className = 'tb' + (alert ? ' on' : '');
         tab.className = 'tab' + (tab.className.indexOf(' on') >= 0 ? ' on' : '') + (alert ? ' alert' : '');
         var listKey = I.lang() + JSON.stringify(m.list || []);
         if (listKey === modsListKey) { return; }
@@ -724,7 +754,7 @@
         var p = pickPartner(s);
         $('pcard').style.display = p ? 'block' : 'none';
         partnerKey = p ? p.id : null;
-        if (!p) { return; }
+        if (!p) { renderCouple(s, null); return; }
         setText($('p-name'), p.zoi ? p.name + ' (' + p.zoi + ')' : p.name);
         var dotCls = 'pdot' + (p.online ? ' on' : '');
         if ($('p-dot').className !== dotCls) { $('p-dot').className = dotCls; }
@@ -792,7 +822,8 @@
     var BOND = [['romance', N('Romance')], ['friendship', N('Friendship')], ['family', N('Family')],
                 ['business', N('Business')]];
     var currentTab = 'couple', chip = 'moments', iaData = null, iaAt = 0, iaLoading = false, iaKey = '';
-    try { chip = localStorage.getItem('mp.chip') || 'moments'; } catch (e) { chip = 'moments'; }
+    try { chip = localStorage.getItem('mp.chip') || 'romance'; } catch (e) { chip = 'romance'; }
+    if (chip === 'moments') { chip = 'romance'; }
 
     function partnerHere(s, p) { return !!(s && s.connected && p && p.online && p.here); }
     function currentPartner() { return lastStatus ? pickPartner(lastStatus) : null; }
@@ -832,8 +863,43 @@
             box.appendChild(cell);
         });
     }
+    var QUICK_ICONS = {
+        hug: '<path d="M8 8.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM16 8.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM3.5 20c0-4 2-7 4.5-7 1.7 0 2.8 1 4 2.5 1.2-1.5 2.3-2.5 4-2.5 2.5 0 4.5 3 4.5 7"/>',
+        kiss: '<path d="M12 19s-6.5-4-6.5-9a3.6 3.6 0 0 1 6.5-2.2A3.6 3.6 0 0 1 18.5 10c0 5-6.5 9-6.5 9z"/><path d="M9.5 11.5c1.5 1 3.5 1 5 0"/>',
+        dance: '<path d="M9 18V6l10-2v12"/><circle cx="7" cy="18" r="2"/><circle cx="17" cy="16" r="2"/>',
+        wave: '<path d="M8 13V6.5a1.5 1.5 0 0 1 3 0V12M11 11V4.5a1.5 1.5 0 0 1 3 0V11M14 11V6a1.5 1.5 0 0 1 3 0v7c0 4-2.5 7-6 7-2.5 0-4-1.5-5.5-4L4 13a1.5 1.5 0 0 1 2.5-1.5L8 13"/>',
+        holdhands: '<path d="M9.5 14.5l5-5M7 12l-2 2a3.5 3.5 0 0 0 5 5l2-2M17 12l2-2a3.5 3.5 0 0 0-5-5l-2 2"/>',
+        selfie: '<rect x="4" y="7" width="16" height="12" rx="3"/><path d="M9 7l1.5-2.5h3L15 7"/><circle cx="12" cy="13" r="3"/>',
+        spin: '<path d="M19 12a7 7 0 1 1-2.1-5"/><path d="M19 4.5V8h-3.5"/>'
+    };
+    var QUICK_SHORT = { hug: N('A hug'), kiss: N('A kiss'), dance: N('A dance'), wave: N('High five'),
+                        holdhands: N('Hands'), selfie: N('Selfie'), spin: N('Twirl') };
+    var quickSig = '';
+    function renderQuick() {
+        var box = $('quick'), sig = I.lang();
+        if (quickSig === sig) { return; }
+        quickSig = sig;
+        clear(box);
+        MOMENTS.forEach(function (m) {
+            var b = el('button', 'qa'), c = el('span', 'c'), l = el('span', 'l', t(QUICK_SHORT[m[0]]));
+            b.setAttribute('type', 'button');
+            b.setAttribute('title', t(m[1]));
+            c.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+                'stroke-linecap="round" stroke-linejoin="round">' + QUICK_ICONS[m[0]] + '</svg>';
+            b.appendChild(c);
+            b.appendChild(l);
+            b.addEventListener('click', function () {
+                b.className = 'qa done';
+                setTimeout(function () { b.className = 'qa'; }, 1500);
+                partnerCall('/partner/action', { action: m[0] }, function () {
+                    return t('Asked {name}. Waiting for an answer...', { name: partnerName() });
+                });
+            });
+            box.appendChild(b);
+        });
+    }
     function groupsList() {
-        var list = [{ key: 'moments', items: MOMENTS }, { key: 'family', items: FAMILY }];
+        var list = [{ key: 'family', items: FAMILY }];
         ((iaData && iaData.groups) || []).forEach(function (g) { list.push({ key: g.key, items: g.items, game: true }); });
         return list;
     }
@@ -883,10 +949,11 @@
         $('c-main').style.display = msg ? 'none' : 'flex';
         if (!here) { return; }
         if (currentTab === 'couple') { loadInteractions(false); }
+        renderQuick();
         renderBond(iaData);
         var groups = groupsList();
         var want = chip;
-        if (!groups.some(function (g) { return g.key === chip; })) { chip = 'moments'; }
+        if (!groups.some(function (g) { return g.key === chip; })) { chip = 'family'; }
         renderChips(groups);
         var shownChip = chip;
         chip = want;
@@ -903,18 +970,10 @@
             if (!q && g.key !== shownChip) { return; }
             g.items.forEach(function (it) {
                 var title, sub = '', click;
-                if (g.key === 'moments') {
-                    title = t(it[1]);
-                    click = function () { partnerCall('/partner/action', { action: it[0] }, null); };
-                } else if (g.key === 'family') {
+                if (g.key === 'family') {
                     title = t(it[1]);
                     sub = t(it[2]);
-                    if (it[0] === 'movein' && iaData && iaData.family) {
-                        sub = t('Done: you live together');
-                        grid.appendChild(iaButton('family off', title, sub, function () {}));
-                        shown++;
-                        return;
-                    }
+                    if (it[0] === 'movein' && iaData && iaData.family) { sub = t('You live together. Ask again to put both saves in step'); }
                     click = function () {
                         partnerCall('/partner/family', { action: it[0] }, function () {
                             return t('Asked {name}. Waiting for an answer...', { name: name });

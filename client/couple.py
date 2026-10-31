@@ -265,7 +265,8 @@ class Couple:
                 return
             r = self.remotes.get(frm)
             name = r.name if r else str(data.get("name") or "Your partner")[:40]
-            self.requests[rid] = {"id": rid, "from": name, "from_id": frm, "action": action, "at": time.time()}
+            self.requests[rid] = {"id": rid, "from": name, "from_id": frm, "action": action, "at": time.time(),
+                                  "home_site": data.get("home_site") if isinstance(data.get("home_site"), int) else None}
             self.system_line(f"{name} wants to {VERBS[action]}")
             log.info("%s asks: %s", name, action)
         elif data.get("type") == "reply":
@@ -306,7 +307,7 @@ class Couple:
             return self.mark(req, "done" if res.get("ok") else "failed", res.get("error", ""))
         if action in FAMILY:                             # both saves: each PC makes it so in its own
             try:
-                res = await self.g(self.family_apply, action, pid)
+                res = await self.g(self.family_apply, action, pid, None if initiator else req.get("home_site"))
             except Exception as e:                       # noqa: BLE001 - the game refused: say so in the panel
                 log.warning("family %s failed: %s", action, e)
                 res = {"error": str(e)}
@@ -339,15 +340,73 @@ class Couple:
         return self.mark(req, "started")
 
     # ------------------------------------------------------------------ family
-    def family_apply(self, action: str, pid: str) -> dict:
+    def my_household(self) -> dict:
+        return self.game.call("household.get_members") or {}
+
+    def my_home_site(self) -> int | None:
+        """The lot my household lives on (household.list: its residence), or None."""
+        hid = self.my_household().get("household_id")
+        for h in (self.game.call("household.list", Limit=500) or {}).get("households") or []:
+            if h.get("household_id") == hid and h.get("residence_site_id"):
+                return int(h["residence_site_id"])
+        return None
+
+    def household_at(self, site: int) -> int | None:
+        """The household that lives on lot `site` in this save, or None."""
+        for h in (self.game.call("household.list", Limit=500) or {}).get("households") or []:
+            if h.get("residence_site_id") == site and h.get("household_id"):
+                return int(h["household_id"])
+        return None
+
+    def drop_duplicates(self, r, keep: int):
+        """Other characters with the partner's full name (copies made before they were family) leave the world: only
+        their real Zoi stays."""
+        prof = r.profile or {}
+        name = ((prof.get("first_name") or "").strip().casefold(), (prof.get("last_name") or "").strip().casefold())
+        if not name[0]:
+            return
+        offset = 0
+        while offset < 2000:
+            page = self.game.call("world.list_characters", Limit=100, Offset=offset) or {}
+            chars = page.get("characters") or []
+            for c in chars:
+                same = ((c.get("first_name") or "").strip().casefold(), (c.get("last_name") or "").strip().casefold())
+                eid = c.get("entity_id")
+                if same == name and eid and int(eid) not in (keep, self.my_entity):
+                    self.game.call("zoi.destroy", entity_id=int(eid))
+                    log.info("removed a copy of %s's Zoi (%s): their real Zoi is in your family", r.name, eid)
+            offset += len(chars)
+            if not chars or offset >= (page.get("total") or 0):
+                break
+
+    def family_apply(self, action: str, pid: str, home_site: int | None = None) -> dict:
         """Make a family milestone true in this save, between my Zoi and the partner's Zoi here (runs in a thread).
-        Anything but moving in needs them in the family first, so that comes first when it isn't so yet."""
+        Moving in: the family lives in the home of whoever asked, in both saves. On the asker's PC the partner's Zoi
+        joins the asker's household; on the other PC (home_site: the asker's lot) this player's own Zoi joins the
+        household living on that lot - there the house is theirs too. With nobody living there, the partner's Zoi
+        joins this player's household instead. Anything else needs them in the family first, so that comes first."""
         r = self.remotes.get(pid)
         eid = self.puppet_ids.get(pid)
         if not r or not eid or not self.my_entity:
             return {"error": "your partner's Zoi isn't in your world right now", "code": "not_here"}
         call = self.game.call
-        if self.family_zoi(r) != eid:
+        target = self.household_at(home_site) if home_site else None
+        mine = self.my_household().get("household_id")
+        if target and target != mine:
+            call("household.add_member", entity_id=self.my_entity, household_id=target)
+            self.__dict__.setdefault("_family", {}).pop(pid, None)
+            log.info("your Zoi moved into %s's home: one family, one home", r.name)
+            fam = self.family_zoi(r)
+            if fam:
+                self.drop_duplicates(r, fam)
+                if fam != eid:
+                    extra = {"home_door": self.home["door"], "home_site": self.home["site"]} if self.home else {}
+                    st = r.state or {}
+                    self.mail.op("adopt", key=pid, entity=fam, **{k: st[k] for k in ("x", "y", "z") if k in st},
+                                 **extra)
+                    self.puppet_ids[pid], eid = fam, fam
+                r.adopted = True
+        elif self.family_zoi(r) != eid:
             # The copy joins my household: from now on it is their Zoi in this save (it ages and lives here).
             call("household.add_member", entity_id=eid)
             for cmd in ("life_and_death.stop_aging", "life_and_death.immortal"):
@@ -608,7 +667,7 @@ class Couple:
                 return {"error": "your partner isn't online", "code": "no_partner"}
             if r.pid not in self.puppet_ids:
                 return {"error": "your partner's Zoi isn't in your world right now", "code": "not_here"}
-            return await self.couple_request(r, act)
+            return await self.couple_request(r, act, home_site=await self.g(self.my_home_site))
 
         return {"/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
                 "/partner/goto": goto, "/partner/invite": invite, "/partner/action": action,

@@ -348,6 +348,50 @@ async def test_couple():
         "the mother is the woman"
     assert (await ana_routes["/partner/family"]({"action": "divorce"}))["code"] == "bad_action"
     print("family milestones (move in, marry, baby) in both saves: ok")
+
+    # --- moving in, the other save: Ben's save has Ana's real Zoi (entity 61) living on Ana's lot (site 1038, Ben's
+    # household elsewhere), plus a copy of Ana (88) made before. Ana asks: Ben's own Zoi joins the household on
+    # lot 1038 (there the house is Ben's too), the real Ana is driven and the copy goes.
+    state = {"mine": 300}
+    households = {"households": [{"household_id": 300, "residence_site_id": 777},
+                                 {"household_id": 400, "residence_site_id": 1038}]}
+    ana_hh = {"household_id": 500, "members": [{"entity_id": 10, "first_name": "Ana", "last_name": "Lima"},
+                                               {"entity_id": 55, "first_name": "Ben", "last_name": "Lima"}]}
+    ana.game.call = game_answers(ana, {"household.list": {"households": [{"household_id": 500, "residence_site_id": 1038}]},
+                                       "household.get_members": ana_hh})
+
+    def ben_call(tool, **kw):
+        ben.fake_calls.append((tool, kw))
+        if tool == "household.add_member" and kw.get("entity_id") == 20:
+            state["mine"] = kw["household_id"]
+        if tool == "household.list":
+            return households
+        if tool == "household.get_members":
+            if state["mine"] == 400:
+                return {"household_id": 400, "members": [{"entity_id": 20, "first_name": "Ben", "last_name": "Lima"},
+                                                         {"entity_id": 61, "first_name": "Ana", "last_name": "Lima"}]}
+            return {"household_id": 300, "members": [{"entity_id": 20, "first_name": "Ben", "last_name": "Lima"}]}
+        if tool == "world.list_characters":
+            return {"total": 3, "characters": [{"entity_id": 61, "first_name": "Ana", "last_name": "Lima"},
+                                               {"entity_id": 88, "first_name": "Ana", "last_name": "Lima"},
+                                               {"entity_id": 20, "first_name": "Ben", "last_name": "Lima"}]}
+        return {}
+    ben.game.call = ben_call
+    ben.__dict__.pop("_family", None)
+    ben.puppet_ids[ana.me_id], ra.adopted = 88, False
+    mark = len(ben.fake_calls)
+    res = await ana_routes["/partner/family"]({"action": "movein"})
+    assert res.get("ok"), res
+    assert await until(lambda: ben.requests)
+    q = next(iter(ben.requests.values()))
+    assert q["home_site"] == 1038, q
+    out = await ben_routes["/partner/respond"]({"id": q["id"], "accept": True})
+    assert out["result"]["state"] == "done", out
+    assert ("household.add_member", {"entity_id": 20, "household_id": 400}) in ben.fake_calls, ben.fake_calls[-8:]
+    assert ("zoi.destroy", {"entity_id": 88}) in ben.fake_calls and ("zoi.destroy", {"entity_id": 61}) not in ben.fake_calls
+    assert ben.puppet_ids[ana.me_id] == 61 and ra.adopted and ops(ben, "adopt")[-1]["entity"] == 61
+    assert ("household.add_member", {"entity_id": 88}) not in ben.fake_calls[mark:], "the copy isn't moved in"
+    print("moving in, the other save: own Zoi joins the family in the asker's home, copy removed: ok")
     ana.game.call = lambda tool, **kw: ana.fake_calls.append((tool, kw)) or {}
     ben.game.call = lambda tool, **kw: ben.fake_calls.append((tool, kw)) or {}
 

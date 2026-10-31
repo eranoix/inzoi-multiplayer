@@ -46,6 +46,7 @@ def main():
     ap.add_argument("--mock", help="a /status JSON file to answer with (no companion needed); or a file mapping "
                                    "paths to answers: {\"/status\": {...}, \"/partner/interactions\": {...}}")
     ap.add_argument("--console", action="store_true", help="print the page's console messages (errors)")
+    ap.add_argument("--closed", action="store_true", help="leave the panel closed (the capsule)")
     ap.add_argument("--chip", help="the Couple tab's group to show (moments, family, romance, fun, talk...)")
     a = ap.parse_args()
     stubs = STUBS.replace("%LANG%", a.lang)
@@ -80,7 +81,9 @@ def main():
     html = html.replace("<head>", "<head>" + stubs, 1)
     click = ("<script>setTimeout(function(){var b=document.querySelector('[data-tab=\"%s\"]');"
              "if(b){b.click();}var r=document.getElementById('app-root');if(r){r.style.display='flex';}"
-             "document.body.style.visibility='visible';},400);</script>" % a.tab)
+             "document.body.style.visibility='visible';},400);"
+             "setTimeout(function(){var r=document.getElementById('app-root');"
+             "if(r&&r._applyMinimize){r._applyMinimize(%s);}},1300);</script>" % (a.tab, "true" if a.closed else "false"))
     html = html.replace("</body>", click + "</body>", 1)
     page = UI / "_preview.html"
     page.write_text(html, "utf-8")

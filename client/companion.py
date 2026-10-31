@@ -45,7 +45,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.4"
+VERSION = "0.9.5"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -580,6 +580,7 @@ class Companion(couple.Couple, servers.Servers):
         elif t == "left":
             log.info("%s left", m.get("name"))
             r = self.remotes.pop(m["id"], None)
+            self.refresh_version_notice()
             if r:
                 self.drop_remote(r)
             self.system_line(f"{m.get('name')} left")
@@ -638,6 +639,14 @@ class Companion(couple.Couple, servers.Servers):
             log.warning("versions differ: you have %s, %s has %s", VERSION, who, version)
             self.notice = f"Versions differ: you have {VERSION}, {who} has {version}. Update both to the same version."
             self.notice_code = "version_differs"
+        else:
+            self.refresh_version_notice()
+
+    def refresh_version_notice(self):
+        """The "versions differ" notice goes once nobody online has another version (they updated, or left)."""
+        if self.notice_code == "version_differs" and all(
+                str(getattr(r, "version", None) or VERSION) == VERSION for r in self.remotes.values()):
+            self.notice, self.notice_code = "", None
 
     async def on_chat(self, m: dict):
         mine = m.get("id") == self.me_id

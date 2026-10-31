@@ -290,7 +290,6 @@
     (function() {
         var minBtn   = document.getElementById('minimize-btn');
         var titleBar = document.getElementById('title-bar');
-        minBtn.textContent = '_';
         function applyMinimize(bMin) {
             root._minimized = !!bMin;
             if (bMin) {
@@ -325,7 +324,7 @@
         // Title-bar click restores when minimized (ignore drag / child buttons).
         titleBar.addEventListener('click', function(e) {
             if (root._wasDragged) return;
-            if (e.target.id === 'minimize-btn' || e.target.id === 'close-btn' || e.target.id === 'servers-btn') return;
+            if (minBtn && minBtn.contains(e.target)) return;
             if (root._minimized) toggle();
         });
     })();
