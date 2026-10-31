@@ -30,7 +30,17 @@ def make():
     return comp, r
 
 
+def leftovers():
+    """Puppets saved into the game (nobody plays them now): all removed, without tripping over the dict."""
+    comp = companion.Companion({"key": "k" * 20, "name": "me", "server": "x", "port": 1, "password": ""})
+    comp.writer, comp.me_id, comp.connected_at = object(), "me", time.time() - 60
+    comp.on_report("up", "pa=5,pb=6,pc=7")
+    assert not comp.puppet_ids and set(comp.despawning) == {"pa", "pb", "pc"}, (comp.puppet_ids, comp.despawning)
+    print("  ok: three leftover puppets removed in one heartbeat")
+
+
 async def main():
+    leftovers()
     comp, r = make()
     comp.game.template_for = lambda *a, **k: 42
     await comp.manage_puppets()

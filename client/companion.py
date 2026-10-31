@@ -819,8 +819,14 @@ class Companion(couple.Couple, servers.Servers):
         asleep = self.sleeping and all(r.state.get("sleep") for r in others)
         want = SLEEP_SPEED if asleep else 1
         if abs(clock[2] - want) > 0.01:
-            log.info("everyone's asleep: time runs fast" if asleep else
-                     "game speed is normal while anyone's awake (everyone's game runs at the same speed)")
+            # (the game speeds itself up while its Zois sleep: set it back at most every 20 s, not a tug of war)
+            if time.time() - self.__dict__.get("_speed_set_at", 0) < 20:
+                return
+            self._speed_set_at = time.time()
+            if self.__dict__.get("_speed_said") != want:
+                self._speed_said = want
+                log.info("everyone's asleep: time runs fast" if asleep else
+                         "game speed is normal while anyone's awake (everyone's game runs at the same speed)")
             await self.g(self.game.call, "environment.time_speed", speed=want)
 
     async def check_home(self):
@@ -898,7 +904,7 @@ class Companion(couple.Couple, servers.Servers):
                 if eid.isdigit() and key not in self.despawning:     # (listed before our despawn ran: stale)
                     ids[key] = int(eid)
             self.puppet_ids = ids
-            for key in ids:                  # puppets the controller already has (e.g. after a companion restart)
+            for key in list(ids):            # puppets the controller already has (e.g. after a companion restart)
                 r = self.remotes.get(key)
                 if r:
                     r.seen_at = now
@@ -911,7 +917,7 @@ class Companion(couple.Couple, servers.Servers):
                     r.spawned, r.spawn_requested = False, 0.0
             # puppets nobody is playing any more (left while we were away, or saved into the game): remove
             if self.writer and self.me_id and time.time() - self.connected_at > 20:
-                for key in ids:
+                for key in list(ids):            # (despawn takes it out of puppet_ids, which is ids)
                     r = self.remotes.get(key)
                     if ids[key] == self.my_entity:
                         continue                 # never the Zoi being played (a household the program created)
@@ -1915,7 +1921,12 @@ class Companion(couple.Couple, servers.Servers):
             return                                       # the leader is paused or away / I'm paused: my own speed
         want = st.get("speed")
         if isinstance(want, (int, float)) and 0 < want <= 10 and abs(clock[2] - want) > 0.01:
-            log.info("following the host's game speed: %s", want)
+            if time.time() - self.__dict__.get("_speed_set_at", 0) < 20:
+                return                                   # (as in keep_speed: no tug of war with the game)
+            self._speed_set_at = time.time()
+            if self.__dict__.get("_speed_said") != want:
+                self._speed_said = want
+                log.info("following the host's game speed: %s", want)
             await self.g(self.game.call, "environment.time_speed", speed=want)
 
     def partner_cards(self) -> list[dict]:
