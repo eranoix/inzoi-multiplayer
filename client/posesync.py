@@ -79,7 +79,7 @@ class PoseSync:
         while True:
             try:
                 partners = [r for r in self.remotes.values() if getattr(r, "pid", None)]
-                if self.writer and self.me_id and partners and self.world == "play" and self.mp_active():
+                if self.writer and self.me_id and partners and self.world != "out" and self.mp_active():
                     for kind in ("k", "d"):                      # (keyframe first: a frame needs its keyframe)
                         f = out_dir / f"pose{kind}.cfg"
                         try:
@@ -100,7 +100,7 @@ class PoseSync:
                         self.pose_counts["sent"] += 1
                 if time.time() - map_at > MAP_EVERY:
                     map_at = time.time()
-                    me = str(self.my_entity or "") if self.world == "play" and self.mp_active() and partners else ""
+                    me = str(self.my_entity or "") if self.world != "out" and self.mp_active() and partners else ""
                     if me != self.__dict__.get("pose_me_text"):
                         in_dir.mkdir(parents=True, exist_ok=True)
                         write_atomic(in_dir / "me.cfg", me)          # (the B1 script sends this Zoi's skeleton)
