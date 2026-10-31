@@ -366,6 +366,8 @@ async def test_couple():
             state["mine"] = kw["household_id"]
         if tool == "household.list":
             return households
+        if tool == "household.get_members" and kw.get("household_id") == 400:
+            return {"household_id": 400, "members": [{"entity_id": 61, "first_name": "Ana", "last_name": "Lima"}]}
         if tool == "household.get_members":
             if state["mine"] == 400:
                 return {"household_id": 400, "members": [{"entity_id": 20, "first_name": "Ben", "last_name": "Lima"},
@@ -392,6 +394,50 @@ async def test_couple():
     assert ben.puppet_ids[ana.me_id] == 61 and ra.adopted and ops(ben, "adopt")[-1]["entity"] == 61
     assert ("household.add_member", {"entity_id": 88}) not in ben.fake_calls[mark:], "the copy isn't moved in"
     print("moving in, the other save: own Zoi joins the family in the asker's home, copy removed: ok")
+
+    # --- the move doesn't take in Ben's game: the game's own "live with me" is asked, and Ana hears it didn't work
+    state["mine"] = 300
+    stuck = {"on": True}
+    real_call = ben.game.call
+
+    def stuck_call(tool, **kw):
+        if tool == "household.add_member" and kw.get("entity_id") == 20 and stuck["on"]:
+            ben.fake_calls.append((tool, kw))
+            raise RuntimeError("possessed household can't change")
+        return real_call(tool, **kw)
+    ben.game.call = stuck_call
+    ben.__dict__.pop("_family", None)
+    ra.adopted, ben.puppet_ids[ana.me_id] = False, 88
+    res = await ana_routes["/partner/family"]({"action": "movein"})
+    assert await until(lambda: ben.requests)
+    out = await ben_routes["/partner/respond"]({"id": next(iter(ben.requests)), "accept": True})
+    assert out["result"]["state"] == "failed", out
+    assert ("interaction.execute", {"entity_id": 61, "interaction_bag_id": "Co_Cohabit_Friendship",
+                                    "target_entity_id": 20, "insert_front": True}) in ben.fake_calls
+    assert await until(lambda: ana.sent[res["id"]]["state"] == "failed")
+    assert "answer yes" in ana.sent[res["id"]]["message"] and any("didn't work in their save" in c["text"] for c in ana.chat)
+    print("a move the game refuses: the game's own question, and the asker hears it: ok")
+
+    # --- a household on the asker's lot that isn't the asker's family: Ben's Zoi never moves there
+    stuck["on"] = False
+    households["households"][1]["household_id"] = 401           # (strangers live on lot 1038 in Ben's save)
+    mark = len(ben.fake_calls)
+    res = await ana_routes["/partner/family"]({"action": "movein"})
+    assert await until(lambda: ben.requests)
+    await ben_routes["/partner/respond"]({"id": next(iter(ben.requests)), "accept": True})
+    assert not [c for c in ben.fake_calls[mark:] if c[0] == "household.add_member" and c[1].get("entity_id") == 20]
+    households["households"][1]["household_id"] = 400
+    ben.game.call = real_call
+    print("never into strangers' home: ok")
+
+    # --- the partner's log, asked for
+    (Path(os.environ["APPDATA"]) / "inzoi-mp").mkdir(parents=True, exist_ok=True)
+    (Path(os.environ["APPDATA"]) / "inzoi-mp" / "companion.log").write_text("line one|line two|".replace("|", chr(10)), "utf-8")
+    assert (await ana_routes["/partner/log"]({}))["ok"]
+    saved = Path(os.environ["APPDATA"]) / "inzoi-mp" / "partner-Ben.log"
+    assert await until(lambda: saved.exists())
+    assert "line two" in saved.read_text("utf-8")
+    print("partner's log on request: ok")
     ana.game.call = lambda tool, **kw: ana.fake_calls.append((tool, kw)) or {}
     ben.game.call = lambda tool, **kw: ben.fake_calls.append((tool, kw)) or {}
 

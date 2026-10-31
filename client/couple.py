@@ -269,6 +269,21 @@ class Couple:
                                   "home_site": data.get("home_site") if isinstance(data.get("home_site"), int) else None}
             self.system_line(f"{name} wants to {VERBS[action]}")
             log.info("%s asks: %s", name, action)
+        elif data.get("type") == "result":
+            s = self.sent.get(rid)
+            if not s or s["to_id"] != frm:
+                return
+            if data.get("ok"):
+                log.info("%s's save: %s done", s["to"], s["action"])
+            else:
+                why = str(data.get("message") or "")[:300]
+                self.mark(s, "failed", why)
+                self.system_line(f"{s['to']}: it didn't work in their save ({ACTION_NAMES.get(s['action'], s['action'])}): {why}")
+                log.warning("%s's save: %s failed: %s", s["to"], s["action"], why)
+        elif data.get("type") == "log_request":
+            asyncio.get_running_loop().create_task(self.send_log(frm, rid))
+        elif data.get("type") == "log":
+            self.save_partner_log(frm, data)
         elif data.get("type") == "reply":
             s = self.sent.get(rid)
             if not s or s["to_id"] != frm or s["state"] != "waiting":
@@ -290,7 +305,14 @@ class Couple:
                          "data": {"type": "reply", "id": q["id"], "accept": bool(accept)}})
         out = {"ok": True}
         if accept:
-            out["result"] = await self.couple_perform(q, initiator=False)
+            out["result"] = res = await self.couple_perform(q, initiator=False)
+            if q["action"] in FAMILY:
+                try:
+                    await self.send({"t": "event", "kind": "couple", "to": q["from_id"],
+                                     "data": {"type": "result", "id": q["id"], "ok": res.get("state") == "done",
+                                              "message": res.get("message", "")}})
+                except (OSError, ConnectionError):
+                    pass
         return out
 
     async def couple_perform(self, req: dict, initiator: bool) -> dict:
@@ -358,6 +380,53 @@ class Couple:
                 return int(h["household_id"])
         return None
 
+    def has_member(self, household: int, r) -> bool:
+        """The partner's Zoi (by full name) is a member of that household in this save."""
+        prof = r.profile or {}
+        name = ((prof.get("first_name") or "").strip().casefold(), (prof.get("last_name") or "").strip().casefold())
+        members = (self.game.call("household.get_members", household_id=household) or {}).get("members") or []
+        return bool(name[0]) and any(((m.get("first_name") or "").strip().casefold(),
+                                      (m.get("last_name") or "").strip().casefold()) == name for m in members)
+
+    def family_zoi_anywhere(self, r) -> int | None:
+        """The partner's Zoi in this world by full name (any household; a copy of ours last), or None."""
+        prof = r.profile or {}
+        name = ((prof.get("first_name") or "").strip().casefold(), (prof.get("last_name") or "").strip().casefold())
+        found, offset = [], 0
+        while name[0] and offset < 2000:
+            page = self.game.call("world.list_characters", Limit=100, Offset=offset) or {}
+            chars = page.get("characters") or []
+            found += [int(c["entity_id"]) for c in chars if c.get("entity_id") and int(c["entity_id"]) != self.my_entity
+                      and ((c.get("first_name") or "").strip().casefold(),
+                           (c.get("last_name") or "").strip().casefold()) == name]
+            offset += len(chars)
+            if not chars or offset >= (page.get("total") or 0):
+                break
+        copy = self.puppet_ids.get(r.pid)
+        found.sort(key=lambda e: e == copy and not r.adopted)
+        return found[0] if found else None
+
+    async def send_log(self, to: str, rid: str):
+        """The partner's program asked for this one's log (to see what happened here): the last lines."""
+        try:
+            from companion import CONFIG_DIR
+            text = (CONFIG_DIR / "companion.log").read_text("utf-8", errors="replace")
+        except OSError as e:
+            text = f"(no log: {e})"
+        lines = text.splitlines()[-400:]
+        await self.send({"t": "event", "kind": "couple", "to": to,
+                         "data": {"type": "log", "id": rid, "version": self.version, "lines": lines}})
+        log.info("sent the last %d log lines to %s (asked for)", len(lines), self.remotes[to].name if to in self.remotes else to)
+
+    def save_partner_log(self, frm: str, data: dict):
+        from companion import CONFIG_DIR
+        r = self.remotes.get(frm)
+        name = re.sub(r"[^A-Za-z0-9_-]", "_", r.name if r else frm)[:30]
+        path = CONFIG_DIR / f"partner-{name}.log"
+        lines = [str(x)[:2000] for x in (data.get("lines") or [])][:2000]
+        path.write_text(f"# {r.name if r else frm}'s log (version {data.get('version')})\n" + "\n".join(lines), "utf-8")
+        log.info("saved %s's log: %s", r.name if r else frm, path)
+
     def drop_duplicates(self, r, keep: int):
         """Other characters with the partner's full name (copies made before they were family) leave the world: only
         their real Zoi stays."""
@@ -392,8 +461,27 @@ class Couple:
         call = self.game.call
         target = self.household_at(home_site) if home_site else None
         mine = self.my_household().get("household_id")
+        if target and target != mine and not self.has_member(target, r):
+            log.info("the household on lot %s here isn't %s's family: your Zoi stays where it is", home_site, r.name)
+            target = None                                # (never into strangers' home)
+        log.info("moving in with %s: their home here is lot %s (household %s), mine is household %s",
+                 r.name, home_site, target, mine)
         if target and target != mine:
-            call("household.add_member", entity_id=self.my_entity, household_id=target)
+            try:
+                call("household.add_member", entity_id=self.my_entity, household_id=target)
+            except Exception as e:                       # noqa: BLE001 - said below, with the game's answer
+                log.warning("the game didn't move your Zoi into that household: %s", e)
+            now = self.my_household().get("household_id")
+            if now != target:
+                fam = self.family_zoi_anywhere(r)
+                if fam:
+                    # their Zoi here asks mine to live with them: the game's own way, with its own question
+                    call("interaction.execute", entity_id=fam, interaction_bag_id="Co_Cohabit_Friendship",
+                         target_entity_id=self.my_entity, insert_front=True)
+                    log.info("asked the game: %s's Zoi asks yours to live with them", r.name)
+                    return {"error": "the game asks on screen: answer yes to live together", "code": "asked_game"}
+                return {"error": f"the game didn't move your Zoi into the household on lot {home_site}",
+                        "code": "move_failed"}
             self.__dict__.setdefault("_family", {}).pop(pid, None)
             log.info("your Zoi moved into %s's home: one family, one home", r.name)
             fam = self.family_zoi(r)
@@ -669,6 +757,14 @@ class Couple:
                 return {"error": "your partner's Zoi isn't in your world right now", "code": "not_here"}
             return await self.couple_request(r, act, home_site=await self.g(self.my_home_site))
 
-        return {"/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
+        async def partner_log(body):
+            r = self.partner(body.get("key"))
+            if not r:
+                return {"error": "your partner isn't online", "code": "no_partner"}
+            await self.send({"t": "event", "kind": "couple", "to": r.pid,
+                             "data": {"type": "log_request", "id": secrets.token_hex(6)}})
+            return {"ok": True}
+
+        return {"/partner/log": partner_log, "/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
                 "/partner/goto": goto, "/partner/invite": invite, "/partner/action": action,
                 "/partner/respond": respond, "/world/undo": undo, "/world/backups": backups}

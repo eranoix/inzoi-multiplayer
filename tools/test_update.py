@@ -80,7 +80,7 @@ def main():
         env = {**os.environ, "APPDATA": str(data), "INZOI_MP_GAME_URL": "http://127.0.0.1:9/mcp",
                "INZOI_MP_DOCUMENTS": str(tmp / "Documents"),          # never the real game's mod folder
                "INZOI_MP_PANEL_PORT": str(PANEL), "INZOI_MP_UPDATE_API": f"http://127.0.0.1:{port}/latest.json",
-               "INZOI_MP_GAME_BIN": str(game), "INZOI_MP_TEST": "1"}
+               "INZOI_MP_GAME_BIN": str(game), "INZOI_MP_TEST": "1", "INZOI_MP_ASK_UPDATE": "1"}
         server = subprocess.Popen([sys.executable, str(ROOT / "server" / "inzoi_mp_server.py"), "--port", "24390",
                                    "--data", str(tmp / "server")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:

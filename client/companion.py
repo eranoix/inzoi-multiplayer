@@ -45,7 +45,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -1585,7 +1585,7 @@ class Companion(couple.Couple, servers.Servers):
                     log.debug("update check: %s", e)
                 except Exception as e:                   # noqa: BLE001
                     loop_error("update check", e)
-            await asyncio.sleep(2 * 3600)
+            await asyncio.sleep(15 * 60)               # (coop-casal: often, so both PCs stay on the same version)
 
     async def announce(self, text: str, wait: float = 1800):
         """A notice in the game once it's up (on its main menu or in a save)."""
@@ -1603,6 +1603,11 @@ class Companion(couple.Couple, servers.Servers):
             return
         self.update = {**info, "state": "available", "done": 0, "total": info["size"], "path": None, "error": None}
         log.info("inZOI Multiplayer %s is out (this is %s)", info["version"], VERSION)
+        if updater.frozen() and not self.cfg.get("ask_before_update") and not os.environ.get("INZOI_MP_ASK_UPDATE"):
+            # coop-casal: always the newest version, without a question nobody sees (the panel starts closed): it
+            # downloads and restarts the program by itself; the game keeps running.
+            self.update_action(info["version"], "update")
+            return
         self.console_ask(f"\n  ------------------------------------------------------------------------------\n"
                          f"  {self.update_text()}\n  Type y (yes) or n (later) and press Enter [y]: ",
                          lambda a: self.update_action(info["version"], "later" if a.startswith("n") else "update"))

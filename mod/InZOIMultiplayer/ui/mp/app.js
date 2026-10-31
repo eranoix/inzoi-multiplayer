@@ -209,6 +209,7 @@
         if (added && atBottom) { box.scrollTop = box.scrollHeight; }
     }
 
+    var askedOpen = false;               // a question about the save opened the panel once (closed again: it stays closed)
     function renderTitle(s) {
         var p = s ? pickPartner(s) : null;
         var on = !!(s && s.connected);
@@ -226,8 +227,13 @@
         setText($('title-sub'), sub);
         setText($('t-initial'), p ? String(p.name || '?').charAt(0).toUpperCase() : '+');
         var waiting = unread + ((s && s.requests) || []).length;
+        var asks = !!(s && ((s.save && s.save.box) || (s.world && s.world.box) || (s.update && s.update.box &&
+            s.update.box.buttons && s.update.box.buttons.length)));
+        if (asks && root._minimized && root._applyMinimize && !askedOpen) { askedOpen = true; root._applyMinimize(false); }
+        if (!asks) { askedOpen = false; }
         var badge = $('t-badge');
-        setText(badge, waiting ? String(waiting) : '');
+        setText(badge, asks ? '!' : (waiting ? String(waiting) : ''));
+        if (asks) { waiting = 1; }
         badge.className = 'badge' + (waiting && root._minimized ? ' on' : '');
         var tb = $('tb-chat');
         setText(tb, unread && currentTab !== 'people' ? String(unread) : '');
