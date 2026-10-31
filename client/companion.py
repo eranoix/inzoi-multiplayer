@@ -45,7 +45,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.8.6"
+VERSION = "0.8.7"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -1079,6 +1079,9 @@ class Companion(couple.Couple, servers.Servers):
                 self.ask_confirm()
             elif not self.world_meta:                     # with a shared world, that becomes the multiplayer save
                 self.ask_setup()
+            elif not self.world_busy and time.time() - self.__dict__.get("_world_tried", 0) > 30:
+                self._world_tried = time.time()           # coop-casal: fetch it (again, if a download failed)
+                self.check_world()
         if self.writer and not self.world_meta and not self.world_asked and (mp or {}).get("folder"):
             self.world_asked = True
             self.check_world()                            # no shared world on this server yet: offer ours
@@ -1249,7 +1252,7 @@ class Companion(couple.Couple, servers.Servers):
         """The shared world is switched on once each player gets a household of their own in it (stages 2-3);
         until then only tests and cfg["shared_world"] turn it on."""
         return bool(self.cfg.get("shared_world") or self.cfg.get("shared_household")
-                    or os.environ.get("INZOI_MP_SHARED_WORLD"))
+                    or os.environ.get("INZOI_MP_SHARED_WORLD") or self.world_meta)   # (the host shares one: join it)
 
     def check_world(self):
         meta, mine = self.world_meta, self.local_world()
@@ -1324,6 +1327,9 @@ class Companion(couple.Couple, servers.Servers):
             self.auto_loaded = False                       # load it at the main menu
             log.info("the shared world (version %d, saved by %s) is your multiplayer save now",
                      meta["version"], meta.get("by"))
+            if self.world != "out" and not self.mp_active() and not self.save_busy:
+                self.save_session["mp"] = False            # in another save: offer to switch to the shared world
+                self.show_paused()
         except (OSError, ConnectionError, ValueError, asyncio.TimeoutError) as e:
             log.warning("downloading the shared world failed: %s", e)
         finally:

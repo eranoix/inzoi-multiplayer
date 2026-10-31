@@ -925,7 +925,12 @@
                 (d.via_lan ? ' - ' + t('local network') : '');
         }
         if (c.id === 'versions_match' && d.mine) {
-            return t('You: {mine} - partner: {theirs}', { mine: d.mine, theirs: d.theirs || '?' });
+            var theirs = d.theirs, parts = [];         // {name: version} ("server" for the server's)
+            if (theirs && typeof theirs === 'object') {
+                for (var k in theirs) { if (theirs.hasOwnProperty(k)) { parts.push((k === 'server' ? t('server') : k) + ' ' + theirs[k]); } }
+                theirs = parts.join(', ');
+            }
+            return t('You: {mine} - partner: {theirs}', { mine: d.mine, theirs: theirs || '?' });
         }
         if (c.id === 'tailscale' && d.ip) { return d.ip; }
         return '';
@@ -946,7 +951,7 @@
             var bad = 0;
             (r.checks || []).forEach(function (c) {
                 var row = el('div', 'check' + (c.ok === true ? ' ok' : (c.ok === false ? ' bad' : '')));
-                row.appendChild(el('span', 'mark', c.ok === true ? '✓' : (c.ok === false ? '✘' : '—')));
+                row.appendChild(el('span', 'mark', c.ok === true ? '✓' : (c.ok === false ? '!' : '-')));
                 var tt = el('div', 't', t(CHECKS[c.id] || c.id));
                 var extra = checkExtra(c);
                 if (extra) { tt.appendChild(el('div', 's', extra)); }

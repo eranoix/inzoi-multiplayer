@@ -41,6 +41,7 @@
         'Trying again...': 'Tentando de novo...',
         'You are {name} on {server}': 'Você é {name} em {server}',
         'this PC': 'este PC',
+        'server': 'servidor',
         'getting the game ready': 'preparando o jogo',
         "The program isn't open": 'O programa não está aberto',
         // people

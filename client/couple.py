@@ -43,7 +43,7 @@ BAG_ID = re.compile(r"^(anim:)?[A-Za-z0-9_]{1,80}$")
 # Unverified guesses (no list of the game's interaction ids is available offline): replaced by what's learned.
 GUESS_BAGS = {"hug": "Social_Hug", "kiss": "Social_Kiss", "dance": "Dance_Solo", "wave": "Social_Wave"}
 LEARN = {"hug": re.compile(r"hug", re.I), "kiss": re.compile(r"kiss", re.I), "dance": re.compile(r"dance", re.I),
-         "wave": re.compile(r"wave", re.I)}
+         "wave": re.compile(r"(?<!micro)wave", re.I)}             # (not Use_Microwave)
 VERBS = {"hug": "hug you", "kiss": "kiss you", "dance": "dance with you", "wave": "wave at you",
          "invite": "invite you to their home"}
 
@@ -55,6 +55,9 @@ class Couple:
         self.undo_state = None                 # the last "undo": {state, source, message, at}
         self.upload_wait = None                # when an upload last waited for the game to finish writing the save
         self.last_backup = None                # {name, reason, at} of the newest backup made in this run
+        bags = self.cfg.get("couple_bags") or {}
+        for action in [a for a, bag in bags.items() if a in LEARN and not LEARN[a].search(bag)]:
+            del bags[action]                   # learned wrong by an older version (a microwave as "wave")
 
     # ------------------------------------------------------------------ helpers
     def partner(self, key=None):
