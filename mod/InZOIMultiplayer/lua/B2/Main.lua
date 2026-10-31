@@ -379,13 +379,14 @@ end
 local REAIM, SPRINT, TELEPORT, MIN_GAP = 150, 600, 600, 0.15
 -- Where they are, exactly: closer than ARRIVED cm is there; a walk that stopped short (refused, a door, someone's
 -- home) is finished with a teleport after SNAP_AFTER s, a walk going nowhere after STUCK_FOR s.
-local ARRIVED, SNAP_AFTER, STUCK_FOR = 70, 1.2, 1.5
+local ARRIVED, SNAP_AFTER, STUCK_FOR = 70, 1.2, 2.2
 -- Realtime: the player's own position goes out from here ME_EVERY s (read straight from the engine); a puppet aims
 -- where its player will be LATENCY s from now (their speed, from the sender's clock on each point) and walks at their
 -- speed; anything it starts on its own while its player is online is cancelled (only what they do is done).
 local ME_EVERY, POLL_EVERY, LATENCY, OWN_CHECK = 0.1, 0.03, 0.35, 0.4
 local ACT_LEAVE = 600       -- while copying an action, only a remote player this far from the puppet means "they left"
 local ACT_MOVED = 120       -- ...or one who walked this far from where they started it
+local ACT_WITH = 300        -- (unless the puppet does it too and is still this close: the action itself walks them)
 local FACE_GAP, FACE_EVERY = 25, 1.5
 -- Smoothing (no new engine calls: only where the puppet aims and when it redirects):
 --  * the trail arrives late (~0.5-1 s), so while the player is walking aim LEAD cm past their newest point, along the
@@ -395,7 +396,7 @@ local FACE_GAP, FACE_EVERY = 25, 1.5
 --    REAIM_STRAIGHT away (a turn still re-aims at REAIM);
 --  * trail points carry no sender timestamps (t/at are when they reached us, in batches), so walk vs sprint stays
 --    chosen by distance (SPRINT).
-local LEAD, LEAD_BACK, MOVING_FOR, REAIM_STRAIGHT, STRAIGHT_COS = 150, 150, 0.6, 300, 0.9
+local LEAD, LEAD_BACK, MOVING_FOR, REAIM_STRAIGHT, STRAIGHT_COS = 200, 150, 0.6, 450, 0.85
 
 -- How fast its player moves (cm/s), from the sender's times on the last points (0 when standing or unknown).
 local function remote_speed(p)
@@ -431,7 +432,7 @@ local function lead_point(p, pick, me)
     local dx, dy = pick.x - back.x, pick.y - back.y
     local len = math.sqrt(dx * dx + dy * dy)
     if len < 50 then return pick end                                          -- too little movement to trust a direction
-    local ahead = math.max(LEAD, math.min(400, remote_speed(p) * LATENCY + 60))
+    local ahead = math.max(LEAD, math.min(450, remote_speed(p) * (LATENCY + 0.35) + 80))
     local k = ahead / len
     return { x = pick.x + dx * k, y = pick.y + dy * k, z = pick.z }
 end
@@ -490,7 +491,10 @@ local function drive(key, p, dt)
         -- somewhere else.
         local moved = p.act.x and dist2(pick.x, pick.y, p.act.x, p.act.y) > ACT_MOVED
         if not moved and far < ACT_LEAVE then return end
-        if moved and current_bag(c) == p.act.bag then clear_all(p.id) end
+        local doing = current_bag(c) == p.act.bag
+        -- (an action walks its Zoi to the fridge, the sofa...: doing it too and still close, it carries on)
+        if moved and doing and far < ACT_WITH then return end
+        if doing then clear_all(p.id) end
         p.act, p.actQueued = nil, nil
     end
     if far > TELEPORT then
