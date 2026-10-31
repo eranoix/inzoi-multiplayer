@@ -47,7 +47,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.31"
+VERSION = "0.9.32"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -748,7 +748,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
         sig = json.dumps(act, sort_keys=True) if act else None
         if sig != r.act_sig:
             r.act_sig, r.anim = sig, None
-            r.act_tries, r.act_sent_at = 0, time.time()
+            r.act_tries, r.act_sent_at, r.act_changed_at, r.act_snapped = 0, time.time(), time.time(), False
             if act is None:
                 self.mail.op("act_stop", key=r.pid)
             elif not act.get("npc"):
@@ -783,7 +783,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
                 op["anim"] = st["anim"]
         return op
 
-    def reconcile_act(self, r: Remote, shown: str | None):
+    def reconcile_act(self, r: Remote, shown: str | None, err: float | None = None):
         """The partner does X, their Zoi here doesn't: send X again (an op can expire unseen while the game is paused
         or the controller restarts), every ACT_RETRY s, at most ACT_TRIES times per action."""
         st = r.state or {}
@@ -793,15 +793,25 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
             return
         if shown and (shown == want or shown.startswith(want)):
             return
-        if shown and shown.startswith(("ClickMove", "Move")) and time.time() - r.__dict__.get("act_sent_at", 0) < 8:
-            return                               # (walking there)
         tries = r.__dict__.get("act_tries", 0)
-        if tries >= 5 or time.time() - r.__dict__.get("act_sent_at", 0) < 4:
+        now = time.time()
+        # Their action runs and the puppet is still walking there (or stuck): snap it to their exact spot first, so the
+        # action starts on the spot at once (SNAP_AFTER s after it started over there, SNAP_CM away).
+        snap = (err is not None and err > 80 and now - r.__dict__.get("act_changed_at", now) > 1.0
+                and not r.__dict__.get("act_snapped") and all(isinstance(st.get(k), (int, float)) for k in ("x", "y", "z")))
+        if not snap and shown and shown.startswith(("ClickMove", "Move")) and now - r.__dict__.get("act_sent_at", 0) < 8:
+            return                               # (walking there, and close)
+        if not snap and (tries >= 5 or now - r.__dict__.get("act_sent_at", 0) < 4):
             return
         op = self.act_op(r, st)
         if not op:
             return
-        r.act_tries, r.act_sent_at = tries + 1, time.time()
+        if snap:
+            r.act_snapped = True
+            self.mail.op("snap", key=r.pid, x=st["x"], y=st["y"], z=st["z"], yaw=st.get("yaw"), bag=want)
+            self.tele.rec("note", text=f"{r.name}: snap to their spot for {want} ({err / 100:.1f} m away, their Zoi "
+                                       f"here: {shown})")
+        r.act_tries, r.act_sent_at = tries + 1, now
         self.mail.op("act", key=r.pid, **op)
         self.tele.rec("note", text=f"{r.name}: act {want} sent again (try {tries + 1}; their Zoi here: {shown})")
 
@@ -1298,7 +1308,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
             if all(isinstance(st.get(k), (int, float)) for k in ("x", "y")):
                 err = round(((s["x"] - st["x"]) ** 2 + (s["y"] - st["y"]) ** 2) ** 0.5)
             if r.pid in self.puppet_ids and not r.hidden:
-                self.reconcile_act(r, a.get("bag"))
+                self.reconcile_act(r, a.get("bag"), err)
             self.tele.rec("pup", p=r.name, e=e, x=s["x"], y=s["y"], z=s["z"], yaw=s["yaw"], site=s["site"],
                           bag=a.get("bag"), action=a.get("action"), target=a.get("target"),
                           anim=(a.get("anim") or {}).get("id"), motions=[m["id"] for m in a.get("motions") or []],

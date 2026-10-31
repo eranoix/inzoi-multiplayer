@@ -771,6 +771,19 @@ local OPS = {
         p.actQueued = { bag = op.bag, target = target, t = 0, at = op.x and { x = op.x, y = op.y } or nil }
         return string.format("%s does %s%s", op.key, op.bag, target and (" on " .. target) or "")
     end,
+    -- Their action has started and the puppet is still on its way: put it exactly where and how they are (their
+    -- action is queued again right after, so it starts on the spot instead of after a walk).
+    snap = function(op)
+        local p = PUPPETS[op.key]
+        if not p then return nil end
+        local c = char(p.id)
+        stop_direct(c)
+        pcall(clear_all, p.id)
+        p.act, p.actQueued, p.pending = nil, nil, nil
+        c:Teleport(UE.FVector(op.x, op.y, op.z), UE.FRotator(0, op.yaw or c:GetRotation().Yaw, 0), false, false, false,
+            false, true, inzoi.EB1LoadingContext.None, inzoi.EB1TeleportReason.None)
+        return string.format("%s snapped to where they are for %s", op.key, tostring(op.bag))
+    end,
     -- A body posture plays on their Zoi (the companion mirrors the montages): hold it at their exact spot and facing.
     pose = function(op)
         local p = PUPPETS[op.key]
