@@ -355,7 +355,7 @@
 
     function renderExact(s) {                       // their exact house waits for the game to reopen
         var p = s && s.pending_lot, box = $('h-exact'), btn = $('h-exact-now');
-        box.hidden = btn.hidden = !p;
+        box.style.display = btn.style.display = p ? '' : 'none';      // (the game's browser ignores [hidden])
         if (p) { setText(box, t("{name}'s exact house (paint, floors, roof, everything) comes in when you reopen the game.", { name: p.from || partnerName() })); }
     }
 
@@ -670,6 +670,8 @@
     var REQ_LIFE = 90;                              // seconds a request stays open (the companion's limit)
     var ERRORS = {
         no_partner: N("Your partner isn't online right now."),
+        no_pending: N("No house from your partner waiting to be applied."),
+        restart: N("Couldn't save and restart the game."),
         not_in_game: N('Go into the game first (load your save).'),
         not_mp_save: N('Load your multiplayer save first.'),
         no_position: N("We don't know where your partner is yet. Try again in a few seconds."),

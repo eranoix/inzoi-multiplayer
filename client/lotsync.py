@@ -479,12 +479,19 @@ def restart_game(call):
     """Save, go to the main menu, close the game and open it again (the program loads the multiplayer save)."""
     s = Screens(call)
     s.leave_build_mode()
-    try:
-        call("game.goto_lobby", save=True)
-        s.wait(lambda: call("game.get_state").get("is_lobby"), 90, 1.0)
-    except Exception as e:                               # noqa: BLE001
-        log.warning("going to the main menu: %s", e)
-        raise LotError("couldn't save and leave the world") from None
+    end, last = time.time() + 90, None
+    while True:                                          # ("Cannot save right now" while loading, mid-action...)
+        try:
+            call("game.goto_lobby", save=True)
+            break
+        except Exception as e:                           # noqa: BLE001
+            last = e
+            if time.time() > end:
+                log.warning("going to the main menu: %s", last)
+                raise LotError("couldn't save and leave the world") from None
+            time.sleep(3)
+    if not s.wait(lambda: call("game.get_state").get("is_lobby"), 120, 1.0):
+        raise LotError("couldn't save and leave the world")
     time.sleep(2)
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     for name in ("inZOI-Win64-Shipping.exe", "inZOI.exe"):

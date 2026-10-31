@@ -27,6 +27,8 @@
         'Settings': 'Ajustes',
         '{n} new': '{n} nova(s)',
         'Apply now (restarts the game)': 'Aplicar agora (reinicia o jogo)',
+        "No house from your partner waiting to be applied.": 'Nenhuma casa do seu par esperando para aplicar.',
+        "Couldn't save and restart the game.": 'Não foi possível salvar e reiniciar o jogo.',
         'Saving and restarting the game...': 'Salvando e reiniciando o jogo...',
         "{name}'s exact house (paint, floors, roof, everything) comes in when you reopen the game.": 'A casa exata de {name} (pintura, pisos, telhado, tudo) entra quando você reabrir o jogo.',
         'no house waiting to be applied': 'nenhuma casa esperando para aplicar',
