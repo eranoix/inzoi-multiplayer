@@ -135,6 +135,16 @@ def pending(current: str) -> Path | None:
     return best[1] if best and signed_by_us(best[1]) else None
 
 
+def hide(path: Path):
+    """coop-casal: the exe can live on the Desktop ("inZOI Co-op.exe"): the copies kept next to it are hidden, so
+    only the program shows there."""
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x2)          # FILE_ATTRIBUTE_HIDDEN
+    except (OSError, AttributeError):
+        pass
+
+
 def apply(new_exe: Path, args: list[str]):
     """Put the new exe where this one is and start it (in a window of its own). The caller exits right after."""
     exe = Path(sys.executable)
@@ -149,6 +159,7 @@ def apply(new_exe: Path, args: list[str]):
     except OSError:
         old.rename(exe)                                  # put things back as they were
         raise
+    hide(old)
     # A one-file exe started from another one would otherwise inherit its unpacked files (gone once this one exits).
     # --restarted: it waits for this one to close.
     env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
@@ -166,6 +177,9 @@ def clean_old():
                 exe.with_name(exe.stem + tail).unlink()
             except OSError:
                 pass
+        prev = exe.with_name(exe.stem + ".prev.exe")     # (left visible by an update from 0.9.1 or older)
+        if prev.exists():
+            hide(prev)
     for f in DIR.glob("*.part") if DIR.exists() else []:
         f.unlink(missing_ok=True)
     if frozen():
@@ -241,6 +255,7 @@ def startup_check(current: str, args: list[str]) -> bool:
     try:
         bad.unlink(missing_ok=True)
         exe.rename(bad)
+        hide(bad)
         try:
             os.replace(prev, exe)
         except OSError:
