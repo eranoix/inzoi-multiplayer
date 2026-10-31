@@ -46,7 +46,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.16"
+VERSION = "0.9.17"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -1435,7 +1435,24 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
         mp = self.cfg["mp_save"]
         await self.g(self.backup_save, mp.get("folder"), "before-load")     # (never fails: see couple.py)
         self.loading_save, self.auto_loaded = mp["folder"], True
-        await self.g(self.game.call, "game.load", folder=mp["folder"])
+        newest = await self.g(self.newest_slot_file, mp["folder"])
+        log.info("loading %s: its newest slot %s", mp["folder"], newest or "(the game's choice)")
+        if newest:
+            await self.g(self.game.call, "game.load", folder=mp["folder"], file=newest)
+        else:
+            await self.g(self.game.call, "game.load", folder=mp["folder"])
+
+    def newest_slot_file(self, folder: str) -> str | None:
+        """The newest slot of a save folder (an autosave is often newer than the main slot, and game.load without a
+        file opens the main slot): the file name to load, or None if the game doesn't list it."""
+        try:
+            slots = [s for s in self.game.saves(limit=200, autosave=True, refresh=True)
+                     if s.get("folder") == folder and s.get("file") and not s.get("is_broken")]
+        except (GameError, OSError, ValueError):
+            slots = []
+        if slots:
+            return max(slots, key=lambda s: str(s.get("saved_time") or ""))["file"]
+        return None
 
     async def at_main_menu(self):
         """At the game's main menu: load the multiplayer save (once per run)."""

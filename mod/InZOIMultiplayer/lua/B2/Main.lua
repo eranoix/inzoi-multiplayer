@@ -738,6 +738,13 @@ local OPS = {
         return string.format("moved %d to %.0f,%.0f", me, op.x, op.y)
     end,
     -- debugging
+    probe_move = function(op)                           -- {entity, x, y, secs, speed?}: "hold a direction key" for it
+        local c = char(op.entity)
+        local l = c:GetLocation()
+        S.probe = { id = op.entity, x = op.x, y = op.y, untilT = S.clock + (op.secs or 2), speed = op.speed,
+                    fx = l.X, fy = l.Y }
+        return string.format("probe_move %d from %.0f,%.0f", op.entity, l.X, l.Y)
+    end,
     walk = function(op) return "walk " .. tostring(order_walk(char(op.entity), op.x, op.y, op.z, op.bag)) end,
     freeze = function(op) freeze(op.entity); return "froze " .. op.entity end,
     reset = function(op) return "reset " .. tostring(select(2, cli("movement.reset_zoi entity_id=" .. op.entity .. " teleport=false"))) end,
@@ -877,6 +884,25 @@ end
 function M.on_tick(self, dt)
     dt = dt or 0
     S.clock = S.clock + dt
+    if S.probe then
+        local pr = S.probe
+        local okP, errP = pcall(function()
+            local c = char(pr.id)
+            local mc = c:GetMovementComponent()
+            if S.clock < pr.untilT then
+                mc.InputVector = UE.FVector(pr.x, pr.y, 0)
+                if pr.speed then mc.WalkSpeed = pr.speed end
+            else
+                mc.InputVector = UE.FVector(0, 0, 0)
+                local l = c:GetLocation()
+                local v = mc.Velocity
+                log(string.format("probe_move %d done: moved %.0f cm (to %.0f,%.0f), walk speed %s", pr.id,
+                    dist2(pr.fx, pr.fy, l.X, l.Y), l.X, l.Y, tostring(mc.WalkSpeed)))
+                S.probe = nil
+            end
+        end)
+        if not okP then log("probe_move ERR " .. tostring(errP)); S.probe = nil end
+    end
     S.meT = (S.meT or 0) + dt
     if S.me and S.meT >= ME_EVERY then
         S.meT = 0
