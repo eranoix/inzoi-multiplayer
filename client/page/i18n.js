@@ -145,6 +145,9 @@
     'This PC has no address friends can reach yet: install Tailscale and share this PC with them, or forward port {port} in your router.':
       'Este PC ainda não tem um endereço que seu par consiga alcançar: instale o Tailscale e compartilhe este PC com ele, ou libere a porta {port} no roteador.',
     'and the password you picked.': 'e a senha que você escolheu.',
+    'and the password: {pw}': 'e a senha: {pw}',
+    'friends anywhere, over Tailscale (share this PC with them first)': 'de qualquer lugar, pelo Tailscale (mesma conta do Tailscale, ou compartilhe este PC com seu par)',
+    'friends in your home (same Wi-Fi or network)': 'em casa (mesmo Wi-Fi ou rede)',
     'Public listing': 'Listagem pública',
     'Public: telling the server lists about it...': 'Público: avisando as listas de servidores...',
     'Listed': 'Listado',

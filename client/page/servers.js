@@ -404,7 +404,7 @@
     if (!ho.addresses.length) box.appendChild(h('div', { class: 'note' }, t('This PC has no address friends can reach yet: install Tailscale and share this PC with them, or forward port {port} in your router.', { port: ho.port })));
     ho.addresses.forEach((a) => box.appendChild(h('div', { class: 'addrrow' }, h('div', { class: 'a' }, a.address),
       h('div', { class: 'how' }, I.tr(a.how)))));
-    if (ho.settings.password) box.appendChild(h('div', { class: 'note' }, t('and the password you picked.')));
+    if (ho.settings.password) box.appendChild(h('div', { class: 'note' }, t('and the password: {pw}', { pw: ho.settings.password })));
     if (ho.settings.public) {
       box.appendChild(h('h3', {}, t('Public listing')));
       const st = Object.entries(ho.public_status || {});
