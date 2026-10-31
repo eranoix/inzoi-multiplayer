@@ -637,6 +637,10 @@ class Companion(couple.Couple, servers.Servers):
         r = self.remotes.get(p["id"]) or Remote(p["id"], p["name"])
         r.name = p["name"]
         r.version = p.get("version") or getattr(r, "version", None)
+        if not r.version and p["id"] not in self.remotes:          # before 0.8 no version was sent at all
+            log.warning("%s runs an old inZOI Multiplayer (0.7 or earlier): they won't show up in your game", r.name)
+            self.notice = f"{r.name} is using an old version of inZOI Multiplayer. Send them the new one."
+            self.notice_code = "version_differs"
         if p["id"] in self.puppet_ids and p["id"] not in self.despawning:
             r.spawned = True                 # the controller already has their puppet
         self.remotes[p["id"]] = r
