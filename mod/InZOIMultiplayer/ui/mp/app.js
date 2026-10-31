@@ -353,6 +353,12 @@
         });
     });
 
+    function renderExact(s) {                       // their exact house waits for the game to reopen
+        var p = s && s.pending_lot, box = $('h-exact'), btn = $('h-exact-now');
+        box.hidden = btn.hidden = !p;
+        if (p) { setText(box, t("{name}'s exact house (paint, floors, roof, everything) comes in when you reopen the game.", { name: p.from || partnerName() })); }
+    }
+
     function render(s) {
         renderConn(s);
         renderNotice(s);
@@ -367,6 +373,7 @@
         renderCard(s);
         renderSent(s);
         renderHousehold(s);
+        renderExact(s);
         renderClock(s);
         renderChat(s);
         renderTitle(s);
@@ -443,6 +450,14 @@
     $('h-sync').addEventListener('click', function () {
         post('/partner/house', {}, function (r) {
             flash(!r || r.error ? coupleErr(r) : t("Asked for {name}'s house: what's different shows up in a moment.", { name: partnerName() }), 5000);
+        });
+    });
+    $('h-exact-now').addEventListener('click', function () {
+        off($('h-exact-now'), true);
+        flash(t('Saving and restarting the game...'), 8000);
+        post('/partner/house/exact-now', {}, function (r) {
+            off($('h-exact-now'), false);
+            if (!r || r.error) { flash(coupleErr(r), 6000); }
         });
     });
     $('s-update').addEventListener('click', function () {

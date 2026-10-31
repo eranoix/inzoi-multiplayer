@@ -106,6 +106,8 @@ def player(name, port, game):
     comp.game.call = game.call
     comp.save_cfg = lambda: None
     comp.lot_file = TMP / f"{name}-lot.json"
+    comp.preset_file = TMP / f"{name}-preset.json"
+    comp.cfg["exact_house"] = False
     return comp
 
 
@@ -240,6 +242,48 @@ async def main():
     assert tools.index("building.construct_wall") < tools.index("building.place_object")
     assert any(o["table_id"] == "Door01" for o in gb.objects)
     print("walls: built and knocked down like hers, storey height set, doors placed after the walls: ok")
+
+    # the exact house (the game's property): Ana's leaving build mode saves it and sends it; Ben says yes to her
+    # house, it's written as a property, and applied when his game enters the world again; the same house twice
+    # isn't asked about
+    import lotsync
+    lotsync.MYSITES = TMP / "MySites"
+    saved, applied = [], []
+
+    def fake_save(call, site_id, title):
+        saved.append(site_id)
+        return {"hash": "h1", "files": {"meta.json": __import__("base64").b64encode(b'{"Title":"x"}').decode(),
+                                        "site.dat": __import__("base64").b64encode(b"DAT").decode()}}
+    lotsync.save_lot = fake_save
+    lotsync.apply_by_title = lambda call, site_id, title: applied.append(title) or True
+    ana.cfg["exact_house"] = True
+    ben.cfg["always_yes"] = []
+    for q in [q for q in list(ben.requests.values()) if q.get("action") == "house"]:
+        ben.requests.pop(q["id"], None)
+    ga.phase = "ready"
+    await ana.house_tick()
+    ana.build_site["at"] = 0
+    ga.objects.append(obj(30, "Lamp77", 1, 1))
+    await ana.house_tick()
+    ga.phase = "none"
+    await ana.house_tick()
+    assert await until(lambda: saved and ana.cfg.get("lot_hash") == "h1")
+    assert await until(lambda: any(q.get("action") == "house" for q in ben.requests.values()))
+    assert await until(lambda: any(q["house"].get("lot") for q in ben.requests.values() if q.get("action") == "house")
+                       or ben.cfg.get("pending_lot"))
+    q = next(q for q in ben.requests.values() if q.get("action") == "house")
+    await ben.couple_respond(q["id"], True)
+    p = ben.cfg.get("pending_lot")
+    assert p and p["hash"] == "h1" and (lotsync.MYSITES / p["folder"] / "site.dat").read_bytes() == b"DAT", p
+    assert any("comes in when you reopen" in c["text"] for c in ben.chat)
+    ben.world, ben.in_build_mode = "play", False
+    await ben.maybe_apply_pending()
+    assert applied == [p["title"]] and not ben.cfg.get("pending_lot") and ben.cfg["lot_hash"] == "h1"
+    assert not (lotsync.MYSITES / p["folder"]).exists()
+    ben.on_lot(ana.me_id, {"hash": "h1", "files": {"site.dat": "", "meta.json": ""}, "site": 1038})
+    await asyncio.sleep(0.3)
+    assert not ben.cfg.get("pending_lot")
+    print("exact house: saved by the builder, kept as a property on yes, applied on reopen, same house ignored: ok")
     for t in tasks:
         t.cancel()
     print("house sync tests passed")

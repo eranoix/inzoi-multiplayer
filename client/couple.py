@@ -211,6 +211,8 @@ class Couple:
         self.prune_requests()
         return {"requests": [{k: q.get(k) for k in ("id", "from", "from_id", "action", "at", "bag", "label")}
                              for q in sorted(self.requests.values(), key=lambda q: q["at"])],
+                "pending_lot": {k: (self.cfg.get("pending_lot") or {}).get(k) for k in ("from", "at")}
+                if self.cfg.get("pending_lot") else None,
                 "couple": {"sent": [{k: s.get(k) for k in ("id", "to", "to_id", "action", "name", "at", "state", "message")}
                                     for s in sorted(self.sent.values(), key=lambda s: s["at"])][-5:],
                            "bags": {a: {"id": self.couple_bag(a),
@@ -316,6 +318,8 @@ class Couple:
             asyncio.get_running_loop().create_task(self.on_house_request(frm))
         elif data.get("type") == "house":             # (housesync.py: the partner changed our home)
             self.on_house(frm, data)
+        elif data.get("type") == "lot":               # (housesync.py: their exact house, the game's property)
+            self.on_lot(frm, data)
         elif data.get("type") == "update_request":       # (the partner: "get the newest version")
             log.info("%s asked this program to update", self.remotes[frm].name if frm in self.remotes else frm)
             asyncio.get_running_loop().create_task(self.update_now())
@@ -328,6 +332,8 @@ class Couple:
             if not s or s["to_id"] != frm or s["state"] != "waiting":
                 return
             s["state"] = "accepted" if data.get("accept") else "declined"
+            if data.get("home_site"):
+                s["partner_home"] = data["home_site"]             # (the family head's home, when that's them)
             self.system_line(f"{s['to']} {'said yes' if data.get('accept') else 'said no'} "
                              f"({ACTION_NAMES.get(s['action'], s['action'])})")
             if data.get("accept"):
@@ -383,6 +389,7 @@ class Couple:
         if q.get("local") and q.get("action") == "house":
             if not accept:
                 return {"ok": True, "result": {"state": "declined"}}
+            self.house_yes[q["from_id"]] = time.time()
             return {"ok": True, "result": await self.apply_house(q)}
         if q.get("local"):                               # their Zoi already did it in their game: show it here or not
             if accept:
@@ -390,8 +397,10 @@ class Couple:
             return {"ok": True, "result": {"state": "done" if accept else "declined"}}
         if not (self.writer and self.me_id):
             return {"error": "not connected to the server", "code": "not_connected"}
-        await self.send({"t": "event", "kind": "couple", "to": q["from_id"],
-                         "data": {"type": "reply", "id": q["id"], "accept": bool(accept)}})
+        reply = {"type": "reply", "id": q["id"], "accept": bool(accept)}
+        if accept and q["action"] in FAMILY:
+            reply["home_site"] = await self.g(self.my_home_site)
+        await self.send({"t": "event", "kind": "couple", "to": q["from_id"], "data": reply})
         out = {"ok": True}
         if accept:
             out["result"] = res = await self.couple_perform(q, initiator=False)
@@ -426,8 +435,16 @@ class Couple:
             log.info("interaction with %s: %s (they said yes)", r.name if r else pid, req["bag"])
             return self.mark(req, "started")
         if action in FAMILY:                             # both saves: each PC makes it so in its own
+            # The host's family is the family, whoever asked: on the host's PC the partner's Zoi joins the host's
+            # household; on the other PC that player's own Zoi joins the household living in the host's home.
+            if self.leader and self.leader == self.me_id:
+                home = None
+            elif self.leader and self.leader == pid:
+                home = req.get("home_site") if not initiator else req.get("partner_home")
+            else:
+                home = None if initiator else req.get("home_site")          # (no host among us: whoever asked)
             try:
-                res = await self.g(self.family_apply, action, pid, None if initiator else req.get("home_site"))
+                res = await self.g(self.family_apply, action, pid, home)
             except Exception as e:                       # noqa: BLE001 - the game refused: say so in the panel
                 log.warning("family %s failed: %s", action, e)
                 res = {"error": str(e)}
@@ -927,12 +944,15 @@ class Couple:
                              "data": {"type": "update_request", "id": secrets.token_hex(6)}})
             return {"ok": True}
 
+        async def house_exact_now(body):
+            return await self.apply_lot_now()
+
         async def partner_house(body):
             r = self.partner(body.get("key"))
             if not r:
                 return {"error": "your partner isn't online", "code": "no_partner"}
             return await self.request_house(r)
 
-        return {"/partner/house": partner_house, "/partner/update": partner_update, "/partner/log": partner_log, "/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
+        return {"/partner/house/exact-now": house_exact_now, "/partner/house": partner_house, "/partner/update": partner_update, "/partner/log": partner_log, "/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
                 "/partner/goto": goto, "/partner/invite": invite, "/partner/action": action,
                 "/partner/respond": respond, "/world/undo": undo, "/world/backups": backups}

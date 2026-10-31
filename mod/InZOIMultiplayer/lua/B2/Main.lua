@@ -818,6 +818,16 @@ local OPS = {
         return string.format("moved %d to %.0f,%.0f", me, op.x, op.y)
     end,
     -- debugging
+    eval = function(op)                                 -- {code}: runs a chunk (em, char, cli in scope), logs what it returns
+        local f, err = _G.load(op.code, "eval", "t", setmetatable({ em = em, char = char, cli = cli, eid = eid,
+                                                                     log = log }, { __index = _G }))
+        if not f then error(err) end
+        return "eval: " .. tostring(f())
+    end,
+    eval_b1 = function(op)                              -- {code}: the same, run by the B1 script (out/eval.cfg)
+        inzoi.message.send_to_client(S.me, "mp_eval", op.code)
+        return nil
+    end,
     probe_move = function(op)                           -- {entity, x, y, secs, speed?}: "hold a direction key" for it
         local c = char(op.entity)
         local l = c:GetLocation()

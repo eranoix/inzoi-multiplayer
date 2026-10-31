@@ -23,6 +23,12 @@ save. This keeps the two in step: the walls (segments per floor, and each storey
   reading is kept (home-lot.json: from build mode, after applying, and every few minutes while my Zoi is at home), so
   a partner who asks while my Zoi is out still gets it, and my side compares with it when I'm out. Each side asks
   again when its Zoi gets home.
+- The exact house (lotsync.py): what the game's commands can't read (paint, materials, floors, roofs, stairs, object
+  customization) goes as the game's own saved property. After leaving build mode on the home lot, the lot is saved as
+  a property (build mode reopens for a few seconds) and sent: {"type":"lot","site","site_id","hash","files"}. The
+  partner, once they said yes to that house, writes it as a property and the game applies it the next time it enters
+  the world (the game reads properties only when it starts), or right away with "apply now" (saves and restarts the
+  game). The same house hashes the same in both saves, so an unchanged one isn't asked about again.
 """
 import asyncio
 import json
@@ -32,6 +38,8 @@ import os
 import secrets
 import time
 from pathlib import Path
+
+import lotsync
 
 log = logging.getLogger("housesync")
 
@@ -44,6 +52,8 @@ WALL_STEP = 12.5          # cm between the points checked along a wall
 LOT_FILE = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp" / "home-lot.json"
 REFRESH_EVERY = 300       # s between readings of the home while my Zoi is there (things bought in play mode)
 ASK_AGAIN = 120           # s at least between asking the partner again on getting home
+PRESET_FILE = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp" / "home-lot-preset.json"
+LOT_ACCEPT_FOR = 600      # s after saying yes to a partner's house in which their exact house is taken without asking
 
 
 def object_key(o: dict) -> dict:
@@ -134,6 +144,15 @@ class HouseSync:
         self.lot_file = LOT_FILE
         self.was_home = None          # my Zoi was on the home lot at the last tick
         self.asked_at = 0.0
+        self.preset_file = PRESET_FILE
+        self.lot_busy = False         # saving/applying the exact house (build mode opens and closes by itself)
+        self.lot_tried = False        # the pending exact house was tried in this world session
+        self.house_yes = {}           # partner pid -> when I last said yes to their house
+        try:
+            pending = (self.cfg.get("pending_lot") or {}).get("folder")
+            lotsync.cleanup(keep={pending} if pending else ())
+        except Exception as e:                           # noqa: BLE001
+            log.debug("cleaning old properties: %s", e)
 
     def saved_lot(self, site) -> dict | None:
         """The last reading of the home (if it's lot `site`)."""
@@ -206,7 +225,9 @@ class HouseSync:
 
     async def house_tick(self):
         """Called every couple of seconds while in the world: follows build mode on my home lot."""
-        if self.world == "out" or not self.my_entity:
+        if self.world == "out":
+            self.lot_tried = False                       # (a new world session: the game may have restarted)
+        if self.world == "out" or not self.my_entity or self.lot_busy:
             return
         try:
             st = await self.g(self.game.call, "build.get_mode_state") or {}
@@ -230,9 +251,137 @@ class HouseSync:
         if b and not self.applying_house and st.get("phase") in ("none", None):
             self.keep_lot(b)
             await self.send_house(b)
+            if self.cfg.get("exact_house", True):
+                asyncio.get_running_loop().create_task(self.capture_lot(b))
         if not st.get("in_build_mode"):
             self.applying_house = False
             await self.home_tick()
+            await self.maybe_apply_pending()
+
+    # ------------------------------------------------------------------ the exact house (lotsync.py)
+    def saved_preset(self, site=None) -> dict | None:
+        try:
+            p = json.loads(self.preset_file.read_text("utf-8"))
+            return p if site is None or int(p.get("site") or -1) == int(site) else None
+        except (OSError, ValueError, TypeError):
+            return None
+
+    async def capture_lot(self, b: dict):
+        """Save my home as the game's property (build mode reopens for a few seconds) and send it to my partner."""
+        if self.lot_busy or not b.get("site_id"):
+            return
+        self.lot_busy = True
+        try:
+            res = await self.g(lotsync.save_lot, self.game.call, b["site_id"], lotsync.new_title(self.cfg.get("name")
+                                                                                                 or "home"))
+            preset = {"site": b["site"], "site_id": b["site_id"], "hash": res["hash"], "files": res["files"],
+                      "at": time.time()}
+            self.preset_file.parent.mkdir(parents=True, exist_ok=True)
+            self.preset_file.write_text(json.dumps(preset), "utf-8")
+            self.cfg["lot_hash"] = res["hash"]
+            self.save_cfg()
+            log.info("saved the exact house (%s)", res["hash"])
+            await self.send_lot(preset)
+        except lotsync.LotError as e:
+            log.warning("couldn't save the exact house: %s", e)
+        except Exception as e:                           # noqa: BLE001
+            log.warning("saving the exact house failed: %s", e)
+        finally:
+            self.lot_busy = False
+
+    async def send_lot(self, preset: dict):
+        r = self.partner(None) if hasattr(self, "partner") else None
+        if not preset or not r or not (self.writer and self.me_id):
+            return
+        await self.send({"t": "event", "kind": "couple", "to": r.pid,
+                         "data": {"type": "lot", "id": secrets.token_hex(6), "site": preset["site"],
+                                  "site_id": preset["site_id"], "hash": preset["hash"], "files": preset["files"]}})
+        log.info("sent the exact house to %s", r.name)
+
+    def on_lot(self, frm: str, data: dict):
+        """My partner's exact house: the same as mine -> nothing; else kept to apply once I said yes to their house."""
+        r = self.remotes.get(frm)
+        name = r.name if r else "Your partner"
+        if not isinstance(data.get("files"), dict) or not data.get("hash"):
+            return
+        if data["hash"] in (self.cfg.get("lot_hash"), (self.cfg.get("pending_lot") or {}).get("hash")):
+            log.info("%s's exact house is the same as mine", name)
+            return
+        asyncio.get_running_loop().create_task(self.take_lot(frm, name, data))
+
+    async def take_lot(self, frm: str, name: str, data: dict):
+        home = await self.g(self.my_home_site)
+        if not home or int(home) != int(data.get("site") or -1):
+            log.info("%s's exact house is lot %s, mine is %s: ignored", name, data.get("site"), home)
+            return
+        if time.time() - self.house_yes.get(frm, 0) < LOT_ACCEPT_FOR or self.always_yes("house", None):
+            self.stash_lot(name, data)
+            return
+        for q in self.requests.values():                 # (their house popup is still open: it carries this too)
+            if q.get("action") == "house" and q.get("from_id") == frm:
+                q["house"]["lot"] = data
+                return
+        rid = secrets.token_hex(6)
+        self.requests[rid] = {"id": rid, "from": name, "from_id": frm, "action": "house", "at": time.time(),
+                              "local": True, "label": "finishes",
+                              "house": {"site": data.get("site"), "site_id": data.get("site_id"), "objects": None,
+                                        "walls": [], "heights": {}, "lot": data}}
+        self.system_line(f"{name} changed the house: finishes")
+
+    def stash_lot(self, name: str, data: dict):
+        """Write their exact house as a property; it's applied when the game next enters the world."""
+        old = self.cfg.get("pending_lot") or {}
+        title = f"{lotsync.TITLE_PREFIX} {name} {data['hash'][:6]}"
+        try:
+            folder = lotsync.write_pending(data["files"], title)
+        except Exception as e:                           # noqa: BLE001
+            log.warning("couldn't keep %s's exact house: %s", name, e)
+            return
+        if old.get("folder") and old["folder"] != folder:
+            lotsync.cleanup(keep={folder})
+        self.cfg["pending_lot"] = {"title": title, "folder": folder, "site_id": data.get("site_id"),
+                                   "hash": data["hash"], "from": name, "at": time.time()}
+        self.save_cfg()
+        self.lot_tried = False
+        log.info("kept %s's exact house: applied when the game reopens", name)
+        self.system_line(f"{name}'s exact house (paint, floors, roof) comes in when you reopen the game")
+
+    async def maybe_apply_pending(self):
+        p = self.cfg.get("pending_lot")
+        if not p or self.lot_tried or self.lot_busy or self.world != "play" or self.in_build_mode:
+            return
+        self.lot_tried = True
+        self.lot_busy = True
+        try:
+            await self.g(lotsync.apply_by_title, self.game.call, p["site_id"], p["title"])
+            self.cfg["lot_hash"] = p["hash"]
+            self.cfg.pop("pending_lot", None)
+            self.save_cfg()
+            lotsync.cleanup()
+            log.info("applied %s's exact house", p["from"])
+            self.system_line(f"House now exactly like {p['from']}'s")
+        except lotsync.NotListed:
+            log.info("%s's exact house was kept while the game ran: it comes in after the game restarts", p["from"])
+        except Exception as e:                           # noqa: BLE001
+            log.warning("applying the exact house failed: %s", e)
+        finally:
+            self.lot_busy = False
+
+    async def apply_lot_now(self) -> dict:
+        """Panel: save, restart the game; the pending exact house is applied when the world loads again."""
+        if not self.cfg.get("pending_lot"):
+            return {"error": "no house waiting to be applied", "code": "no_pending"}
+        if self.world == "out":
+            return {"error": "you're not in the game's world", "code": "not_in_game"}
+        self.lot_busy = True
+        try:
+            await self.g(lotsync.restart_game, self.game.call)
+        except lotsync.LotError as e:
+            return {"error": str(e), "code": "restart"}
+        finally:
+            self.lot_busy = False
+        self.lot_tried = False
+        return {"ok": True}
 
     async def home_tick(self):
         """Play mode: keep the reading of the home fresh while my Zoi is there, and ask the partner for theirs on
@@ -287,6 +436,7 @@ class HouseSync:
                 if lot:
                     log.info("asked for the house while your Zoi is out: sending the last reading of it")
                     await self.send_house(lot)
+                    await self.send_lot(self.saved_preset(home))
                 else:
                     log.info("asked for the house, but your Zoi isn't at home (and it was never read): not sent")
                 return
@@ -299,6 +449,7 @@ class HouseSync:
         lot = dict(lot, site=int(site), site_id=info.get("site_id") or st.get("site_id"))
         self.keep_lot(lot)
         await self.send_house(lot)
+        await self.send_lot(self.saved_preset(site))
 
     def on_house(self, frm: str, data: dict):
         """The partner left build mode on our home: compare, and ask before changing anything here."""
@@ -358,6 +509,10 @@ class HouseSync:
     async def apply_house(self, q: dict) -> dict:
         """Enter build mode on the lot, remove and place what differs, leave build mode (it saves the lot)."""
         h = q["house"]
+        if h.get("lot"):
+            self.stash_lot(q["from"], h["lot"])
+        if h.get("objects") is None:                     # (only their exact house: it comes in on reopen)
+            return {"state": "done", "placed": 0, "removed": 0, "walls": 0, "failed": 0, "exact": "on_reopen"}
         call = self.game.call
         self.applying_house = True
         try:

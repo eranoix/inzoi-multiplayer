@@ -377,6 +377,18 @@ async def test_couple():
     assert (await ana_routes["/partner/family"]({"action": "divorce"}))["code"] == "bad_action"
     print("family milestones (move in, marry, baby) in both saves: ok")
 
+    # --- the host's family is the family, whoever asks: the host's PC never moves the host; the other PC moves its
+    # own Zoi into the host's home (the lot the host's reply named)
+    seen = []
+    for c in (ana, ben):
+        c.family_apply = (lambda c: lambda action, pid, home=None: seen.append((c.cfg["name"], home)) or {"ok": True})(c)
+    ana.leader = ben.leader = ana.me_id
+    await ana.couple_perform({"action": "movein", "from_id": ben.me_id, "home_site": 777}, initiator=False)
+    await ben.couple_perform({"action": "movein", "to_id": ana.me_id, "partner_home": 1038}, initiator=True)
+    assert seen[:2] == [("Ana", None), ("Ben", 1038)], seen
+    del ana.family_apply, ben.family_apply
+    print("the host's family is the family, whoever asks: ok")
+
     # --- moving in, the other save: Ben's save has Ana's real Zoi (entity 61) living on Ana's lot (site 1038, Ben's
     # household elsewhere), plus a copy of Ana (88) made before. Ana asks: Ben's own Zoi joins the household on
     # lot 1038 (there the house is Ben's too), the real Ana is driven and the copy goes.
