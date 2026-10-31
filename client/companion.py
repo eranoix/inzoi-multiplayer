@@ -962,7 +962,15 @@ class Companion(couple.Couple, servers.Servers):
         act, anim, outfit = None, None, None
         while True:
             try:
-                world = self.world = await self.g(self.game.world)
+                world = await self.g(self.game.world)
+                gs = getattr(self.game, "last_state", None) or {}
+                if world == "out" and was_in_world and not gs.get("is_lobby") and not gs.get("loading") \
+                        and self.__dict__.get("_out_seen", 0) < 2:
+                    self._out_seen = self.__dict__.get("_out_seen", 0) + 1      # one odd answer (the game busy for
+                    await asyncio.sleep(0.5)                                     # a moment) isn't leaving the world
+                    continue
+                self._out_seen = 0
+                world = self.world = world
                 self.mail.paused = world in ("paused", "stopped")      # (no controller ticks: ops wait)
                 if world in ("paused", "stopped"):
                     self.mod["beat"] = max(self.mod["beat"], time.time() - 3)   # no ticks while paused: not dead

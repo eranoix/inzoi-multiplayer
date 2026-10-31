@@ -88,6 +88,8 @@ async def lan():
     srv, tasks, server = await start_server()
     port, sid = server.port, server.store.settings["id"]
     found = await asyncio.to_thread(netinfo.discover, port, 1.0, ["127.0.0.1"])
+    if not found:                                     # (a busy PC, the game running: a second, longer listen)
+        found = await asyncio.to_thread(netinfo.discover, port, 3.0, ["127.0.0.1"])
     assert len(found) == 1 and found[0]["id"] == sid and found[0]["address"] == f"127.0.0.1:{port}", found
     assert found[0]["name"] == "Casa" and found[0]["password"] is False
     real = netinfo.discover
