@@ -2072,7 +2072,34 @@ class Companion(couple.Couple, servers.Servers):
             return res("nordvpn_running", True, "NordVPN isn't open" + (" (only its service runs)" if procs else ""),
                        processes=sorted(procs))
 
-        checks = (game_api, mod_loaded, server_reachable, logged_in, versions_match, tailscale, nordvpn_running)
+        async def partner_here():
+            """The point of it all: the partner's Zoi in my world (and why not, when it isn't)."""
+            if not (self.writer and self.me_id) or not self.remotes:
+                return res("partner_here", None, "nobody else on the server yet")
+            if not self.mp_active():
+                return res("partner_here", False, "multiplayer waits: this isn't your multiplayer save (or a question "
+                           "about it is open)", "answer_save")
+            if self.world in ("paused", "stopped"):
+                return res("partner_here", False, "your game is paused: nothing comes in until it runs", "unpause")
+            cards = self.partner_cards()
+            here = [c["name"] for c in cards if c["here"]]
+            if here:
+                return res("partner_here", True, ", ".join(here) + " in your world", names=here)
+            c = cards[0]
+            pr = c.get("presence") or {}
+            if c.get("away"):
+                return res("partner_here", False, f"{c['name']} is in another city ({c.get('city')})", "same_city",
+                           name=c["name"])
+            if not c["online"]:
+                why = ("at the main menu or loading" if pr.get("world") == "out" else "paused" if pr.get("world") in
+                       ("paused", "stopped") else "in another save or answering a question" if pr else "not in the game")
+                return res("partner_here", False, f"{c['name']}'s game isn't sending yet ({why})", "partner_game",
+                           name=c["name"])
+            return res("partner_here", False, f"{c['name']}'s Zoi is on its way into your world", "wait_puppet",
+                       name=c["name"])
+
+        checks = (game_api, mod_loaded, server_reachable, logged_in, versions_match, partner_here, tailscale,
+                  nordvpn_running)
 
         async def guarded(fn):
             try:

@@ -162,6 +162,13 @@ async def test_couple():
     rb.state_at = time.time()
     assert ana.partner_cards()[0]["presence"] is None, "a fresh state wins over an old presence"
     print("presence: ok")
+    checks = {c["id"]: c for c in (await ana_routes["/selftest"]({}))["checks"]}
+    assert checks["partner_here"]["ok"] is True and checks["partner_here"]["data"]["names"] == ["Ben"], checks["partner_here"]
+    ana.world = "stopped"
+    checks = {c["id"]: c for c in (await ana_routes["/selftest"]({}))["checks"]}
+    assert checks["partner_here"]["hint_code"] == "unpause", checks["partner_here"]
+    ana.world = "play"
+    print("self-test 'partner here': ok")
 
     # --- hug: Ana asks, Ben accepts; only Ana's PC starts it (Ben's sees it through the live sync)
     res = await ana_routes["/partner/action"]({"action": "hug"})       # (no key: the only partner)

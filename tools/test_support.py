@@ -237,8 +237,9 @@ async def selftest_and_diag():
     friend(comp, "ana", {"clock": [9, 0]}, version="0.7.0")
     checks = (await comp.ui_routes()["/selftest"]({}))["checks"]
     by = {c["id"]: c for c in checks}
-    assert set(by) == {"game_api", "mod_loaded", "server_reachable", "logged_in", "versions_match", "tailscale",
-                       "nordvpn_running"}, by
+    assert set(by) == {"game_api", "mod_loaded", "server_reachable", "logged_in", "versions_match", "partner_here",
+                       "tailscale", "nordvpn_running"}, by
+    assert by["partner_here"]["ok"] is None, "not connected: nothing to say yet"
     assert all(set(c) >= {"id", "ok", "detail", "hint_code"} for c in checks)
     assert by["game_api"]["ok"] is False and by["game_api"]["hint_code"] == "start_game" and by["game_api"]["data"]["port"] == 9
     assert by["mod_loaded"]["ok"] is False and by["mod_loaded"]["hint_code"] == "load_save"
@@ -269,7 +270,7 @@ async def selftest_and_diag():
         assert "segredo" not in cfg_text and "k" * 20 not in cfg_text and '"server": "127.0.0.1"' in cfg_text
         st = json.loads(z.read("status.json"))
     assert st["version"] == companion.VERSION and st["connection"]["address"] == f"127.0.0.1:{server.port}"
-    assert st["connection"]["connected"] is False and len(st["selftest"]) == 7 and st["partners"][0]["name"] == "Ana"
+    assert st["connection"]["connected"] is False and len(st["selftest"]) == 8 and st["partners"][0]["name"] == "Ana"
     texts = [e["text"] for e in st["recent"]]
     assert any("something odd happened" in t for t in texts) and "Can't reach the server: retrying" in texts, texts
     assert "puppets" in st and "game" in st

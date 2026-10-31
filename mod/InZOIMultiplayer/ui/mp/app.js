@@ -921,11 +921,17 @@
     // ------------------------------------------------------------------ help: check the connection, diagnostics
     var CHECKS = { game_api: N('The game is open'), mod_loaded: N('The mod is running in the game'),
                    server_reachable: N('The server answers'), logged_in: N('Signed in to the server'),
-                   versions_match: N('Same version as your partner'), tailscale: N('Tailscale is on'),
+                   versions_match: N('Same version as your partner'), partner_here: N("Your partner's Zoi is in your world"),
+                   tailscale: N('Tailscale is on'),
                    nordvpn_running: N('NordVPN is not in the way') };
     var HINTS = {
         start_game: N('Open inZOI and wait until it reaches the menu or your game.'),
         load_save: N('Load your multiplayer save in the game.'),
+        answer_save: N('Answer the question about your multiplayer save at the top of this panel (or load it).'),
+        unpause: N('Unpause your game (the time controls at the bottom of the screen).'),
+        same_city: N('You need to be in the same city: travel to where your partner is.'),
+        partner_game: N('Your partner needs to load their multiplayer save and unpause (their panel says what is missing).'),
+        wait_puppet: N('Wait a few seconds: their Zoi is being brought in.'),
         reload_mod: N("The mod isn't answering. Close inZOI and open it again."),
         pick_server: N('Choose a server: click "Servers" at the top of this panel.'),
         check_server: N("The server isn't answering. Ask whoever hosts to check that the inZOI Multiplayer program is open."),
