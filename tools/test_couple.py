@@ -356,11 +356,11 @@ async def test_couple():
     # household elsewhere), plus a copy of Ana (88) made before. Ana asks: Ben's own Zoi joins the household on
     # lot 1038 (there the house is Ben's too), the real Ana is driven and the copy goes.
     state = {"mine": 300}
-    households = {"households": [{"household_id": 300, "residence_site_id": 777},
-                                 {"household_id": 400, "residence_site_id": 1038}]}
+    households = {"households": [{"household_id": 300, "residence_site_id": 777, "member_count": 1},
+                                 {"household_id": 400, "residence_site_id": 1038, "member_count": 1}]}
     ana_hh = {"household_id": 500, "members": [{"entity_id": 10, "first_name": "Ana", "last_name": "Lima"},
                                                {"entity_id": 55, "first_name": "Ben", "last_name": "Lima"}]}
-    ana.game.call = game_answers(ana, {"household.list": {"households": [{"household_id": 500, "residence_site_id": 1038}]},
+    ana.game.call = game_answers(ana, {"household.list": {"households": [{"household_id": 500, "residence_site_id": 1038, "member_count": 2}]},
                                        "household.get_members": ana_hh})
 
     def ben_call(tool, **kw):
@@ -432,6 +432,41 @@ async def test_couple():
     households["households"][1]["household_id"] = 400
     ben.game.call = real_call
     print("never into strangers' home: ok")
+
+    # --- nobody lives in the asker's home in Ben's save (Chey's case): Ben's family moves to that lot first
+    home = {"site": 777}
+    def empty_call(tool, **kw):
+        ben.fake_calls.append((tool, kw))
+        if tool == "household.list":
+            return {"total": 1, "households": [{"household_id": 300, "residence_site_id": home["site"], "member_count": 1}]}
+        if tool == "household.get_members":
+            return {"household_id": 300, "members": [{"entity_id": 20, "first_name": "Ben", "last_name": "Lima"},
+                                                     {"entity_id": 88, "first_name": "Ana", "last_name": "Lima"}]}
+        return {}
+    ben.game.call = empty_call
+    real_op = ben.mail.op
+    def op(name, **kw):
+        if name == "move_home" and kw.get("household") == 300:
+            home["site"] = kw["site"]                    # (the controller moved the family)
+        return real_op(name, **kw)
+    ben.mail.op = op
+    ben.__dict__.pop("_family", None)
+    res = await ana_routes["/partner/family"]({"action": "movein"})
+    assert await until(lambda: ben.requests)
+    out = await ben_routes["/partner/respond"]({"id": next(iter(ben.requests)), "accept": True})
+    assert out["result"]["state"] == "done", out
+    assert ops(ben, "move_home")[-1] == {**ops(ben, "move_home")[-1], "household": 300, "site": 1038}
+    assert home["site"] == 1038
+    # the game paused: the move doesn't happen, and the asker hears why
+    ben.mail.op = real_op
+    home["site"] = 777
+    res = await ana_routes["/partner/family"]({"action": "movein"})
+    assert await until(lambda: ben.requests)
+    out = await ben_routes["/partner/respond"]({"id": next(iter(ben.requests)), "accept": True})
+    assert out["result"]["state"] == "failed" and "paused" in out["result"]["message"], out
+    assert await until(lambda: ana.sent[res["id"]]["state"] == "failed")
+    ben.game.call = real_call
+    print("moving in where nobody lives: the family moves to that lot (and says so when it can't): ok")
 
     # --- the partner's log, asked for
     (Path(os.environ["APPDATA"]) / "inzoi-mp").mkdir(parents=True, exist_ok=True)

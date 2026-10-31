@@ -45,7 +45,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.9"
+VERSION = "0.9.10"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -1674,6 +1674,21 @@ class Companion(couple.Couple, servers.Servers):
         asyncio.get_running_loop().create_task(self.announce(
             f"inZOI Multiplayer {info['version']} is out: update it on the Multiplayer page."))
 
+    async def update_now(self) -> dict:
+        """The "Update now" button (or the partner asking): look for a newer version right away; if there is one,
+        download it and restart into it (the game keeps running)."""
+        try:
+            info = await self.g(updater.latest, VERSION)
+        except (OSError, ValueError) as e:
+            return {"error": f"couldn't reach GitHub: {e}", "code": "update_check_failed"}
+        if not info:
+            return {"ok": True, "latest": True, "version": VERSION}
+        if not self.update or self.update.get("version") != info["version"]:
+            self.update = {**info, "state": "available", "done": 0, "total": info["size"], "path": None, "error": None}
+        log.info("update now: %s", info["version"])
+        self.update_action(info["version"], "update")
+        return {"ok": True, "latest": False, "version": info["version"]}
+
     def update_text(self) -> str:
         u = self.update
         return (f"inZOI Multiplayer {u['version']} is out ({u['title']}). Update now? It downloads "
@@ -2367,20 +2382,7 @@ class Companion(couple.Couple, servers.Servers):
             return {"ok": True, "box": self.update_box_view(), "update": self.update_view()}
 
         async def update_now(_):
-            """The "Update now" button: look for a newer version right away; if there is one, download it and restart
-            into it (the game keeps running)."""
-            try:
-                info = await self.g(updater.latest, VERSION)
-            except (OSError, ValueError) as e:
-                return {"error": f"couldn't reach GitHub: {e}", "code": "update_check_failed"}
-            if not info:
-                return {"ok": True, "latest": True, "version": VERSION}
-            if not self.update or self.update.get("version") != info["version"]:
-                self.update = {**info, "state": "available", "done": 0, "total": info["size"], "path": None,
-                               "error": None}
-            log.info("update now (button): %s", info["version"])
-            self.update_action(info["version"], "update")
-            return {"ok": True, "latest": False, "version": info["version"]}
+            return await self.update_now()
 
         async def world_answer(body):
             self.world_action(str(body.get("key", "")), str(body.get("action", "")))

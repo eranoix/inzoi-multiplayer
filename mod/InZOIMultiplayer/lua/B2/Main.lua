@@ -20,6 +20,7 @@
 --   social  {rid, bag, entity?, key?}   couple actions: the player's own Zoi (`entity`, else the possessed one) runs
 --           interaction `bag` on the puppet of `key` (or on its own without key); "anim:<id>" plays a motion instead.
 --           Reports "social <rid> ok|fail <text>".
+--   move_home {household, site}         the family moves to that lot (moving in together where nobody lives)
 --   goto_point {entity?, x, y, z}       teleport the player's own Zoi to a spot ("go to my partner" without a puppet)
 --   debug ops: walk {entity, x, y, z}, status {entity}, reset {entity}, probe {entity, r}
 --
@@ -671,6 +672,17 @@ local OPS = {
             ok, msg = cli(string.format("interaction.execute entity_id=%d interaction_bag_id=%s insert_front=true", me, bag))
         end
         return done(ok, msg)
+    end,
+    -- Moving in together where nobody lives yet: {household, site}. The family moves to that lot (the game's own
+    -- residence change), so the house is theirs. Reports "home <household> <site it lives on now>".
+    move_home = function(op)
+        local hh = em():FindHousehold(eid(op.household))
+        if not hh then error("no household " .. tostring(op.household)) end
+        local before = hh:GetResidanceSiteId().Value
+        if before ~= op.site then hh:ChangeResidanceSite(eid(op.site)) end
+        local now = hh:GetResidanceSiteId().Value
+        report("home", string.format("%d %d", op.household, now))
+        return string.format("household %d: home lot %d -> %d", op.household, before, now)
     end,
     goto_point = function(op)
         local me = tonumber(op.entity) or S.me

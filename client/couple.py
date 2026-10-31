@@ -24,6 +24,7 @@ Event data on the wire: {"t":"event","kind":"couple","to":<player id>,"data":{..
     {"type":"reply","id","accept"}
 """
 import asyncio
+import json
 import logging
 import re
 import secrets
@@ -280,6 +281,9 @@ class Couple:
                 self.mark(s, "failed", why)
                 self.system_line(f"{s['to']}: it didn't work in their save ({ACTION_NAMES.get(s['action'], s['action'])}): {why}")
                 log.warning("%s's save: %s failed: %s", s["to"], s["action"], why)
+        elif data.get("type") == "update_request":       # (the partner: "get the newest version")
+            log.info("%s asked this program to update", self.remotes[frm].name if frm in self.remotes else frm)
+            asyncio.get_running_loop().create_task(self.update_now())
         elif data.get("type") == "log_request":
             asyncio.get_running_loop().create_task(self.send_log(frm, rid))
         elif data.get("type") == "log":
@@ -367,18 +371,31 @@ class Couple:
     def my_household(self) -> dict:
         return self.game.call("household.get_members") or {}
 
+    def all_households(self) -> list[dict]:
+        """Every household (household.list include=all, page by page: residential families only would miss a family
+        the game doesn't list as "can move in")."""
+        out, offset = [], 0
+        while offset < 5000:
+            page = self.game.call("household.list", Limit=500, Offset=offset, Include="all") or {}
+            got = page.get("households") or []
+            out += got
+            offset += len(got)
+            if not got or offset >= (page.get("total") or 0):
+                break
+        return out
+
     def my_home_site(self) -> int | None:
         """The lot my household lives on (household.list: its residence), or None."""
         hid = self.my_household().get("household_id")
-        for h in (self.game.call("household.list", Limit=500) or {}).get("households") or []:
+        for h in self.all_households():
             if h.get("household_id") == hid and h.get("residence_site_id"):
                 return int(h["residence_site_id"])
         return None
 
     def household_at(self, site: int) -> int | None:
-        """The household that lives on lot `site` in this save, or None."""
-        for h in (self.game.call("household.list", Limit=500) or {}).get("households") or []:
-            if h.get("residence_site_id") == site and h.get("household_id"):
+        """The household that lives on lot `site` in this save (one with members), or None."""
+        for h in self.all_households():
+            if h.get("residence_site_id") == site and h.get("household_id") and (h.get("member_count") or 0) > 0:
                 return int(h["household_id"])
         return None
 
@@ -416,9 +433,31 @@ class Couple:
         except OSError as e:
             text = f"(no log: {e})"
         lines = text.splitlines()[-400:]
+        lines += await self.g(self.family_report)
         await self.send({"t": "event", "kind": "couple", "to": to,
                          "data": {"type": "log", "id": rid, "version": self.version, "lines": lines}})
         log.info("sent the last %d log lines to %s (asked for)", len(lines), self.remotes[to].name if to in self.remotes else to)
+
+    def family_report(self) -> list[str]:
+        """Read-only facts about families and homes in this game, sent along with the log (what the partner needs to
+        see why a house is or isn't someone's)."""
+        out = ["# --- family report ---"]
+        for name, fn in (("possessed", lambda: self.game.call("entity.get_possessed")),
+                         ("my household", lambda: self.game.call("household.get_members")),
+                         ("my state", lambda: self.game.state_of(self.my_entity) if self.my_entity else None),
+                         ("families that matter", self.households_that_matter)):
+            try:
+                out.append(f"# {name}: {json.dumps(fn(), ensure_ascii=False)[:6000]}")
+            except Exception as e:                       # noqa: BLE001
+                out.append(f"# {name}: error {e}")
+        return out
+
+    def households_that_matter(self) -> list[dict]:
+        """Mine, the ones ever played, and whoever lives where my Zoi stands (lot 1038 for the couple's home)."""
+        mine = self.my_household().get("household_id")
+        here = (self.game.state_of(self.my_entity) or {}).get("site") if self.my_entity else None
+        return [h for h in self.all_households() if h.get("household_id") == mine or h.get("ever_possessed")
+                or h.get("residence_site_id") in (here, 1038) or (h.get("name") or "").lower().startswith("oliveira")]
 
     def save_partner_log(self, frm: str, data: dict):
         from companion import CONFIG_DIR
@@ -463,6 +502,18 @@ class Couple:
         call = self.game.call
         target = self.household_at(home_site) if home_site else None
         mine = self.my_household().get("household_id")
+        if home_site and not target and mine and self.my_home_site() != home_site:
+            # Nobody lives in the asker's home in this save: my family moves there (the game's own residence change,
+            # done by the in-game controller), so the house is ours here too.
+            self.mail.op("move_home", household=int(mine), site=int(home_site))
+            for _ in range(20):
+                time.sleep(0.5)
+                if self.my_home_site() == home_site:
+                    break
+            else:
+                return {"error": f"the game didn't move your family to lot {home_site} (is the game paused?)",
+                        "code": "move_failed"}
+            log.info("your family moved to lot %s (%s's home): the house is yours too", home_site, r.name)
         if target and target != mine and not self.has_member(target, r):
             log.info("the household on lot %s here isn't %s's family: your Zoi stays where it is", home_site, r.name)
             target = None                                # (never into strangers' home)
@@ -767,6 +818,14 @@ class Couple:
                              "data": {"type": "log_request", "id": secrets.token_hex(6)}})
             return {"ok": True}
 
-        return {"/partner/log": partner_log, "/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
+        async def partner_update(body):
+            r = self.partner(body.get("key"))
+            if not r:
+                return {"error": "your partner isn't online", "code": "no_partner"}
+            await self.send({"t": "event", "kind": "couple", "to": r.pid,
+                             "data": {"type": "update_request", "id": secrets.token_hex(6)}})
+            return {"ok": True}
+
+        return {"/partner/update": partner_update, "/partner/log": partner_log, "/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
                 "/partner/goto": goto, "/partner/invite": invite, "/partner/action": action,
                 "/partner/respond": respond, "/world/undo": undo, "/world/backups": backups}
