@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -116,6 +117,31 @@ def make_console():
 
 
 # ---------------------------------------------------------------------------------------------- one copy at a time
+def replace_older() -> bool:
+    """coop-casal: the copy already running is an older version (an old exe downloaded elsewhere, which may never
+    update to this fork): close it so this one runs. True when it was closed."""
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:24243/status", timeout=3) as r:
+            theirs = str(json.loads(r.read()).get("version") or "")
+    except (OSError, ValueError, AttributeError):
+        return False
+    if theirs and updater.version_tuple(theirs) >= updater.version_tuple(companion.VERSION):
+        return False
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=10,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    pids = {line.split()[-1] for line in out.splitlines()
+            if "127.0.0.1:24243 " in line and "LISTEN" in line.upper() and line.split()[-1].isdigit()}
+    pids.discard(str(os.getpid()))
+    for pid in pids:
+        log.info("closing the older inZOI Multiplayer running (%s, pid %s)", theirs or "before 0.8", pid)
+        subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], capture_output=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return bool(pids)
+
+
 def single_instance(wait: float) -> bool:
     """Only one copy runs per settings folder. True: this is it. (After an update or a restart the old copy is still
     closing: wait for it.)"""
@@ -376,7 +402,7 @@ def main():
         quiet_streams()
     companion.setup_logging(args.verbose)
     updater.clean_old()
-    if not single_instance(20 if args.restarted else 1):
+    if not single_instance(20 if args.restarted else 1) and not (replace_older() and single_instance(20)):
         log.info("inZOI Multiplayer is running already: bringing inZOI up")
         if mode != "host-only":
             bring_up_game()
