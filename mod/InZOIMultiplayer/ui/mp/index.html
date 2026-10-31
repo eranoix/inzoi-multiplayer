@@ -11,7 +11,10 @@
    it breaks inzoi.view.hover() / setHover() and leaks wheel/click input to the game camera. */
 html, body { width: 100%; height: 100%; background: transparent; overflow: hidden;
              font-family: var(--inzoi-font-ui); font-size: 17px; color: #eef1f6; }
-button, input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; }
+/* Gameface gives buttons its own font (one without accents) unless the family is named on them, so name it. */
+button, input, select, textarea, .btn, #servers-btn, .tab, .sect-head, .choice, .toggle {
+    font-family: var(--inzoi-font-ui); }
+button, input, select, textarea { font-size: inherit; color: inherit; }
 
 
 #app-root { position: absolute; top: 210px; left: 24px; width: 380px; height: 600px;
@@ -220,7 +223,7 @@ button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visibl
     </div>
     <div class="reqs" id="reqs" role="alert" aria-live="assertive"></div>
     <div class="pcard" id="pcard">
-      <div class="head" id="p-head" role="button" data-i18n-title="Show or hide the details"><span class="pdot" id="p-dot"></span><span class="pname" id="p-name"></span><span class="fold" id="p-fold">▾</span></div>
+      <div class="head" id="p-head" role="button" data-i18n-title="Show or hide the details"><span class="pdot" id="p-dot"></span><span class="pname" id="p-name"></span><span class="fold" id="p-fold">-</span></div>
       <div id="p-body">
         <div class="pline" id="p-where"></div>
         <div class="pline doing" id="p-doing"></div>
@@ -264,7 +267,7 @@ button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visibl
     </div>
     <div class="pane" id="pane-settings">
       <div class="sect" id="sect-home">
-        <button type="button" class="sect-head" id="hh-head"><span data-i18n>Living together</span><span class="arrow" id="hh-arrow">▸</span></button>
+        <button type="button" class="sect-head" id="hh-head"><span data-i18n>Living together</span><span class="arrow" id="hh-arrow">+</span></button>
         <div class="sect-body">
           <button type="button" class="toggle" id="hh-toggle" role="switch" aria-checked="false"><span class="box" aria-hidden="true"></span><span data-i18n>Share one household (we play in the same world and save it together)</span></button>
           <div class="hh-line" id="hh-saved"></div>
@@ -279,7 +282,7 @@ button:focus-visible, .btn:focus-visible, .tab:focus-visible, input:focus-visibl
         </div>
       </div>
       <div class="sect" id="sect-clock">
-        <button type="button" class="sect-head" id="clock-head"><span data-i18n>Clock</span><span class="arrow" id="clock-arrow">▸</span></button>
+        <button type="button" class="sect-head" id="clock-head"><span data-i18n>Clock</span><span class="arrow" id="clock-arrow">+</span></button>
         <div class="sect-body">
           <button type="button" class="choice" id="clock-host" data-i18n>Follow whoever hosts (recommended)</button>
           <button type="button" class="choice" id="clock-catchup" data-i18n>Adjust between the two of us</button>

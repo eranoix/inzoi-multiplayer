@@ -234,10 +234,10 @@
                     text = t('{name} dropped, waiting...', { name: droppedName });
                 } else {
                     cls = 'on'; icon = '✓';
-                    text = t('Connected to {server}: waiting for your partner', { server: s.server });
+                    text = t('Connected to {server}: waiting for your partner', { server: srv(s) });
                 }
             }
-            subText = t('You are {name} on {server}', { name: s.name, server: s.server }) +
+            subText = t('You are {name} on {server}', { name: s.name, server: srv(s) }) +
                 (s.via_lan ? ' - ' + t('connected through the local network') : '') +
                 (s.mod !== 'running' ? ' (' + t('getting the game ready') + ')' : '');
         } else {
@@ -249,7 +249,7 @@
                 showRetry = true;
             } else {
                 cls = 'wait'; icon = '↻';
-                text = t('Reconnecting to {server}...', { server: s.server });
+                text = t('Reconnecting to {server}...', { server: srv(s) });
                 if (s.notice) { subText = I.notice(s.notice_code, s.notice); }
                 showRetry = Date.now() - disconnectedSince > 10000;     // give the automatic retry a moment first
             }
@@ -585,6 +585,7 @@
         if (b.className !== cls) { b.className = cls; }
         if (isOff) { b.setAttribute('disabled', 'disabled'); } else { b.removeAttribute('disabled'); }
     }
+    function srv(s) { return s.server === 'this PC' ? t('this PC') : s.server; }   // hosting here
     function two(n) { return (n < 10 ? '0' : '') + n; }
     function hm(tm) { return tm && tm.length >= 2 ? tm[0] + ':' + two(tm[1]) : ''; }
     function whenText(epoch) {                      // "hoje às 14:05" / "28/10 às 22:10"
@@ -595,7 +596,8 @@
         return t('{date} at {time}', { date: two(d.getDate()) + '/' + two(d.getMonth() + 1), time: clock });
     }
     function seenText(sec) {
-        if (sec === null || sec === undefined) { return t('Offline'); }
+        // still on the server (the card only lists connected friends) but nothing from their game yet
+        if (sec === null || sec === undefined) { return t('Connected, waiting for their game to start'); }
         if (sec < 90) { return t('Last seen just now'); }
         if (sec < 5400) { return t('Last seen {n} min ago', { n: Math.round(sec / 60) }); }
         return t('Last seen {n} h ago', { n: Math.round(sec / 3600) });
@@ -665,7 +667,7 @@
     }
     function showCardBody() {
         $('p-body').style.display = cardOpen ? '' : 'none';
-        setText($('p-fold'), cardOpen ? '▾' : '▸');
+        setText($('p-fold'), cardOpen ? '-' : '+');
     }
     showCardBody();
     $('p-head').addEventListener('click', function () {
@@ -751,7 +753,7 @@
     function setPending(key, v) { pending[key] = { v: v, until: Date.now() + 3000 }; }
     function openSect(id, arrow, open) {
         $(id).className = 'sect' + (open ? ' open' : '');
-        setText($(arrow), open ? '▾' : '▸');
+        setText($(arrow), open ? '-' : '+');
     }
     $('hh-head').addEventListener('click', function () {
         hhOpen = !hhOpen;

@@ -40,6 +40,7 @@
         'Try again': 'Tentar de novo',
         'Trying again...': 'Tentando de novo...',
         'You are {name} on {server}': 'Você é {name} em {server}',
+        'this PC': 'este PC',
         'getting the game ready': 'preparando o jogo',
         "The program isn't open": 'O programa não está aberto',
         // people
@@ -144,6 +145,7 @@
         'Together': 'Juntos',
         'Time in their game: {time}': 'Hora no jogo do seu par: {time}',
         'Offline': 'Offline',
+        'Connected, waiting for their game to start': 'Conectado, esperando o jogo do outro lado abrir',
         'Last seen just now': 'Visto agora há pouco',
         'Last seen {n} min ago': 'Visto há {n} min',
         'Last seen {n} h ago': 'Visto há {n} h',
@@ -296,6 +298,10 @@
     var PATTERNS = [
         [/^Can't reach the server \((.*)\): retrying$/, 'Não deu para alcançar o servidor ($1): tentando de novo'],
         [/^Server: (.*)$/, 'Servidor: $T1'],
+        [/^(.*) joined$/, '$1 entrou'],
+        [/^(.*) left$/, '$1 saiu'],
+        [/^(.*) saved the shared world$/, '$1 salvou o mundo compartilhado'],
+        [/^(.*) shared a house: (.*)$/, '$1 compartilhou uma casa: $2'],
         [/^You were (.*)$/, 'Você foi $1'],
         [/^wrong server password$/, 'senha do servidor errada'],
         [/^server is full$/, 'o servidor está cheio'],
