@@ -397,6 +397,7 @@
             seenUpTo = s.chat.length ? s.chat[s.chat.length - 1].time : 0;
         }
         lastStatus = s;
+        reHide();
     }
 
     function poll() {
@@ -740,7 +741,7 @@
             var r = reqRows[q.id];
             if (!r) {
                 r = { row: el('div', 'req'), text: el('div'), left: el('div', 'left'),
-                      yes: btn('', t('Accept')), no: btn('no', t('Decline')), always: btn('always', t('Always accept')) };
+                      yes: btn('yes', t('Accept')), no: btn('no', t('Decline')), always: btn('always', t('Always accept')) };
                 var row2 = el('div', 'row2');
                 row2.appendChild(r.always);
                 row2.appendChild(r.no);
@@ -768,16 +769,27 @@
             if (reqRows.hasOwnProperty(id) && !seen[id]) { box.removeChild(reqRows[id].row); delete reqRows[id]; }
         }
         modal(box.firstChild !== null);
+        reHide();
+    }
+    function reHide() {                              // (redraws reset some classes: keep the rest of the window hidden)
+        if (modalWas) {
+            modalHidden.forEach(function (n) { if (n.className.indexOf('mhide') < 0) { n.className += ' mhide'; } });
+        }
     }
 
     // A request is a dialog in the middle of the screen (the window itself moves there: clicks only reach it inside
     // its own rectangle); answered, the window goes back exactly where it was, open or closed (nothing is saved).
-    var modalWas = null;
+    var modalWas = null, modalHidden = [];
     function modal(on) {
         if (on && !modalWas) {
             modalWas = { left: root.style.left, top: root.style.top, min: !!root._minimized, transform: root.style.transform };
             if (root._minimized && root._applyMinimize) { root._applyMinimize(false); }
             root.className = 'modal';
+            // (the game's UI engine doesn't do :not(): everything but the request is hidden here, one by one)
+            modalHidden = [$('title-bar')];
+            var kids = $('content').children;
+            for (var i = 0; i < kids.length; i++) { if (kids[i].id !== 'reqs') { modalHidden.push(kids[i]); } }
+            modalHidden.forEach(function (n) { n.className = (n.className ? n.className + ' ' : '') + 'mhide'; });
             var w = 600, vw = window.innerWidth || 1920, vh = window.innerHeight || 1080;
             root.style.left = Math.max(0, Math.round((vw - w) / 2)) + 'px';
             root.style.top = Math.round(vh * 0.26) + 'px';
@@ -788,6 +800,8 @@
             modalWas = null;
             $('dim').className = '';
             root.className = '';
+            modalHidden.forEach(function (n) { n.className = n.className.replace(/ ?mhide/g, ''); });
+            modalHidden = [];
             root.style.left = was.left;
             root.style.top = was.top;
             root.style.transform = was.transform;

@@ -46,7 +46,8 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.15"
+VERSION = "0.9.16"
+CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -549,6 +550,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
             for r in [r for pid, r in self.remotes.items() if pid not in here]:
                 self.remotes.pop(r.pid, None)            # (left while we were away)
                 self.drop_remote(r)
+            updater.mark_healthy()                       # (joined a server: this version works)
             self.check_version("the server", m.get("version") or m.get("server_version"))
             for p in m["players"]:
                 self.update_remote(p)
@@ -1077,7 +1079,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
                         outfit = await self.g(self.game.outfit, self.my_entity)
                     except GameError:
                         pass
-                if tick % 5 == 2:
+                if tick % 2 == 0:
                     self.my_clock = await self.g(self.game.clock)
                     self.sleeping = bool(SLEEPING.search(f"{(act or {}).get('bag', '')} {anim or ''}"))
                     if world in ("play", "stopped") and self.writer and self.me_id and active:
@@ -1152,6 +1154,9 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
         while True:
             try:
                 self._house_n = self.__dict__.get("_house_n", 0) + 1
+                if self._house_n % 4 == 0 and self.world in ("play", "stopped") and self.mp_active()                         and self.cfg.get("sync_time", True) and self.clock_mode() == "host"                         and self.leader and self.leader != self.me_id and self.my_clock:
+                    await self.follow_leader_clock()             # (every second: the clocks stay within minutes)
+                    await self.follow_leader_speed()
                 if self._house_n % 8 == 0 and self.world != "out" and self.my_entity:
                     await self.house_tick()                  # (every 2 s, paused too: build mode pauses the game)
                 if self.world == "play" and self.my_entity:
@@ -2056,10 +2061,10 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
             return                                       # the leader is paused, away or not in the game
         mine, theirs = self.my_clock[0] * 60 + self.my_clock[1], lc[0] * 60 + lc[1]
         d = (theirs - mine) % 1440
-        if 10 < d < 720:
+        if CLOCK_SLACK <= d < 720:
             log.info("following the host's time: %d minutes forward", d)
             await self.g(self.game.call, "environment.time_skip", minutes=d)
-        elif d >= 720 and mine - theirs > 10 and not self.__dict__.get("_no_set_time"):
+        elif d >= 720 and mine - theirs >= CLOCK_SLACK and not self.__dict__.get("_no_set_time"):
             log.info("following the host's time: back to %02d:%02d", lc[0], lc[1])
             try:
                 await self.g(self.game.call, "environment.set_time", hour=int(lc[0]), minute=int(lc[1]))
@@ -2074,7 +2079,7 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
             return                                       # the leader is paused or away / I'm paused: my own speed
         want = st.get("speed")
         if isinstance(want, (int, float)) and 0 < want <= 10 and abs(clock[2] - want) > 0.01:
-            if time.time() - self.__dict__.get("_speed_set_at", 0) < 20:
+            if time.time() - self.__dict__.get("_speed_set_at", 0) < 2:
                 return                                   # (as in keep_speed: no tug of war with the game)
             self._speed_set_at = time.time()
             if self.__dict__.get("_speed_said") != want:

@@ -387,7 +387,9 @@ def note_game_session(seconds: float):
 
 
 async def run(mode: str, cfg: dict, comp):
-    asyncio.get_running_loop().call_later(120, updater.mark_healthy)   # coop-casal: up 2 minutes = no rollback
+    # coop-casal: up 25 s = no rollback (a broken version fails within seconds; a closed game or a program closed
+    # while inZOI was still starting isn't a failed start)
+    asyncio.get_running_loop().call_later(25, updater.mark_healthy)
     if mode == "host-only":
         args = argparse.Namespace(host="0.0.0.0", port=cfg["host_port"], password=cfg["host_password"],
                                   motd=cfg["host_motd"], max_players=None, data=str(SERVER_DATA), hosted=False,

@@ -87,7 +87,7 @@ svg { display: block; }
 .req > div:first-child { font-size: 22.1px; font-weight: bold; line-height: 1.3; }
 .req .row2 { display: flex; justify-content: flex-end; margin-top: 13px; }
 .req .btn { margin-left: 10.4px; }
-.req .btn:not(.no) { background: #3a8ee6; color: #fff; }
+.req .btn.yes { background: #3a8ee6; color: #fff; }
 .req .btn.always { margin-left: 0; margin-right: auto; background: transparent; box-shadow: none; color: #2d7fd6; padding-left: 4px; }
 .req .left { font-size: 15.6px; color: #5d636c; margin-top: 7.8px; text-align: right; }
 
@@ -260,9 +260,9 @@ svg { display: block; }
 /* a request from the partner: the window becomes a dialog in the middle of the screen, the game dimmed behind it */
 #dim { position: absolute; left: 0; top: 0; width: 100%; height: 100%; background: rgba(12, 14, 20, 0.38); display: none; }
 #dim.on { display: block; }
+.mhide { display: none !important; }
 #app-root.modal { width: 600px !important; transform: none !important; border-radius: 30px; background: rgba(244, 245, 241, 0.94);
                   box-shadow: 0 20px 60px rgba(10, 12, 18, 0.45); }
-#app-root.modal #title-bar, #app-root.modal #content > *:not(#reqs) { display: none !important; }
 #app-root.modal #content { padding: 14px; }
 #app-root.modal .req { margin: 0; padding: 26px 28px 20px; box-shadow: none; background: transparent; }
 #app-root.modal .req > div:first-child { font-size: 30px; line-height: 1.25; }
