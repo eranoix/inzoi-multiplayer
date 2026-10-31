@@ -76,4 +76,7 @@ deixam de ser aceitas no PC dela e você precisa mandar um `.exe` novo manualmen
 - Se o jogo atualizou e quebrou: corrigir na branch e publicar uma versão nova.
 - Sem UE4SS (o build fixado pelo projeto saiu do GitHub), o botão do menu é desenhado por cima do jogo e a página de
   servidores abre numa janela do Edge. Funciona igual, só é menos bonito.
-- Alternativa sem `.exe`: o `instalar-coop.ps1` instala pelo código-fonte (versão antiga `bafbdf4`, sem as correções).
+- Para deixar um PC com um único jeito de abrir: rodar `powershell -ExecutionPolicy Bypass -File .\instalar-coop.ps1`.
+  Ele baixa a versão mais nova para `%LOCALAPPDATA%\Programs\inZOI Co-op`, cria o atalho **inZOI Co-op** na área de
+  trabalho e apaga as outras cópias (Downloads, área de trabalho, raiz de Documentos, a instalação antiga `entrar.bat`).
+  Saves e configurações não são tocados.
