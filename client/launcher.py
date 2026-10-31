@@ -635,6 +635,11 @@ def start_game():
     if os.name != "nt" or testing() or GAME_STARTED or menu.game_window():
         return
     GAME_STARTED = True
+    try:                    # (the game checks the mod's scripts when it starts: it must see this version's files)
+        if companion.install.install():
+            log.info("mod files updated before starting inZOI")
+    except Exception as e:                                           # noqa: BLE001
+        log.warning("couldn't update the mod files before starting inZOI: %s", e)
     os.startfile(GAME_URL)                                           # noqa: S606 - Steam starts the game
     log.info("starting inZOI")
 
