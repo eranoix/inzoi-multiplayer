@@ -210,11 +210,14 @@ local function clear_all(id)
 end
 
 -- Native: queue an interaction like the game does when the player picks it (target: a character/object or none).
-local function queue_interaction(id, bag, target)
+-- at: where the remote player stood when they started it; the game picks the object's slot nearest to that point (the
+-- same side of the bed, the same chair at the table).
+local function queue_interaction(id, bag, target, at)
     local c = char(id)
     if not c then return nil end
     local t = target and target > 0 and eid(target) or INZOI.FB1EntityId()
-    return INZOI.FB2InteractionComponent.AddInteractionQueueByParam(interaction(c), t, UE.FVector(0, 0, 0), bag,
+    local point = at and UE.FVector(at.x, at.y, at.z or c:GetLocation().Z) or UE.FVector(0, 0, 0)
+    return INZOI.FB2InteractionComponent.AddInteractionQueueByParam(interaction(c), t, point, bag,
         inzoi.EB1InteractionPlayReason.None, true, false, "mp_act", true, false)
 end
 
@@ -513,7 +516,7 @@ end
 local function start_act(c, p)
     local a = p.actQueued
     p.actQueued = nil
-    local ok, err = pcall(queue_interaction, p.id, a.bag, a.target)
+    local ok, err = pcall(queue_interaction, p.id, a.bag, a.target, a.at)
     if not ok then log(string.format("%s act %s: the game refused to queue it (%s)", p.key or "?", a.bag, tostring(err))) end
     p.act.started = S.clock
 end
@@ -765,7 +768,7 @@ local OPS = {
         stop_direct(c)
         if is_walking(c) or p.act then cancel_walk(c) end
         p.act = { bag = op.bag, x = op.x, y = op.y }
-        p.actQueued = { bag = op.bag, target = target, t = 0 }
+        p.actQueued = { bag = op.bag, target = target, t = 0, at = op.x and { x = op.x, y = op.y } or nil }
         return string.format("%s does %s%s", op.key, op.bag, target and (" on " .. target) or "")
     end,
     -- A body posture plays on their Zoi (the companion mirrors the montages): hold it at their exact spot and facing.
