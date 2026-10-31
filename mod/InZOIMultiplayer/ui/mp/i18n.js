@@ -41,6 +41,9 @@
         'Trying again...': 'Tentando de novo...',
         'You are {name} on {server}': 'Você é {name} em {server}',
         'this PC': 'este PC',
+        'Your multiplayer save': 'Seu save multijogador',
+        'Each of you plays your own save (a multiplayer copy, so your normal saves stay untouched). You meet on the same map.':
+            'Cada um joga o próprio save (numa cópia multijogador, então seus saves normais ficam intactos). Vocês se encontram no mesmo mapa.',
         'server': 'servidor',
         'getting the game ready': 'preparando o jogo',
         "The program isn't open": 'O programa não está aberto',

@@ -28,18 +28,18 @@ Se usar NordVPN, desligue-o ou desative a "Invisibilidade na LAN".
 
 ## Para jogar
 
-1. O Arthur abre o `hospedar.bat`.
-2. A esposa abre o `inZOI-Multiplayer.exe`.
-3. Na primeira vez, cada um aceita criar a **cópia multiplayer do save**: os saves normais não são mexidos.
+1. Os dois abrem o mesmo `inZOI-Multiplayer.exe` (atalho "inZOI Co-op"). No PC do Arthur ele hospeda sozinho; no dela, entra no servidor do Arthur.
+2. **Cada um joga o próprio save.** Na primeira vez, cada um aceita criar a **cópia multiplayer do save**: os saves normais não são mexidos.
+3. Vocês se encontram no **mesmo mapa**: precisam estar na mesma cidade do jogo para se verem.
 4. No painel do jogo, o **Modo casal** mostra dois botões: **Hospedar para meu par** e **Entrar no meu par**.
 5. Os dois precisam estar na **mesma versão do inZOI**. Os mods do host são oferecidos automaticamente.
 
-## No painel do jogo (v0.8.2)
+## No painel do jogo
 
 - **Card do par:** onde o outro está e o que está fazendo, com os botões **Ir até meu par** e **Convidar para minha casa**.
 - **Ações a dois:** Abraçar, Beijar, Dançar e Acenar. O outro recebe um pedido com **Aceitar** / **Recusar**.
   Na primeira vez, faça cada ação uma vez à mão para o programa aprender a interação certa.
-- **Ajustes → Morar juntos** (opcional, fica desligado): os dois jogam no MESMO save, o de quem hospeda. Desligado, cada um joga o próprio save e vocês se veem no mesmo mapa.
+- **Ajustes → Seu save multijogador:** cópias de segurança automáticas e **Desfazer último save** (do seu próprio save).
 - **Ajustes → Relógio:** seguir quem hospeda (padrão) ou ajustar entre os dois.
 - **Ajuda:** **Verificar conexão** (diz o que está errado e como resolver) e **Enviar diagnóstico**, que gera um zip
   na Área de Trabalho para mandar ao Arthur.

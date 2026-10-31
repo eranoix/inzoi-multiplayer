@@ -15,9 +15,9 @@
       the live sync too.
   The interaction ids aren't documented: they're learned from what the players' Zois do (a hug done by hand once
   teaches the program the hug's id), can be set in config.json "couple_bags", and fall back to guesses.
-- Shared household (cfg "shared_household"): the shared world switched on for the two, with backups of the
-  multiplayer save (saves.backup) before each load and before a downloaded world replaces it, "undo the last save"
-  (/world/undo: the server's previous world version, or the newest local backup) and status for the panel.
+- Your multiplayer save: each player plays their own (no shared world: see Companion.shared_world_on), with backups
+  (saves.backup) before each load, "undo the last save" (/world/undo: the newest local backup) and status for the
+  panel. The shared-world paths (the server's previous world version) are only reached by the tests.
 
 Event data on the wire: {"t":"event","kind":"couple","to":<player id>,"data":{...}} with data
     {"type":"request","id","action","name","site"?}     action: hug | kiss | dance | wave | invite
@@ -282,9 +282,9 @@ class Couple:
         except OSError:
             backups = []
         server_v, local_v = meta.get("version"), mine.get("version")
-        return {"on": bool(self.cfg.get("shared_household")), "shared_world": self.shared_world_on(),
+        return {"on": self.shared_world_on(), "shared_world": self.shared_world_on(),
                 "version": server_v, "local_version": local_v,
-                "behind": bool(server_v and server_v > (local_v or 0)),
+                "behind": bool(self.shared_world_on() and server_v and server_v > (local_v or 0)),
                 "saved_by": meta.get("by"), "saved_by_me": bool(meta and meta.get("pid") == self.me_id),
                 "saved_at": meta.get("time"), "name": meta.get("name"), "size": meta.get("size"),
                 "busy": bool(self.world_busy), "job": self.world_job,

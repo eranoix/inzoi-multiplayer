@@ -1249,10 +1249,9 @@ class Companion(couple.Couple, servers.Servers):
         return self.cfg.get("world") or {}
 
     def shared_world_on(self) -> bool:
-        """The shared world is switched on once each player gets a household of their own in it (stages 2-3);
-        until then only tests and cfg["shared_world"] turn it on."""
-        return bool(self.cfg.get("shared_world") or self.cfg.get("shared_household")
-                    or os.environ.get("INZOI_MP_SHARED_WORLD"))
+        """coop-casal: each player plays their own save (their multiplayer copy) and they meet on the same map. The
+        shared world (one save for everyone) is off for good; only the tests switch it on."""
+        return bool(os.environ.get("INZOI_MP_SHARED_WORLD"))
 
     def check_world(self):
         meta, mine = self.world_meta, self.local_world()
@@ -2067,11 +2066,6 @@ class Companion(couple.Couple, servers.Servers):
                 if k in body and (str(body[k]).strip() or k == "password") and body[k] != self.cfg.get(k):
                     self.cfg[k] = str(body[k]).strip()
                     changed = True
-            if "shared_household" in body:              # living together: the shared world, with backups and undo
-                self.cfg["shared_household"] = bool(body["shared_household"])
-                save_config(self.cfg)
-                self.world_asked = False
-                self.check_world()
             if "sync_time" in body:
                 self.cfg["sync_time"] = bool(body["sync_time"])
                 self.world_synced = 0.0
@@ -2091,7 +2085,7 @@ class Companion(couple.Couple, servers.Servers):
             return {"ok": True, "name": self.cfg["name"],
                     "server": "this PC" if self.hosting and self.play_local else self.cfg.get("server"),
                     "port": self.address()[1], "sync_time": bool(self.cfg.get("sync_time", True)),
-                    "shared_household": bool(self.cfg.get("shared_household")), "clock_mode": self.clock_mode()}
+                    "clock_mode": self.clock_mode()}
 
         async def house_list(_):
             added = self.cfg.get("added_houses", {})

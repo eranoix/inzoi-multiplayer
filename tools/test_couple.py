@@ -227,7 +227,9 @@ async def test_couple():
     # --- shared household: switch, status, undo
     assert not ana.shared_world_on()
     out = await ana_routes["/settings"]({"shared_household": True})
-    assert out["shared_household"] is True and ana.shared_world_on()
+    assert "shared_household" not in out and not ana.shared_world_on(), "living together is gone: own saves only"
+    os.environ["INZOI_MP_SHARED_WORLD"] = "1"                   # (the shared-world code stays, for the tests)
+    assert ana.shared_world_on()
     ana.world_meta = {"version": 3, "by": "Ben", "pid": ben.me_id, "time": 1700000000, "name": "Casa", "size": 10}
     ana.cfg["world"] = {"version": 2, "folder": FOLDER, "mtime": 0}
     h = (await ana_routes["/status"]({}))["household"]
