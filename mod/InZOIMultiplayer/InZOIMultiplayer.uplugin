@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 901,
-	"VersionName": "0.9.1",
+	"Version": 904,
+	"VersionName": "0.9.4",
 	"FriendlyName": "inZOI Multiplayer",
 	"Description": "mp [game_mode]",
 	"Category": "UGC",

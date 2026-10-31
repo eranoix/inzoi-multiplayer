@@ -171,6 +171,8 @@ def settle_on_desktop(args: list[str]) -> bool:
     %LOCALAPPDATA%\\Programs with a shortcut (the host's PC) stays as it is."""
     if not updater.frozen() or os.environ.get("INZOI_MP_NO_SETTLE"):
         return False
+    if testing() and not os.environ.get("INZOI_MP_DESKTOP"):
+        return False                                             # (the exe tests: never the real Desktop)
     exe = Path(sys.executable).resolve()
     programs = Path(os.environ.get("LOCALAPPDATA", "~")).expanduser() / "Programs"
     if str(exe).lower().startswith(str(programs.resolve()).lower() + os.sep):

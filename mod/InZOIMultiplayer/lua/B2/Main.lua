@@ -14,6 +14,8 @@
 --   trail   {key, pts = {{n, x, y, z, yaw}, ...}}              newest positions of that player, n = sample number
 --   hide    {key, on}                                          remote player is elsewhere (other city, loading...)
 --   admit   {key, door, site}                                  let the puppet through a lot's doors like a guest
+--   adopt   {key, entity, x?, y?, z?}                          the player's Zoi already lives here (a member of the
+--           family in this save): drive that one instead of a copy; despawn gives it back to the game
 --   despawn {key}
 --   social  {rid, bag, entity?, key?}   couple actions: the player's own Zoi (`entity`, else the possessed one) runs
 --           interaction `bag` on the puppet of `key` (or on its own without key); "anim:<id>" plays a motion instead.
@@ -299,7 +301,17 @@ local function adopt_puppet(op)
     local id = tonumber(op.entity)
     id = id and math.floor(id)
     if not id or not char(id) then error("no character " .. tostring(op.entity)) end
+    local old = PUPPETS[op.key]
+    if old and old.id ~= id and not old.adopted then         -- a copy made before: the real one takes over
+        pcall(cli, string.format("zoi.destroy entity_id=%d", old.id))
+    end
     freeze(id)
+    pcall(cli, string.format("interaction.clear_queue entity_id=%d cancel_current=true", id))
+    pcall(function() char(id):SetCharacterHiddenInGame(false, "mp_away") end)
+    if op.x and op.y and op.z then teleport(id, op.x, op.y, op.z) end
+    if op.home_door and op.home_site then
+        pcall(function() char(id):GrantKnockDoorVisitSitePrivilege(eid(op.home_door), eid(op.home_site)) end)
+    end
     PUPPETS[op.key] = { id = id, trail = {}, dest = nil, lastOrderT = -10, pending = nil, hidden = false,
                         adopted = true }
     report("spawned", op.key .. " " .. id)
@@ -311,6 +323,8 @@ local function despawn_puppet(op)
     if not p then return "no puppet " .. tostring(op.key) end
     if p.adopted then
         freeze(p.id, false)                             -- their player left: the game looks after them again
+        pcall(cli, string.format("interaction.clear_queue entity_id=%d cancel_current=true", p.id))
+        pcall(function() char(p.id):SetCharacterHiddenInGame(false, "mp_away") end)
     else
         cli(string.format("zoi.destroy entity_id=%d", p.id))
     end
@@ -341,7 +355,10 @@ end
 -- Follow logic: head for the player's newest position (led a little ahead, see below). Redirecting a walk costs a
 -- short stop, so only re-aim when the player has moved REAIM cm away from where we're headed (or we've stopped);
 -- sprint when far behind; teleport when hopelessly behind (other side of town, loading screen...).
-local REAIM, SPRINT, TELEPORT, MIN_GAP = 300, 600, 1500, 0.4
+local REAIM, SPRINT, TELEPORT, MIN_GAP = 300, 600, 1000, 0.4
+-- Where they are, exactly: closer than ARRIVED cm is there; a walk that stopped short (refused, a door, someone's
+-- home) is finished with a teleport after SNAP_AFTER s, a walk going nowhere after STUCK_FOR s.
+local ARRIVED, SNAP_AFTER, STUCK_FOR = 80, 2.5, 3.0
 local ACT_LEAVE = 600       -- while copying an action, only a remote player this far from the puppet means "they left"
 local FACE_GAP, FACE_EVERY = 25, 1.5
 -- Smoothing (no new engine calls: only where the puppet aims and when it redirects):
@@ -447,8 +464,31 @@ local function drive(key, p, dt)
         end
         far = math.max(far, 300)
     end
+    -- Exactly where they are: a walk the game refused or gave up on (a locked door, someone else's home, a spot it
+    -- can't reach) leaves the puppet standing short of them. Once the order has had SNAP_AFTER s, put it there.
+    if not walking and p.aimFor == pick and far >= ARRIVED and S.clock - p.lastOrderT > SNAP_AFTER then
+        teleport(p.id, pick.x, pick.y, pick.z)
+        p.lastOrderT, p.dest, p.facedT = S.clock, pick, nil
+        log_limited(string.format("%s placed where they are (the walk stopped %.1f m short)", key, far / 100), 20)
+        return
+    end
+    -- Walking without getting anywhere (stuck on furniture, a door that won't open): same.
+    if walking then
+        local pr = p.progress
+        if not pr or dist2(me.X, me.Y, pr.x, pr.y) > 40 then
+            p.progress = { x = me.X, y = me.Y, t = S.clock }
+        elseif S.clock - pr.t > STUCK_FOR and far >= ARRIVED then
+            cancel_walk(c)
+            teleport(p.id, pick.x, pick.y, pick.z)
+            p.lastOrderT, p.dest, p.aimFor, p.progress = S.clock, pick, pick, nil
+            log_limited(string.format("%s was stuck: placed where they are", key), 20)
+            return
+        end
+    else
+        p.progress = nil
+    end
     -- (aimFor: the trail point the last order was for; dest may lie LEAD past it)
-    if far < 60 or (not walking and p.aimFor == pick and far < 300) then
+    if far < ARRIVED then
         -- Arrived (or as close as it gets: the spot can be taken): also face the way they face, since a walk ends
         -- facing the walking direction.
         if not walking and far < 300 and pick.yaw and S.clock - (p.facedT or -10) > FACE_EVERY

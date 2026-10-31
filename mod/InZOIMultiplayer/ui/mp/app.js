@@ -67,11 +67,28 @@
     }
 
     // "Use_BarBell_Row" -> "barbell row", "Co_Friendship_G04_Start" -> "friendship"
+    // What a Zoi is doing, from the game's interaction id (it gives no readable name): the first activity whose
+    // words are in the id; something unknown is just "busy" (never the raw id).
+    var ACTIVITIES = [
+        [/sleep|nap|bed/i, 'sleeping'], [/shower|bath(?!room)/i, 'taking a shower'], [/toilet|pee/i, 'in the bathroom'],
+        [/cook|kitchen|stove|fridge/i, 'cooking'], [/(^|_)eat|meal|food|snack|dine/i, 'eating'],
+        [/drink|coffee|(^|_)tea(_|$)|juice|beer|wine/i, 'having a drink'], [/newspaper|read|book|magazine/i, 'reading'],
+        [/phone|smartphone|call|message|sns/i, 'on the phone'], [/tv|television|watch/i, 'watching TV'],
+        [/computer|laptop|pc_|desk/i, 'on the computer'], [/kiss|peck/i, 'kissing'], [/hug/i, 'hugging'],
+        [/dance/i, 'dancing'], [/selfie|pic|photo|camera/i, 'taking photos'],
+        [/guitar|piano|violin|music|sing/i, 'playing music'], [/game|play/i, 'playing'],
+        [/exercise|workout|gym|jog|run|yoga|stretch/i, 'exercising'], [/clean|wash|mop|vacuum|dish/i, 'cleaning'],
+        [/appearance|mirror|makeup|dress|outfit|care/i, 'getting ready'], [/work|job|career/i, 'working'],
+        [/garden|plant|water_/i, 'gardening'], [/^co_|social|talk|chat|friendship|romance|business/i, 'talking'],
+        [/sit|chair|sofa|couch|bench/i, 'sitting'], [/stand|idle|wait/i, 'standing'],
+        [/walk|move|turn|stop|forward|run_to|goto/i, 'walking']
+    ];
     function prettyAction(bag) {
         if (!bag) { return ''; }
-        var s = bag.replace(/^(Co_|Object_|Use_|Next_|Self_|Do_)/, '').replace(/_(G|B)\d+.*$/, '')
-            .replace(/_(Start|Loop|End)\d*$/, '').replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
-        return s.toLowerCase();
+        for (var i = 0; i < ACTIVITIES.length; i++) {
+            if (ACTIVITIES[i][0].test(bag)) { return t(ACTIVITIES[i][1]); }
+        }
+        return t('busy with something');
     }
 
     // ------------------------------------------------------------------ players (updated in place: a row that is
@@ -141,7 +158,7 @@
         var lines = s.chat;
         var newest = lines.length ? lines[lines.length - 1].time : 0;
         unread = 0;
-        if (root._minimized) {
+        if (root._minimized || currentTab !== 'people') {
             lines.forEach(function (m) { if (!m.mine && !m.system && m.time > seenUpTo) { unread++; } });
         } else {
             seenUpTo = Math.max(seenUpTo, newest);
@@ -178,6 +195,8 @@
         clear(label);
         label.appendChild(document.createTextNode(text));
         if (unread && root._minimized) { label.appendChild(el('span', 'badge', t('{n} new', { n: unread }))); }
+        var chatTab = document.querySelector('.tab[data-tab="people"]');
+        if (chatTab) { setText(chatTab, unread && currentTab !== 'people' ? t('Chat ({n})', { n: unread }) : t('Chat')); }
     }
 
     // ------------------------------------------------------------------ notices
@@ -235,7 +254,8 @@
                     text = t('Connected to {server}: waiting for your partner', { server: srv(s) });
                 }
             }
-            subText = t('You are {name} on {server}', { name: s.name, server: srv(s) }) +
+            subText = (s.server === 'this PC' ? t('You are {name}, hosting on this PC', { name: s.name })
+                : t('You are {name} on {server}', { name: s.name, server: s.server })) +
                 (s.via_lan ? ' - ' + t('connected through the local network') : '') +
                 (s.mod !== 'running' ? ' (' + t('getting the game ready') + ')' : '');
         } else {
@@ -530,7 +550,9 @@
             tabs[i].className = 'tab' + (on ? ' on' : '') + (tabs[i].className.indexOf(' alert') >= 0 ? ' alert' : '');
             tabs[i].setAttribute('aria-selected', on ? 'true' : 'false');
         }
-        ['people', 'houses', 'mods', 'settings', 'help'].forEach(function (p) {
+        currentTab = name;
+        if (name === 'couple') { iaKey = ''; loadInteractions(true); }
+        ['couple', 'people', 'houses', 'mods', 'settings', 'help'].forEach(function (p) {
             $('pane-' + p).className = 'pane' + (p === name ? ' on' : '');
         });
         if (housesTimer) { clearInterval(housesTimer); housesTimer = null; }
@@ -555,6 +577,8 @@
         other_city: N('Your partner is in another city ({city}). Travel there first.'),
         no_home: N("You don't have a home in this save yet."),
         not_connected: N('Not connected to the server.'),
+        not_here: N("Your partner's Zoi isn't in your world right now."),
+        not_offered: N("The game doesn't offer that right now. Try again in a moment."),
         bad_action: N("That doesn't work."),
         expired: N('That request has expired.'),
         not_admin: N('Only whoever hosts can undo the shared save.'),
@@ -569,15 +593,18 @@
         if (r.code && ERRORS[r.code]) { return t(ERRORS[r.code], { city: cityName(r.city) }); }
         return errText(r) || t('Something went wrong.');
     }
-    var ACTS = ['hug', 'kiss', 'dance', 'wave', 'holdhands', 'selfie', 'spin'];
     var ASKS = { hug: N('{name} wants to hug you'), kiss: N('{name} wants to kiss you'),
                  dance: N('{name} wants to dance with you'), wave: N('{name} wants a high five'),
                  holdhands: N('{name} wants to hold your hand'), selfie: N('{name} wants a selfie with you'),
                  spin: N('{name} wants to spin you around in a hug'),
-                 invite: N('{name} invited you to their home') };
+                 invite: N('{name} invited you to their home'),
+                 movein: N('{name} wants to move in with you: one family, one home'),
+                 engage: N('{name} wants to get engaged to you'), marry: N('{name} wants to marry you'),
+                 baby: N('{name} wants to have a baby with you') };
     var SENT_NAME = { hug: N('Hug request'), kiss: N('Kiss request'), dance: N('Dance request'), wave: N('High five request'),
                       holdhands: N('Hold hands request'), selfie: N('Selfie request'), spin: N('Spin request'),
-                      invite: N('Invitation') };
+                      invite: N('Invitation'), movein: N('Moving in together'), engage: N('Engagement'),
+                      marry: N('Wedding'), baby: N('Baby') };
     var SENT_STATE = { waiting: N('{what}: waiting for {name} to answer...'), accepted: N('{what}: {name} said yes!'),
                        declined: N('{what}: {name} said no.'), expired: N("{what}: {name} didn't answer."),
                        started: N('{what}: happening now!'), done: N('{what}: done!'),
@@ -705,7 +732,7 @@
         var where = place ? t('Where: {place}', { place: place }) : t('Where: not known yet');
         if (p.here) { where += ' - ' + t('near you'); } else if (p.away) { where += ' - ' + t('in another city'); }
         setText($('p-where'), where);
-        var doing = p.sleep ? t('Sleeping') : (prettyAction(p.action) || String(p.action_text || '').toLowerCase());
+        var doing = p.sleep ? t('Sleeping') : (prettyAction(p.action) || (p.action_text ? prettyAction(p.action_text) : ''));
         var withText = p['with'] === 'you' ? t('with you') : (p['with'] ? t('with {name}', { name: p['with'] }) : '');
         setText($('p-doing'), doing ? (p.sleep ? doing : t('Doing: {what}', { what: doing })) + (withText ? ' ' + withText : '')
             : (withText ? t('Together') + ' ' + withText : ''));
@@ -724,7 +751,7 @@
         var cant = !s.connected || !p.online;
         off($('p-goto'), cant);
         off($('p-invite'), cant);
-        ACTS.forEach(function (a) { off($('a-' + a), cant); });
+        renderCouple(s, p);
     }
     function partnerCall(path, body, okText) {
         if (partnerKey) { body.key = partnerKey; }
@@ -744,9 +771,173 @@
     $('p-invite').addEventListener('click', function () {
         partnerCall('/partner/invite', {}, null);
     });
-    ACTS.forEach(function (a) {
-        $('a-' + a).addEventListener('click', function () { partnerCall('/partner/action', { action: a }, null); });
-    });
+
+    // ------------------------------------------------------------------ the Couple tab
+    // Groups: "moments" (asked first, then done by both Zois), "family" (milestones both saves make true), then every
+    // interaction the game itself offers between the two Zois, in its own words, sorted by the companion.
+    var GROUP_NAMES = { moments: N('Together'), romance: N('Romance'), family: N('Family'), fun: N('Fun'),
+                        friendship: N('Friendship'), talk: N('Talk'), business: N('Business'), conflict: N('Conflict') };
+    var GAME_DESC = N("What the game offers your Zoi with {name}'s right now. It shows up in both games.");
+    var GROUP_DESC = {
+        moments: N('Asks {name} first; when they say yes, both of your Zois do it together.'),
+        family: N('Milestones for the two of you. {name} is asked first; then it becomes true in both saves.'),
+        conflict: N('Careful: these can hurt your relationship.')
+    };
+    var MOMENTS = [['hug', N('Hug')], ['kiss', N('Kiss')], ['dance', N('Dance')], ['wave', N('High five')],
+                   ['holdhands', N('Hold hands')], ['selfie', N('Selfie')], ['spin', N('Spin')]];
+    var FAMILY = [['movein', N('Move in together'), N('One family, one home')],
+                  ['engage', N('Get engaged'), N('Engagement ring')],
+                  ['marry', N('Get married'), N('A wedding for the two of you')],
+                  ['baby', N('Have a baby'), N('A baby on the way')]];
+    var BOND = [['romance', N('Romance')], ['friendship', N('Friendship')], ['family', N('Family')],
+                ['business', N('Business')]];
+    var currentTab = 'couple', chip = 'moments', iaData = null, iaAt = 0, iaLoading = false, iaKey = '';
+    try { chip = localStorage.getItem('mp.chip') || 'moments'; } catch (e) { chip = 'moments'; }
+
+    function partnerHere(s, p) { return !!(s && s.connected && p && p.online && p.here); }
+    function currentPartner() { return lastStatus ? pickPartner(lastStatus) : null; }
+    function loadInteractions(force) {
+        var p = currentPartner();
+        if (!partnerHere(lastStatus, p) || iaLoading) { return; }
+        if (!force && Date.now() - iaAt < 6000) { return; }
+        iaLoading = true;
+        post('/partner/interactions', { key: p.id }, function (r) {
+            iaLoading = false;
+            iaAt = Date.now();
+            if (r && r.ok) { iaData = r; } else if (r && r.code === 'not_here') { iaData = null; }
+            iaKey = '';
+            renderCouple(lastStatus, currentPartner());
+        }, 8000);
+    }
+    function renderBond(r) {
+        var box = $('bond');
+        var sig = r && r.bond ? JSON.stringify(r.bond) + (r.family ? 'f' : '') + I.lang() : '';
+        if (box.getAttribute('data-sig') === sig) { return; }
+        box.setAttribute('data-sig', sig);
+        clear(box);
+        if (!sig) { box.style.display = 'none'; return; }
+        box.style.display = '';
+        if (r.family) { box.appendChild(el('div', 'tag', t('Family: you live together in this save'))); }
+        BOND.forEach(function (b) {
+            var v = r.bond[b[0]];
+            if (!v) { return; }
+            var cell = el('div', 'b ' + b[0]), line = el('div', 'bl');
+            line.appendChild(el('span', '', t(b[1])));
+            line.appendChild(el('span', 'v', String(v.value)));
+            var track = el('div', 'track'), fill = el('div', 'fill');
+            fill.style.width = Math.max(0, Math.min(100, v.value)) + '%';
+            track.appendChild(fill);
+            cell.appendChild(line);
+            cell.appendChild(track);
+            box.appendChild(cell);
+        });
+    }
+    function groupsList() {
+        var list = [{ key: 'moments', items: MOMENTS }, { key: 'family', items: FAMILY }];
+        ((iaData && iaData.groups) || []).forEach(function (g) { list.push({ key: g.key, items: g.items, game: true }); });
+        return list;
+    }
+    function renderChips(groups) {
+        var box = $('chips');
+        var sig = groups.map(function (g) { return g.key + ':' + g.items.length; }).join(',') + '|' + chip + '|' + I.lang();
+        if (box.getAttribute('data-sig') === sig) { return; }
+        box.setAttribute('data-sig', sig);
+        clear(box);
+        groups.forEach(function (g) {
+            var c = el('button', 'chip ' + g.key + (g.key === chip ? ' on' : ''));
+            c.setAttribute('type', 'button');
+            c.setAttribute('role', 'tab');
+            c.setAttribute('aria-selected', g.key === chip ? 'true' : 'false');
+            c.appendChild(document.createTextNode(t(GROUP_NAMES[g.key] || g.key)));
+            if (g.game) { c.appendChild(el('span', 'n', String(g.items.length))); }
+            c.addEventListener('click', function () {
+                chip = g.key;
+                try { localStorage.setItem('mp.chip', chip); } catch (e) {}
+                iaKey = '';
+                renderCouple(lastStatus, currentPartner());
+            });
+            box.appendChild(c);
+        });
+    }
+    function iaButton(group, title, sub, onClick) {
+        var b = el('button', 'ia ' + group), inner = el('span', 'in');
+        b.setAttribute('type', 'button');
+        inner.appendChild(document.createTextNode(title));
+        if (sub) { inner.appendChild(el('span', 's', sub)); }
+        b.appendChild(inner);
+        b.addEventListener('click', function () {
+            b.className = 'ia ' + group + ' done';
+            setTimeout(function () { b.className = 'ia ' + group; }, 1500);
+            onClick();
+        });
+        return b;
+    }
+    function renderCouple(s, p) {
+        var name = p ? p.name : t('your partner'), empty = $('c-empty'), here = partnerHere(s, p), msg = '';
+        if (!s || !s.connected) { msg = t('Not connected to the server.'); }
+        else if (!p) { msg = t('Nobody else is on the server yet. When your partner joins, everything you can do together shows up here.'); }
+        else if (!p.online) { msg = t('{name} is offline. Their Zoi lives its own life in your save until they come back.', { name: name }); }
+        else if (!p.here) { msg = t("{name}'s Zoi isn't in your world right now (another city, the menu, or a loading screen).", { name: name }); }
+        empty.style.display = msg ? 'block' : 'none';
+        setText(empty, msg);
+        $('c-main').style.display = msg ? 'none' : 'flex';
+        if (!here) { return; }
+        if (currentTab === 'couple') { loadInteractions(false); }
+        renderBond(iaData);
+        var groups = groupsList();
+        var want = chip;
+        if (!groups.some(function (g) { return g.key === chip; })) { chip = 'moments'; }
+        renderChips(groups);
+        var shownChip = chip;
+        chip = want;
+        var q = $('ia-search').value.replace(/^\s+|\s+$/g, '').toLowerCase();
+        var key = shownChip + '|' + q + '|' + I.lang() + '|' + name + '|' + iaAt;
+        if (key === iaKey) { return; }
+        iaKey = key;
+        setText($('c-desc'), q ? t('Results for "{q}" in every group', { q: q })
+            : t(GROUP_DESC[shownChip] || GAME_DESC, { name: name }));
+        var grid = $('ia-grid');
+        clear(grid);
+        var shown = 0;
+        groups.forEach(function (g) {
+            if (!q && g.key !== shownChip) { return; }
+            g.items.forEach(function (it) {
+                var title, sub = '', click;
+                if (g.key === 'moments') {
+                    title = t(it[1]);
+                    click = function () { partnerCall('/partner/action', { action: it[0] }, null); };
+                } else if (g.key === 'family') {
+                    title = t(it[1]);
+                    sub = t(it[2]);
+                    if (it[0] === 'movein' && iaData && iaData.family) {
+                        sub = t('Done: you live together');
+                        grid.appendChild(iaButton('family off', title, sub, function () {}));
+                        shown++;
+                        return;
+                    }
+                    click = function () {
+                        partnerCall('/partner/family', { action: it[0] }, function () {
+                            return t('Asked {name}. Waiting for an answer...', { name: name });
+                        });
+                    };
+                } else {
+                    title = it.name;           // (the game's hints are in English only: left out)
+                    click = function () {
+                        partnerCall('/partner/do', { bag: it.id }, function () { return t('Doing: {what}', { what: it.name }); });
+                    };
+                }
+                if (q && title.toLowerCase().indexOf(q) < 0 && sub.toLowerCase().indexOf(q) < 0) { return; }
+                grid.appendChild(iaButton(g.key, title, sub, click));
+                shown++;
+            });
+        });
+        if (!shown) {
+            grid.appendChild(el('div', 'ia-empty', q ? t('Nothing found.') :
+                t('The game offers nothing in this group right now. Get a little closer to {name} or try another group.', { name: name })));
+        }
+    }
+    $('ia-search').addEventListener('input', function () { iaKey = ''; renderCouple(lastStatus, currentPartner()); });
+    $('ia-search').addEventListener('keydown', function (e) { e.stopPropagation(); });
 
     // what happened to what I asked for (shown while waiting, then for a few seconds)
     var sentSeen = {};
@@ -759,7 +950,8 @@
             var showIt = best.state === 'waiting' ? now / 1000 - (best.at || 0) < REQ_LIFE : now - sentSeen[k] < 12000;
             if (showIt) {
                 text = t(SENT_STATE[best.state] || N('{what}: {state}'), {
-                    what: t(SENT_NAME[best.action] || best.action), name: best.to, state: best.state,
+                    what: SENT_NAME[best.action] ? t(SENT_NAME[best.action]) : (best.name || best.action),
+                    name: best.to, state: best.state,
                     msg: I.tr(best.message || '') }).replace(/\s+$/, '');
             }
         }

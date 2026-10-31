@@ -106,7 +106,7 @@ def describe_act(game, a: dict, me: int, owner_of, cache: dict) -> dict | None:
        {"bag", "obj", "ox", "oy", "oz"} with an object (found again by table id near that spot)
        {"bag", "npc": True}            with a character only this world has"""
     bag = a.get("bag")
-    if not bag or bag == "None" or bag.startswith(MOVE_BAGS) or bag.endswith("_FeedBack"):
+    if not bag or bag == "None" or bag.startswith(MOVE_BAGS) or bag.endswith("_FeedBack") or bag == "Self_CantAction":
         return None
     d = {"bag": bag}
     t = a.get("target") or -1

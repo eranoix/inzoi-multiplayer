@@ -45,7 +45,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.3"
+VERSION = "0.9.4"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -327,6 +327,7 @@ class Remote:
         self.seen_at = 0.0           # when the controller's heartbeat last listed their puppet
         self.building = None         # profile hash whose puppet description is being built (build_member)
         self.hidden = False
+        self.adopted = False         # their Zoi here is a member of my family (driven while they're on, not a copy)
         self.act_sig = None          # last mirrored action (json) / anim / outfit, to act on changes only
         self.anim = None
         self.outfit = None
@@ -761,7 +762,27 @@ class Companion(couple.Couple, servers.Servers):
             if not r.profile or not r.state:
                 continue
             here = r.state.get("city") == self.my_city
+            # Their Zoi may live in this save as a member of my family: that one is driven (adopt), never a copy.
+            fam = await self.g(self.family_zoi, r) if here else None
+            if fam and r.spawned and self.puppet_ids.get(r.pid) not in (None, fam):
+                log.info("%s's Zoi lives in your family: using them instead of a copy", r.name)
+                self.despawn(r.pid)                      # (the copy goes; next round the family member is adopted)
+                r.spawned, r.spawn_requested = False, 0.0
+                continue
+            if fam and not r.spawned and time.time() - r.spawn_requested > 8:
+                st = r.state
+                extra = {"home_door": self.home["door"], "home_site": self.home["site"]} if self.home else {}
+                self.mail.op("adopt", key=r.pid, entity=fam, x=st["x"], y=st["y"], z=st["z"], **extra)
+                r.spawned, r.spawn_requested, r.seen_at, r.hidden, r.adopted = True, time.time(), 0.0, False, True
+                r.act_sig = r.anim = r.outfit = None
+                log.info("%s is here: their Zoi in your family follows them now", r.name)
+                continue
+            if r.adopted and r.spawned and not here:
+                self.despawn(r.pid)                      # (a family member isn't hidden: the game looks after them)
+                r.spawned = r.adopted = False
+                continue
             if not r.spawned and here and time.time() - r.spawn_requested > 8:
+                r.adopted = False
                 tpl = await self.g(self.game.template_for, r.profile["gender"], r.profile["growth_step"])
                 if tpl is None:
                     log.warning("no local %s %s Zoi to build %s's puppet on", r.profile["gender"],
@@ -948,7 +969,8 @@ class Companion(couple.Couple, servers.Servers):
                 r = self.remotes.get(key)
                 if r:
                     r.seen_at = time.time()
-                    asyncio.get_running_loop().create_task(self.g(self.bond_puppet, int(eid)))   # (couple.py)
+                    if not r.adopted:                # (a family member keeps the game's own relationship)
+                        asyncio.get_running_loop().create_task(self.g(self.bond_puppet, int(eid)))   # (couple.py)
         elif kind == "despawned":
             key = text.split(" ", 1)[0]
             self.puppet_ids.pop(key, None)

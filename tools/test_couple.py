@@ -261,6 +261,96 @@ async def test_couple():
     assert (await ana_routes["/partner/goto"]({"key": "nobody"}))["code"] == "no_partner"
     print("couple actions, invite, go to: ok")
 
+    # --- family: the partner's Zoi living in my household is driven (adopt), never copied
+    rb.state = {"city": "Dowon", "x": 100.0, "y": 200.0, "z": 30.0}
+    rb.profile = {"first_name": "Ben", "last_name": "Lima", "gender": "Male", "growth_step": "Adult"}
+    members = {"members": [{"entity_id": 10, "first_name": "Ana", "last_name": "Lima"},
+                           {"entity_id": 55, "first_name": "Ben", "last_name": "Lima"}]}
+    avail = {"interactions": [
+        {"interaction_bag_id": "Co_Peck_FemaleToMale_Success", "display_name": "Dar um selinho"},
+        {"interaction_bag_id": "Co_friendship_R10", "display_name": "Falar sobre a vida"},
+        {"interaction_bag_id": "Co_GetOut", "display_name": "Expulsar"},
+        {"interaction_bag_id": "Co_HighFIve_FemaleToMale_Friendship", "display_name": "Toca aqui!"},
+        {"interaction_bag_id": "bad id; x", "display_name": "x"}]}
+    stats = {"stats": {"Romance": {"value": 80.4, "level": 2}, "Friendship": {"value": 99.9, "level": 3}}}
+
+    def game_answers(comp, extra):
+        def call(tool, **kw):
+            comp.fake_calls.append((tool, kw))
+            return extra.get(tool, {})
+        return call
+    ana.game.call = game_answers(ana, {"household.get_members": members, "interaction.list_available": avail,
+                                       "relationships.get_value_between": stats})
+    ana.puppet_ids.pop(ben.me_id, None)
+    rb.spawned, rb.spawn_requested, rb.adopted = False, 0.0, False
+    ana.game.template_for = lambda *a: 3
+    await ana.manage_puppets()
+    adopt = ops(ana, "adopt")[-1]
+    assert adopt["key"] == ben.me_id and adopt["entity"] == 55 and adopt["x"] == 100.0 and rb.adopted, adopt
+    assert not [o for o in ops(ana, "spawn") if o["key"] == ben.me_id], "a family member isn't copied"
+    # a copy from before (a puppet made before they moved in): replaced by the family member
+    ana.puppet_ids[ben.me_id], rb.adopted = 77, False
+    ana.__dict__.pop("_family", None)
+    await ana.manage_puppets()
+    assert ops(ana, "despawn")[-1]["key"] == ben.me_id and not rb.spawned
+    # in another city: the family member is let go (the game looks after them), not hidden
+    ana.puppet_ids[ben.me_id], rb.spawned, rb.adopted = 55, True, True
+    rb.state = {**rb.state, "city": "Bliss Bay"}
+    n = len(ops(ana, "despawn"))
+    await ana.manage_puppets()
+    assert len(ops(ana, "despawn")) == n + 1 and not rb.adopted and not ops(ana, "hide")[-1:] == [{"key": ben.me_id}]
+    rb.state = {**rb.state, "city": "Dowon"}
+    ana.puppet_ids[ben.me_id], rb.spawned, rb.adopted = 55, True, True
+    print("family member adopted (not copied), copies replaced, let go elsewhere: ok")
+
+    # --- every interaction the game offers, by group; doing one
+    ia = await ana_routes["/partner/interactions"]({})
+    groups = {g["key"]: [i["id"] for i in g["items"]] for g in ia["groups"]}
+    assert groups == {"romance": ["Co_Peck_FemaleToMale_Success"], "talk": ["Co_friendship_R10"],
+                      "conflict": ["Co_GetOut"], "fun": ["Co_HighFIve_FemaleToMale_Friendship"]}, groups
+    assert [g["key"] for g in ia["groups"]] == ["romance", "fun", "talk", "conflict"]
+    assert ia["bond"]["romance"] == {"value": 80, "level": 2} and ia["family"] is True
+    res = await ana_routes["/partner/do"]({"bag": "Co_friendship_R10"})
+    assert res.get("ok") and ops(ana, "social")[-1] == {**ops(ana, "social")[-1], "bag": "Co_friendship_R10",
+                                                        "key": ben.me_id, "entity": 10, "now": True}
+    assert ana.couple_view()["couple"]["sent"][-1]["name"] == "Falar sobre a vida"
+    assert (await ana_routes["/partner/do"]({"bag": "Co_SomethingElse"}))["code"] == "not_offered"
+    assert (await ana_routes["/partner/do"]({"bag": "bad id; x"}))["code"] == "not_offered"
+    print("interactions by group, doing one: ok")
+
+    # --- family milestones: Ana asks to move in, Ben says yes: each save makes it so (Ben's copy of Ana joins
+    # Ben's household), then marriage
+    ben.puppet_ids[ana.me_id], ra.spawned, ra.adopted = 88, True, False
+    ra.profile = {"first_name": "Ana", "last_name": "Lima", "gender": "Female"}
+    ben.game.call = game_answers(ben, {"household.get_members": {"members": [
+        {"entity_id": 20, "first_name": "Ben", "last_name": "Lima"}]}})
+    res = await ana_routes["/partner/family"]({"action": "movein"})
+    assert res.get("ok"), res
+    assert await until(lambda: ben.requests)
+    q = next(iter(ben.requests.values()))
+    assert q["action"] == "movein"
+    out = await ben_routes["/partner/respond"]({"id": q["id"], "accept": True})
+    assert out["result"]["state"] == "done", out
+    assert ("household.add_member", {"entity_id": 88}) in ben.fake_calls and ra.adopted
+    assert ("life_and_death.stop_aging", {"entity_id": 88, "Enable": False}) in ben.fake_calls
+    assert ops(ben, "adopt")[-1]["entity"] == 88
+    assert await until(lambda: ana.sent[res["id"]]["state"] == "done")
+    assert not [c for c in ana.fake_calls if c[0] == "household.add_member"], "Ana's save had Ben in the family"
+    res = await ben_routes["/partner/family"]({"action": "marry"})
+    assert await until(lambda: ana.requests)
+    await ana_routes["/partner/respond"]({"id": next(iter(ana.requests)), "accept": True})
+    assert ("marriage.marry", {"entity_id": 10, "target_entity_id": 55}) in ana.fake_calls
+    assert await until(lambda: ("marriage.marry", {"entity_id": 20, "target_entity_id": 88}) in ben.fake_calls)
+    res = await ana_routes["/partner/family"]({"action": "baby"})
+    assert await until(lambda: ben.requests)
+    await ben_routes["/partner/respond"]({"id": next(iter(ben.requests)), "accept": True})
+    assert ("pregnancy_and_birth.get_baby_with", {"entity_id": 88, "partner_id": 20}) in ben.fake_calls, \
+        "the mother is the woman"
+    assert (await ana_routes["/partner/family"]({"action": "divorce"}))["code"] == "bad_action"
+    print("family milestones (move in, marry, baby) in both saves: ok")
+    ana.game.call = lambda tool, **kw: ana.fake_calls.append((tool, kw)) or {}
+    ben.game.call = lambda tool, **kw: ben.fake_calls.append((tool, kw)) or {}
+
     # --- shared household: switch, status, undo
     assert not ana.shared_world_on()
     out = await ana_routes["/settings"]({"shared_household": True})

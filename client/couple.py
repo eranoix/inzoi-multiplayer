@@ -37,7 +37,25 @@ log = logging.getLogger("couple")
 ACTIONS = ("hug", "kiss", "dance", "wave", "holdhands", "selfie", "spin")
 TARGETED = ("hug", "kiss", "holdhands", "selfie", "spin")   # done to the partner's Zoi (it must be here)
 TOGETHER = ("dance", "wave")               # with the partner's Zoi when it's here, else alone
-REQUEST_KINDS = ACTIONS + ("invite",)
+# Family milestones: asked like the couple actions; on "yes" each PC makes it so in its own save (both saves agree).
+FAMILY = ("movein", "engage", "marry", "baby")
+REQUEST_KINDS = ACTIONS + ("invite",) + FAMILY
+# Every interaction the game offers between the two Zois (interaction.list_available, with the game's own names),
+# sorted into the panel's groups by their ids. First match wins; the rest is "talk".
+GROUPS = (
+    ("conflict", re.compile(r"_B\d|GetOut|Theft|Criminal|Imprison|RemoveGroupMember|Tease|Borrow_Money|Insult|Fight|"
+                            r"Slap", re.I)),
+    ("talk", re.compile(r"InformationReveal|_R\d+(_\d+)?$|Skill_|Sharing_|SLM_\w*Talk|_Talk", re.I)),
+    ("romance", re.compile(r"Kiss|Peck|Romance|Romantic|Love|Lover|Flirt|Propos|Marr|Engage|Date|Cohabit|Hug|HoldHand|"
+                           r"Woo", re.I)),
+    ("fun", re.compile(r"HighFIve|HighFive|Selfie|TakePic|Dance|Buddy|MoneyGun|Joke|Toast|Pose|Game|Play|Prank|Gift",
+                       re.I)),
+    ("business", re.compile(r"Business|Namecard|HandShake|Box_Give|Errand|Info_Share|Invest", re.I)),
+    ("friendship", re.compile(r"Friendship|Friend|CheerUp|Karma|SLM|HopeLife|Sharing|Compliment|Comfort", re.I)),
+)
+GROUP_ORDER = ("romance", "fun", "friendship", "talk", "business", "conflict")
+FAMILY_LINES = {"movein": "You live together now", "engage": "You're engaged!", "marry": "You're married!",
+                "baby": "A baby is on the way!"}
 REQUEST_TTL = 90                           # seconds a request can be answered
 MAX_PENDING = 20
 BAG_ID = re.compile(r"^(anim:)?[A-Za-z0-9_]{1,80}$")
@@ -59,10 +77,12 @@ ALONE_BAGS = {"dance": "Next_Dance_Start"}  # (checked in the real game)
 LEARN = {"hug": re.compile(r"hug", re.I), "kiss": re.compile(r"kiss", re.I), "dance": re.compile(r"dance", re.I),
          "wave": re.compile(r"(?<!micro)wave", re.I)}             # (not Use_Microwave)
 ACTION_NAMES = {"hug": "hug", "kiss": "kiss", "dance": "dance", "wave": "high five", "holdhands": "hold hands",
-                "selfie": "selfie", "spin": "spin", "invite": "invitation"}       # (chat lines)
+                "selfie": "selfie", "spin": "spin", "invite": "invitation", "movein": "moving in together",
+                "engage": "engagement", "marry": "wedding", "baby": "baby"}       # (chat lines)
 VERBS = {"hug": "hug you", "kiss": "kiss you", "dance": "dance with you", "wave": "high-five you",
          "holdhands": "hold your hand", "selfie": "take a selfie with you", "spin": "spin you around in a hug",
-         "invite": "invite you to their home"}
+         "invite": "invite you to their home", "movein": "move in with you (one family, one home)",
+         "engage": "get engaged to you", "marry": "marry you", "baby": "have a baby with you"}
 
 
 class Couple:
@@ -96,6 +116,29 @@ class Couple:
             self.game.call("relationships.set_value_between", owner_id=self.my_entity, target_id=eid, Value=100)
         except Exception as e:                           # noqa: BLE001 (a game without it: guesses only)
             log.debug("couldn't set the relationship with puppet %s: %s", eid, e)
+
+    def family_zoi(self, r) -> int | None:
+        """The partner's Zoi as a member of my household in this save (same first and last name), or None. Looked
+        up at most every 20 s per partner."""
+        prof = (r.profile or {}) if r else {}
+        name = ((prof.get("first_name") or "").strip().casefold(), (prof.get("last_name") or "").strip().casefold())
+        if not name[0]:
+            return None
+        cache = self.__dict__.setdefault("_family", {})
+        hit = cache.get(r.pid)
+        if hit and hit[2] == name and time.time() - hit[1] < 20:
+            return hit[0]
+        found = hit[0] if hit and hit[2] == name else None
+        try:
+            res = self.game.call("household.get_members") or {}
+            found = next((int(m["entity_id"]) for m in res.get("members") or []
+                          if m.get("entity_id") and int(m["entity_id"]) != self.my_entity
+                          and ((m.get("first_name") or "").strip().casefold(),
+                               (m.get("last_name") or "").strip().casefold()) == name), None)
+        except Exception as e:                           # noqa: BLE001 (keep the last answer)
+            log.debug("couldn't list my household: %s", e)
+        cache[r.pid] = (found, time.time(), name)
+        return found
 
     def bag_with(self, action: str, eid: int, them: str | None) -> str | None:
         """The interaction id for doing `action` to the partner's Zoi (entity eid): the first of WITH_PARTNER (or
@@ -145,7 +188,7 @@ class Couple:
         self.prune_requests()
         return {"requests": [{k: q.get(k) for k in ("id", "from", "from_id", "action", "at")}
                              for q in sorted(self.requests.values(), key=lambda q: q["at"])],
-                "couple": {"sent": [{k: s.get(k) for k in ("id", "to", "to_id", "action", "at", "state", "message")}
+                "couple": {"sent": [{k: s.get(k) for k in ("id", "to", "to_id", "action", "name", "at", "state", "message")}
                                     for s in sorted(self.sent.values(), key=lambda s: s["at"])][-5:],
                            "bags": {a: {"id": self.couple_bag(a),
                                         "learned": bool((self.cfg.get("couple_bags") or {}).get(a))}
@@ -261,6 +304,13 @@ class Couple:
                 return self.mark(req, "done")
             res = await self.partner_goto(pid)
             return self.mark(req, "done" if res.get("ok") else "failed", res.get("error", ""))
+        if action in FAMILY:                             # both saves: each PC makes it so in its own
+            try:
+                res = await self.g(self.family_apply, action, pid)
+            except Exception as e:                       # noqa: BLE001 - the game refused: say so in the panel
+                log.warning("family %s failed: %s", action, e)
+                res = {"error": str(e)}
+            return self.mark(req, "done" if res.get("ok") else "failed", res.get("error", ""))
         together = action in TARGETED or (action in TOGETHER and pid in self.puppet_ids)
         if together and not initiator:
             # (their Zoi starts it in their game; it reaches mine through the live sync, on my own Zoi)
@@ -287,6 +337,94 @@ class Couple:
                  " on your partner's Zoi" if together else "")
         self.mail.op("social", **op)
         return self.mark(req, "started")
+
+    # ------------------------------------------------------------------ family
+    def family_apply(self, action: str, pid: str) -> dict:
+        """Make a family milestone true in this save, between my Zoi and the partner's Zoi here (runs in a thread).
+        Anything but moving in needs them in the family first, so that comes first when it isn't so yet."""
+        r = self.remotes.get(pid)
+        eid = self.puppet_ids.get(pid)
+        if not r or not eid or not self.my_entity:
+            return {"error": "your partner's Zoi isn't in your world right now", "code": "not_here"}
+        call = self.game.call
+        if self.family_zoi(r) != eid:
+            # The copy joins my household: from now on it is their Zoi in this save (it ages and lives here).
+            call("household.add_member", entity_id=eid)
+            for cmd in ("life_and_death.stop_aging", "life_and_death.immortal"):
+                try:
+                    call(cmd, entity_id=eid, Enable=False)
+                except Exception:                        # noqa: BLE001
+                    pass
+            self.__dict__.setdefault("_family", {}).pop(pid, None)
+            extra = {"home_door": self.home["door"], "home_site": self.home["site"]} if self.home else {}
+            self.mail.op("adopt", key=pid, entity=eid, **extra)       # (the controller keeps it: never destroyed)
+            r.adopted = True
+            log.info("%s's Zoi moved in: one family, one home", r.name)
+        if action == "engage":
+            call("marriage.engage", entity_id=self.my_entity, target_entity_id=eid)
+        elif action == "marry":
+            call("marriage.marry", entity_id=self.my_entity, target_entity_id=eid)
+        elif action == "baby":
+            mine = (self.__dict__.get("my_gender") or "").lower()
+            theirs = ((r.profile or {}).get("gender") or "").lower()
+            mother, father = (eid, self.my_entity) if theirs == "female" and mine != "female" else (self.my_entity, eid)
+            call("pregnancy_and_birth.get_baby_with", entity_id=mother, partner_id=father)
+        log.info("family with %s: %s", r.name, action)
+        self.system_line(FAMILY_LINES[action])
+        return {"ok": True}
+
+    # ------------------------------------------------------------------ every interaction the game offers
+    def partner_interactions(self, pid: str | None) -> dict:
+        """What my Zoi can do with the partner's Zoi right now, in the game's own words, by group; and how the two
+        get on (the game's relationship stats). Runs in a thread."""
+        r = self.partner(pid)
+        if not r:
+            return {"error": "your partner isn't online", "code": "no_partner"}
+        eid = self.puppet_ids.get(r.pid)
+        if not eid or not self.my_entity or self.world == "out":
+            return {"error": "your partner's Zoi isn't in your world right now", "code": "not_here"}
+        avail = self.game.call("interaction.list_available", entity_id=self.my_entity, target_entity_id=eid) or {}
+        groups: dict[str, list] = {}
+        seen: dict[str, str] = {}
+        for i in avail.get("interactions") or []:
+            bag = str(i.get("interaction_bag_id") or "")
+            if not BAG_ID.match(bag) or bag in seen or bag.startswith("anim:"):
+                continue
+            seen[bag] = str(i.get("display_name") or bag)
+            g = next((k for k, rx in GROUPS if rx.search(bag)), "talk")
+            groups.setdefault(g, []).append({"id": bag, "name": i.get("display_name") or bag,
+                                             "hint": i.get("hint") or "", "enabled": i.get("enabled", True)})
+        self.__dict__["_offered"] = (r.pid, seen)
+        bond = {}
+        try:
+            stats = (self.game.call("relationships.get_value_between", owner_id=self.my_entity,
+                                    target_id=eid) or {}).get("stats") or {}
+            bond = {k.lower(): {"value": round(v.get("value") or 0), "level": v.get("level") or 0}
+                    for k, v in stats.items() if isinstance(v, dict)}
+        except Exception:                                # noqa: BLE001
+            pass
+        return {"ok": True, "family": bool(r.adopted), "bond": bond,
+                "groups": [{"key": k, "items": sorted(groups[k], key=lambda x: x["name"])}
+                           for k in GROUP_ORDER if k in groups]}
+
+    def partner_do(self, pid: str | None, bag: str) -> dict:
+        """Do one of those with the partner's Zoi: my Zoi starts it here, and the live sync carries it over (on
+        their PC my Zoi does it to theirs, which answers it the way the game does)."""
+        r = self.partner(pid)
+        if not r:
+            return {"error": "your partner isn't online", "code": "no_partner"}
+        eid = self.puppet_ids.get(r.pid)
+        if not eid or not self.my_entity:
+            return {"error": "your partner's Zoi isn't in your world right now", "code": "not_here"}
+        offered = self.__dict__.get("_offered")
+        if not BAG_ID.match(bag or "") or not offered or offered[0] != r.pid or bag not in offered[1]:
+            return {"error": "the game doesn't offer that right now", "code": "not_offered"}
+        rid = secrets.token_hex(6)
+        self.sent[rid] = {"id": rid, "to": r.name, "to_id": r.pid, "action": bag, "name": offered[1][bag],
+                          "at": time.time(), "state": "started", "message": ""}
+        self.mail.op("social", rid=rid, bag=bag, entity=self.my_entity, key=r.pid, now=True)
+        log.info("interaction with %s: %s", r.name, bag)
+        return {"ok": True, "id": rid}
 
     def mark(self, req: dict, state: str, message: str = "") -> dict:
         req["state"], req["message"] = state, message
@@ -455,5 +593,23 @@ class Couple:
             folder = self.local_world().get("folder") or (self.cfg.get("mp_save") or {}).get("folder")
             return {"backups": await self.g(self.backups_view, folder)}
 
-        return {"/partner/goto": goto, "/partner/invite": invite, "/partner/action": action,
+        async def interactions(body):
+            return await self.g(self.partner_interactions, body.get("key"))
+
+        async def do(body):
+            return await self.g(self.partner_do, body.get("key"), str(body.get("bag", "")))
+
+        async def family(body):
+            act = str(body.get("action", ""))
+            if act not in FAMILY:
+                return {"error": f"unknown action {act!r}", "code": "bad_action"}
+            r = self.partner(body.get("key"))
+            if not r:
+                return {"error": "your partner isn't online", "code": "no_partner"}
+            if r.pid not in self.puppet_ids:
+                return {"error": "your partner's Zoi isn't in your world right now", "code": "not_here"}
+            return await self.couple_request(r, act)
+
+        return {"/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
+                "/partner/goto": goto, "/partner/invite": invite, "/partner/action": action,
                 "/partner/respond": respond, "/world/undo": undo, "/world/backups": backups}

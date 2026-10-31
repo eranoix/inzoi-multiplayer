@@ -38,20 +38,26 @@ try { localStorage.setItem('mp.lang', '%LANG%'); } catch (e) {}
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--tab", default="people")
+    ap.add_argument("--tab", default="couple")
     ap.add_argument("--lang", default="pt-BR")
     ap.add_argument("--out", default=str(Path(tempfile.gettempdir()) / "panel.png"))
     ap.add_argument("--width", type=int, default=520)
     ap.add_argument("--height", type=int, default=960)
-    ap.add_argument("--mock", help="a /status JSON file to answer with (no companion needed)")
+    ap.add_argument("--mock", help="a /status JSON file to answer with (no companion needed); or a file mapping "
+                                   "paths to answers: {\"/status\": {...}, \"/partner/interactions\": {...}}")
+    ap.add_argument("--console", action="store_true", help="print the page's console messages (errors)")
+    ap.add_argument("--chip", help="the Couple tab's group to show (moments, family, romance, fun, talk...)")
     a = ap.parse_args()
     stubs = STUBS.replace("%LANG%", a.lang)
+    if a.chip:
+        stubs += "<script>try { localStorage.setItem('mp.chip', '%s'); } catch (e) {}</script>" % a.chip
     if a.mock:
-        status = Path(a.mock).read_bytes()
+        data = json.loads(Path(a.mock).read_text("utf-8"))
+        routes = data if "/status" in data else {"/status": data}
 
         class Mock(http.server.BaseHTTPRequestHandler):
             def answer(self):
-                body = status if self.path.startswith("/status") else b"{}"
+                body = json.dumps(routes.get(self.path.split("?")[0], {})).encode()
                 self.send_response(200)
                 for k, v in (("Content-Type", "application/json"), ("Access-Control-Allow-Origin", "*"),
                              ("Access-Control-Allow-Headers", "Content-Type")):
@@ -81,11 +87,15 @@ def main():
     try:
         out = Path(a.out).resolve()
         with tempfile.TemporaryDirectory() as prof:
-            subprocess.run([str(EDGE), "--headless=new", "--disable-gpu", f"--user-data-dir={prof}",
+            r = subprocess.run([str(EDGE), "--headless=new", "--enable-logging=stderr", "--v=0", "--disable-gpu", f"--user-data-dir={prof}",
                             "--hide-scrollbars", f"--window-size={a.width},{a.height}",
                             "--virtual-time-budget=6000", "--allow-file-access-from-files",
                             "--disable-web-security", f"--screenshot={out}", page.as_uri()],
-                           capture_output=True, timeout=90)
+                           capture_output=True, timeout=90, text=True, errors="replace")
+            if a.console:
+                for line in (r.stderr or "").splitlines():
+                    if "CONSOLE" in line or "Uncaught" in line:
+                        print(line[:400])
         time.sleep(0.5)
         print(out if out.exists() else "no screenshot", flush=True)
     finally:
