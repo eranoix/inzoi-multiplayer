@@ -16,6 +16,19 @@ MCP_PORT = 11212                                                                
 # Interactions that are just getting somewhere: a puppet's own follow logic covers them.
 MOVE_BAGS = ("ClickMove", "SelfMove", "Move_", "WalkTo", "Run_", "Sprint")
 
+_ESCAPE = re.compile(r'\\(["\\/bfnrtu]?)')
+
+
+def loads(text: str):
+    """json.loads, but forgiving one thing inZOI does: a lone backslash in a string (a Windows path in a lot or
+    object name), which makes the whole answer unreadable. Lone ones are doubled and the answer read again."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        if "escape" not in e.msg:
+            raise
+        return json.loads(_ESCAPE.sub(lambda m: m.group(0) if m.group(1) else "\\\\", text))
+
 
 class GameError(Exception):
     pass
@@ -154,13 +167,13 @@ class Game:
     def call(self, tool: str, **args):
         raw = self._post("tools/call", {"name": tool.replace(".", "_"), "arguments": args})
         try:
-            res = json.loads(raw).get("result") or {}
+            res = loads(raw).get("result") or {}
             if res.get("structuredContent") is not None:
                 out = res["structuredContent"]
             else:
                 text = " ".join(c.get("text", "") for c in res.get("content") or [] if isinstance(c, dict))
                 try:
-                    out = json.loads(text)
+                    out = loads(text)
                 except ValueError:
                     out = {"_text": text}
         except (ValueError, KeyError, TypeError, AttributeError) as e:     # empty / half / odd answer (loading...)

@@ -368,6 +368,8 @@ def main():
     args = ap.parse_args()
     saved = companion.read_config()
     mode = args.mode or (saved.get("mode") if saved.get("mode") in ("play", "host", "host-only") else "play")
+    if not args.mode and mode == "play" and (saved.get("server") or DEFAULT_SERVER) in netinfo.local_ipv4():
+        mode = "host"                                     # coop-casal: the same exe on the host's PC: joining itself
     if mode == "host-only" or (mode == "host" and getattr(sys, "frozen", False)):
         make_console()                                    # (host: a window to close to stop it, now that it stays up)
     else:
