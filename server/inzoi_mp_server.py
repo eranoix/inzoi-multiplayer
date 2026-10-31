@@ -58,6 +58,7 @@ SHA = re.compile(r"[0-9a-f]{64}")
 FILE_MESSAGES = {"blob_check", "blob_put", "blob_get", "ping", "pong"}
 BEFORE_HELLO = {"info", "ping", "pong", "dir_announce", "dir_list", "dir_remove"}   # allowed without joining
 PART_TTL = 86400                   # an unfinished upload (.part) older than this is deleted
+LINGER = 10                        # seconds a player who dropped without "bye" stays (a blip, a restart): no Zoi flicker
 BLOB_GRACE = 3600                  # an unreferenced blob younger than this is kept (it may be part of an upload)
 HISTORY = 20                       # world versions kept (their files stay on disk: an admin can go back to one)
 ANNOUNCE_EVERY = 60                # seconds between a public server's announcements to its directories
@@ -513,14 +514,22 @@ class Server:
         finally:
             self.conns.discard(c)
             await c.close()
-            await self.drop(c)
+            await self.drop(c, linger=not getattr(c, "said_bye", False))
 
     async def gc(self) -> None:
         """Deletes blobs nothing uses any more (keeping the files of world uploads under way), off the event loop."""
         keep = {h for offer in self.world_offers.values() for h in offer}
         await asyncio.to_thread(self.store.gc_blobs, keep)
 
-    async def drop(self, c: Client, reelect: bool = True) -> None:
+    async def drop(self, c: Client, reelect: bool = True, linger: bool = False) -> None:
+        """A player is gone. linger: the connection just broke (no "bye"): they stay listed LINGER s first, so a
+        quick reconnect (a Wi-Fi blip, their program restarting for an update) is a silent rejoin, not leave+join."""
+        if linger and c.id and self.clients.get(c.id) is c:
+            async def later():
+                await asyncio.sleep(LINGER)
+                await self.drop(c, reelect)
+            asyncio.get_running_loop().create_task(later())
+            return
         if c.id and self.clients.get(c.id) is c:
             del self.clients[c.id]
             log.info("%s (%s) left", c.name, c.id)
@@ -556,6 +565,9 @@ class Server:
             await c.send({"t": "error", "code": "unknown_type", "error": f"unknown message type {t!r}"})
             return
         await fn(c, msg)
+
+    async def on_bye(self, c: Client, msg: dict) -> None:
+        c.said_bye = True                            # leaving on purpose: told at once (see drop)
 
     async def on_hello(self, c: Client, msg: dict) -> None:
         if msg.get("protocol") != PROTOCOL:

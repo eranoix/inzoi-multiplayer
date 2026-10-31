@@ -210,8 +210,17 @@ class Servers:
         self.public["at"] = 0.0                        # the page's lists show where we are: look again
         self.save_cfg()
         if self.writer:
+            self.say_bye()
             self.writer.close()
         self.wake.set()
+
+    def say_bye(self):
+        """Leaving the server on purpose: say so, so friends see it at once (a dropped connection lingers)."""
+        try:
+            if self.writer and self.me_id:
+                self.writer.write(b'{"t":"bye"}\n')
+        except Exception:                              # noqa: BLE001 - best effort
+            pass
 
     def adopt_server(self, summary: dict | None, admin: bool | None):
         """Joined a server (or its settings changed): know who it is, and switch to its multiplayer save."""
@@ -646,6 +655,7 @@ class Servers:
 
     def shutdown(self):
         """The program is closing: take friends' Zois out of the game and close the page."""
+        self.say_bye()
         self.despawn_all()
         if self.menu_item:
             self.menu_item.hide()
