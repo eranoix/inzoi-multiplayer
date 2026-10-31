@@ -47,7 +47,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.29"
+VERSION = "0.9.30"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -748,29 +748,62 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
         sig = json.dumps(act, sort_keys=True) if act else None
         if sig != r.act_sig:
             r.act_sig, r.anim = sig, None
+            r.act_tries, r.act_sent_at = 0, time.time()
             if act is None:
                 self.mail.op("act_stop", key=r.pid)
             elif not act.get("npc"):
-                op = {"bag": act["bag"], "x": st["x"], "y": st["y"]}
-                if act.get("player"):
-                    target = self.my_entity if act["player"] == self.me_id else self.puppet_ids.get(act["player"])
-                    op["target"] = target    # None: with someone who isn't here, nothing to join in on
-                elif act.get("obj"):
-                    op.update({k: act[k] for k in ("obj", "ox", "oy", "oz")})
-                    if st.get("anim"):
-                        op["anim"] = st["anim"]
+                op = self.act_op(r, st)
                 self.learn_bag(act)              # (couple actions: the game's own interaction ids)
-                if not act.get("player") or op["target"]:
+                if op:
                     if act.get("player") == self.me_id and not self.mirror_ok(r, act["bag"]):
                         self.ask_local(r, act["bag"], op)    # (couple.py: a popup first, then it plays here)
                     else:
                         self.mail.op("act", key=r.pid, **op)
+                        self.tele.rec("note", text=f"{r.name}: act {act['bag']} sent")
         if act and act.get("npc") and st.get("anim") and st["anim"] != r.anim:
             r.anim = st["anim"]              # busy with someone only they have: at least show the motion
             self.mail.op("anim", key=r.pid, anim=st["anim"])
         if st.get("outfit") and st["outfit"] != r.outfit:
             r.outfit = st["outfit"]
             self.mail.op("outfit", key=r.pid, category=st["outfit"])
+
+    def act_op(self, r: Remote, st: dict) -> dict | None:
+        """The controller's "act" op for the partner's current action (None: nothing to do it with here)."""
+        act = st.get("act") or {}
+        if not act.get("bag") or act.get("npc"):
+            return None
+        op = {"bag": act["bag"], "x": st["x"], "y": st["y"]}
+        if act.get("player"):
+            op["target"] = self.my_entity if act["player"] == self.me_id else self.puppet_ids.get(act["player"])
+            if not op["target"]:
+                return None              # (with someone who isn't here: nothing to join in on)
+        elif act.get("obj"):
+            op.update({k: act[k] for k in ("obj", "ox", "oy", "oz")})
+            if st.get("anim"):
+                op["anim"] = st["anim"]
+        return op
+
+    def reconcile_act(self, r: Remote, shown: str | None):
+        """The partner does X, their Zoi here doesn't: send X again (an op can expire unseen while the game is paused
+        or the controller restarts), every ACT_RETRY s, at most ACT_TRIES times per action."""
+        st = r.state or {}
+        act = st.get("act") or {}
+        want = act.get("bag")
+        if not want or act.get("npc") or act.get("player") == self.me_id:
+            return
+        if shown and (shown == want or shown.startswith(want)):
+            return
+        if shown and shown.startswith(("ClickMove", "Move")) and time.time() - r.__dict__.get("act_sent_at", 0) < 8:
+            return                               # (walking there)
+        tries = r.__dict__.get("act_tries", 0)
+        if tries >= 5 or time.time() - r.__dict__.get("act_sent_at", 0) < 4:
+            return
+        op = self.act_op(r, st)
+        if not op:
+            return
+        r.act_tries, r.act_sent_at = tries + 1, time.time()
+        self.mail.op("act", key=r.pid, **op)
+        self.tele.rec("note", text=f"{r.name}: act {want} sent again (try {tries + 1}; their Zoi here: {shown})")
 
     def drop_remote(self, r: Remote):
         r.building = None
@@ -1264,6 +1297,8 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
             err = None
             if all(isinstance(st.get(k), (int, float)) for k in ("x", "y")):
                 err = round(((s["x"] - st["x"]) ** 2 + (s["y"] - st["y"]) ** 2) ** 0.5)
+            if r.pid in self.puppet_ids and not r.hidden:
+                self.reconcile_act(r, a.get("bag"))
             self.tele.rec("pup", p=r.name, e=e, x=s["x"], y=s["y"], z=s["z"], yaw=s["yaw"], site=s["site"],
                           bag=a.get("bag"), action=a.get("action"), target=a.get("target"),
                           anim=(a.get("anim") or {}).get("id"), motions=[m["id"] for m in a.get("motions") or []],

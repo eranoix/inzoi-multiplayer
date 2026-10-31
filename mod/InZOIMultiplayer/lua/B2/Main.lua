@@ -513,11 +513,23 @@ end
 local function start_act(c, p)
     local a = p.actQueued
     p.actQueued = nil
-    queue_interaction(p.id, a.bag, a.target)
+    local ok, err = pcall(queue_interaction, p.id, a.bag, a.target)
+    if not ok then log(string.format("%s act %s: the game refused to queue it (%s)", p.key or "?", a.bag, tostring(err))) end
     p.act.started = S.clock
 end
 
+-- 1.5 s after an action was queued: is it really running on the puppet? (the telemetry report shows why not)
+local function check_act(key, c, p)
+    if not p.act or not p.act.started or p.act.checked or S.clock - p.act.started < 1.5 then return end
+    p.act.checked = true
+    local cur = current_bag(c)
+    local walking = cur and cur:match("^ClickMove")
+    log(string.format("%s act %s: %s (the Zoi is doing %s)", key, p.act.bag,
+        cur == p.act.bag and "running" or (walking and "walking there" or "NOT running"), tostring(cur)))
+end
+
 local function drive(key, p, dt)
+    p.key = key
     local c = char(p.id)
     if not c then error("no character " .. tostring(p.id)) end     -- counted by on_tick: gone for good -> dropped
     if p.pending then                                   -- second half of a redirect: the old walk is gone now
@@ -528,6 +540,7 @@ local function drive(key, p, dt)
         end
         return
     end
+    check_act(key, c, p)
     if p.actQueued then                                 -- an action waits for the cancelled walk to clear
         p.actQueued.t = p.actQueued.t + dt
         if not is_walking(c) or p.actQueued.t > 0.3 then start_act(c, p) end

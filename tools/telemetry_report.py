@@ -61,7 +61,7 @@ def direction(title, sender_rows, receiver_rows, sender_name, out):
     truth = sorted((((r["st"].get("ts") or r["t"]) + off, r["st"]) for r in sender_rows
                     if r["k"] == "out" and isinstance(r.get("st"), dict) and "x" in r["st"]), key=lambda x: x[0])
     pups = [r for r in receiver_rows if r["k"] == "pup" and (sender_name is None or r.get("p") == sender_name)]
-    luas = [r for r in receiver_rows if r["k"] == "lua"]
+    luas = [r for r in receiver_rows if r["k"] in ("lua", "note")]
     lua_t = [r["t"] for r in luas]
     out.append(f"\n=== {title} ===")
     if not truth or not pups:
