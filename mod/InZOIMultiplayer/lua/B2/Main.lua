@@ -541,6 +541,17 @@ local function drive(key, p, dt)
     local pick = p.trail[#p.trail]
     local me = c:GetLocation()
     local far = dist2(me.X, me.Y, pick.x, pick.y)
+    if p.pose then                                      -- (a posture: exactly where and how they are, no walking)
+        local mc = c:GetMovementComponent()
+        mc.InputVector = UE.FVector(0, 0, 0)
+        local yawOff = pick.yaw and yaw_gap(c:GetRotation().Yaw, pick.yaw) or 0
+        if (far > 25 or yawOff > 12) and S.clock - (p.pinT or -10) > 0.4 then
+            p.pinT = S.clock
+            c:Teleport(UE.FVector(pick.x, pick.y, pick.z), UE.FRotator(0, pick.yaw or c:GetRotation().Yaw, 0), false,
+                false, false, false, true, inzoi.EB1LoadingContext.None, inzoi.EB1TeleportReason.None)
+        end
+        return
+    end
     if p.act then
         -- Doing what the remote player does (the interaction walks the puppet to the object/person itself): stay on
         -- it until the action ends (act_stop), they walk off from where it started (ACT_MOVED), or they're clearly
@@ -737,6 +748,14 @@ local OPS = {
         p.act = { bag = op.bag, x = op.x, y = op.y }
         p.actQueued = { bag = op.bag, target = target, t = 0 }
         return string.format("%s does %s%s", op.key, op.bag, target and (" on " .. target) or "")
+    end,
+    -- A body posture plays on their Zoi (the companion mirrors the montages): hold it at their exact spot and facing.
+    pose = function(op)
+        local p = PUPPETS[op.key]
+        if not p then return nil end
+        p.pose = op.on and true or nil
+        if p.pose then stop_direct(char(p.id)) end
+        return nil
     end,
     act_stop = function(op)
         local p = PUPPETS[op.key]

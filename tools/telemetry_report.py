@@ -58,8 +58,8 @@ def fmt_t(t, t0):
 def direction(title, sender_rows, receiver_rows, sender_name, out):
     """sender's own states ("out") = the truth; receiver's samples of the sender's Zoi ("pup") = what was shown."""
     off = offset(receiver_rows, sender_name)
-    truth = sorted(((r["st"].get("ts") or r["t"]) + off, r["st"]) for r in sender_rows
-                   if r["k"] == "out" and isinstance(r.get("st"), dict) and "x" in r["st"])
+    truth = sorted((((r["st"].get("ts") or r["t"]) + off, r["st"]) for r in sender_rows
+                    if r["k"] == "out" and isinstance(r.get("st"), dict) and "x" in r["st"]), key=lambda x: x[0])
     pups = [r for r in receiver_rows if r["k"] == "pup" and (sender_name is None or r.get("p") == sender_name)]
     luas = [r for r in receiver_rows if r["k"] == "lua"]
     lua_t = [r["t"] for r in luas]

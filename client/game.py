@@ -333,11 +333,26 @@ class Game:
                "action": cur.get("action_type"), "target": cur.get("target_entity_id") or -1}
         try:
             m = self.call("motion.get_current", entity_id=entity_id)
-            mo = (m.get("motions") or [None])[0]
+            ms = [x for x in (m.get("motions") or []) if isinstance(x, dict) and x.get("anim_id")]
+            mo = ms[0] if ms else None
             out["anim"] = mo and {"id": mo["anim_id"], "pos": mo.get("position", 0)}
-        except (GameError, KeyError, TypeError, AttributeError):
-            out["anim"] = None
+            # every montage playing (body posture, arms, face...): what the other game plays on this Zoi's copy
+            out["motions"] = [{"id": x["anim_id"], "g": x.get("group") or "", "pos": round(float(x.get("position") or 0), 2),
+                               "len": round(float(x.get("total_length") or 0), 2)} for x in ms]
+        except (GameError, KeyError, TypeError, AttributeError, ValueError):
+            out["anim"], out["motions"] = None, []
         return out
+
+    def motion_sections(self, anim: str, entity_id: int, cache: dict) -> list:
+        """[(name, start, is_loop)] of a montage (cached per animation)."""
+        if anim not in cache:
+            try:
+                info = self.call("motion.get_info", anim_id=anim, entity_id=entity_id) or {}
+                cache[anim] = [(s.get("name") or "Default", float(s.get("start_time") or 0), bool(s.get("is_loop")))
+                               for s in info.get("sections") or []] or [("Default", 0.0, False)]
+            except (GameError, TypeError, ValueError):
+                cache[anim] = [("Default", 0.0, False)]
+        return cache[anim]
 
     def object_at(self, entity_id: int) -> dict | None:
         """Table id + world position of a game object, or None if it isn't one (a character, nothing)."""

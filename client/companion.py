@@ -47,7 +47,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.27"
+VERSION = "0.9.28"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -1169,16 +1169,20 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
                     await self.follow_leader_speed()
                 if self._house_n % 8 == 0 and self.world != "out" and self.my_entity:
                     await self.house_tick()                  # (every 2 s, paused too: build mode pauses the game)
+                if self.world == "play":
+                    await self.mirror_motions()              # (their poses, exactly: 4 times a second)
                 if self._house_n % 2 == 0 and self.world == "play":
                     await self.sample_puppets()              # (twice a second: the telemetry's view of them)
                 if self.world == "play" and self.my_entity:
                     a = await self.g(self.game.activity, self.my_entity)
                     act = await self.g(self.describe_act, a)
                     anim = a["anim"]["id"] if a.get("anim") else None
-                    if act != self.cur_act or anim != self.cur_anim:
-                        self.cur_act, self.cur_anim = act, anim
+                    motions = a.get("motions") or []
+                    sig = tuple(m["id"] for m in motions)
+                    if act != self.cur_act or anim != self.cur_anim or sig != self.__dict__.get("cur_motions"):
+                        self.cur_act, self.cur_anim, self.cur_motions = act, anim, sig
                         self.learn_bag(act)
-                        self.state_base = {**self.state_base, "act": act, "anim": anim}
+                        self.state_base = {**self.state_base, "act": act, "anim": anim, "motions": motions}
                         pos = self.fast_pos
                         if pos and self.sending_state and self.last_full_state and self.writer and self.me_id:
                             self.n += 1
@@ -1191,6 +1195,59 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
                 loop_error("action loop", e)
                 await asyncio.sleep(1)
             await asyncio.sleep(0.25)
+
+    async def mirror_motions(self):
+        """Play on each partner's Zoi exactly the montages their own game plays on them (posture, arms, face), each in
+        its section at the point it has reached, and stop the ones they aren't playing. While a body posture plays
+        (sitting, lying, working at something) the Zoi is held at their exact spot and facing (the "pose" op): the
+        house is the same in both saves, so the pose lands on the same bed or chair."""
+        now = time.time()
+        for r in list(self.remotes.values()):
+            e = self.puppet_ids.get(r.pid)
+            st = r.state or {}
+            if not e or not r.spawned or r.hidden or "motions" not in st or now - (r.state_at or 0) > 2.0:
+                continue
+            want = {m["id"]: m for m in st.get("motions") or [] if isinstance(m, dict) and m.get("id")}
+            pose = any(not re.search(r"Arm|Hand|Face|Head|Eye|Mouth|Additive|Upper", m.get("g") or "", re.I)
+                       for m in want.values())
+            if pose != r.__dict__.get("pose_on"):
+                r.pose_on = pose
+                self.mail.op("pose", key=r.pid, on=pose)
+                self.tele.rec("note", text=f"{r.name}: pose {'held' if pose else 'free'}")
+            try:
+                cur = await self.g(self.game.call, "motion.get_current", entity_id=e) or {}
+            except Exception:                            # noqa: BLE001
+                continue
+            have = {m["anim_id"]: m for m in cur.get("motions") or [] if isinstance(m, dict) and m.get("anim_id")}
+            tries = r.__dict__.setdefault("motion_tries", {})
+            cache = self.__dict__.setdefault("_sections", {})
+            for anim, m in want.items():
+                if anim in have or now - tries.get(anim, 0) < 2.0:
+                    continue
+                tries[anim] = now
+                pos = float(m.get("pos") or 0) + (now - r.state_at)
+                if m.get("len") and pos >= float(m["len"]):
+                    continue                             # (already over there)
+                secs = await self.g(self.game.motion_sections, anim, e, cache)
+                name, start = "Default", 0.0
+                for sname, sstart, _loop in secs:
+                    if sstart <= pos:
+                        name, start = sname, sstart
+                try:
+                    await self.g(self.game.call, "motion.play", anim_id=anim, entity_id=e, Section=name,
+                                 Position=round(max(0.0, pos - start), 2))
+                    self.tele.rec("note", text=f"{r.name}: play {anim} {name}@{pos - start:.1f}")
+                except Exception as ex:                  # noqa: BLE001
+                    self.tele.rec("note", text=f"{r.name}: couldn't play {anim}: {str(ex)[:120]}")
+            for anim in have:
+                if anim in want or now - tries.get("-" + anim, 0) < 2.0:
+                    continue
+                tries["-" + anim] = now
+                try:
+                    await self.g(self.game.call, "motion.stop", entity_id=e, anim_id=anim)
+                    self.tele.rec("note", text=f"{r.name}: stop {anim} (not playing there)")
+                except Exception:                        # noqa: BLE001
+                    pass
 
     async def sample_puppets(self):
         """Telemetry: each partner's Zoi as this game shows it, next to where their newest state says they are."""
@@ -1209,7 +1266,8 @@ class Companion(couple.Couple, housesync.HouseSync, servers.Servers):
                 err = round(((s["x"] - st["x"]) ** 2 + (s["y"] - st["y"]) ** 2) ** 0.5)
             self.tele.rec("pup", p=r.name, e=e, x=s["x"], y=s["y"], z=s["z"], yaw=s["yaw"], site=s["site"],
                           bag=a.get("bag"), action=a.get("action"), target=a.get("target"),
-                          anim=(a.get("anim") or {}).get("id"), err=err, hidden=bool(r.hidden))
+                          anim=(a.get("anim") or {}).get("id"), motions=[m["id"] for m in a.get("motions") or []],
+                          err=err, hidden=bool(r.hidden))
 
     async def mailbox_loop(self):
         inject = install.MAILBOX_DIR / "inject.json"       # debugging: extra ops dropped in by tools
