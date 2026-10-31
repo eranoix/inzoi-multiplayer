@@ -678,7 +678,9 @@
                  invite: N('{name} invited you to their home'),
                  movein: N('{name} wants to move in with you: one family, one home'),
                  engage: N('{name} wants to get engaged to you'), marry: N('{name} wants to marry you'),
-                 baby: N('{name} wants to have a baby with you') };
+                 baby: N('{name} wants to have a baby with you'),
+                 interaction: N('{name} wants to interact with you: {what}'),
+                 game: N('{name} wants to interact with you: {what}') };
     var SENT_NAME = { hug: N('Hug request'), kiss: N('Kiss request'), dance: N('Dance request'), wave: N('High five request'),
                       holdhands: N('Hold hands request'), selfie: N('Selfie request'), spin: N('Spin request'),
                       invite: N('Invitation'), movein: N('Moving in together'), engage: N('Engagement'),
@@ -737,36 +739,41 @@
             var r = reqRows[q.id];
             if (!r) {
                 r = { row: el('div', 'req'), text: el('div'), left: el('div', 'left'),
-                      yes: btn('', t('Accept')), no: btn('no', t('Decline')) };
+                      yes: btn('', t('Accept')), no: btn('no', t('Decline')), always: btn('always', t('Always accept')) };
                 var row2 = el('div', 'row2');
-                row2.appendChild(r.yes);
+                row2.appendChild(r.always);
                 row2.appendChild(r.no);
+                row2.appendChild(r.yes);
                 r.row.appendChild(r.text);
                 r.row.appendChild(row2);
                 r.row.appendChild(r.left);
                 (function (id, rr) {
                     rr.yes.addEventListener('click', function () { answerRequest(id, true, rr); });
                     rr.no.addEventListener('click', function () { answerRequest(id, false, rr); });
+                    rr.always.addEventListener('click', function () { answerRequest(id, true, rr, true); });
                 })(q.id, r);
                 box.appendChild(r.row);
                 reqRows[q.id] = r;
                 if (root._minimized && root._applyMinimize) { root._applyMinimize(false); }   // open the panel for it
             }
-            setText(r.text, t(ASKS[q.action] || N('{name} sent you a request'), { name: q.from }));
+            setText(r.text, t(ASKS[q.action] || N('{name} sent you a request'), { name: q.from, what: q.label || '' }));
             setText(r.left, t('{n} seconds left to answer', { n: left }));
             setText(r.yes, t('Accept'));
             setText(r.no, t('Decline'));
+            setText(r.always, t('Always accept'));
+            r.always.setAttribute('title', t('Accept this kind of interaction from now on without asking'));
         });
         for (var id in reqRows) {
             if (reqRows.hasOwnProperty(id) && !seen[id]) { box.removeChild(reqRows[id].row); delete reqRows[id]; }
         }
     }
-    function answerRequest(id, yes, rr) {
+    function answerRequest(id, yes, rr, always) {
         if (rr.sending) { return; }
         rr.sending = true;
         off(rr.yes, true);
         off(rr.no, true);
-        post('/partner/respond', { id: id, accept: yes }, function (r) {
+        off(rr.always, true);
+        post('/partner/respond', { id: id, accept: yes, always: !!always }, function (r) {
             answered[id] = true;
             if (reqRows[id]) { $('reqs').removeChild(reqRows[id].row); delete reqRows[id]; }
             if (!r || r.error) { flash(coupleErr(r)); return; }
@@ -926,19 +933,23 @@
                         holdhands: N('Hands'), selfie: N('Selfie'), spin: N('Twirl') };
     var quickSig = '';
     function renderQuick() {
-        var box = $('quick'), sig = I.lang();
+        var quick = (iaData && iaData.quick) || null;
+        var box = $('quick'), sig = I.lang() + JSON.stringify(quick);
         if (quickSig === sig) { return; }
         quickSig = sig;
         clear(box);
         MOMENTS.forEach(function (m) {
             var b = el('button', 'qa'), c = el('span', 'c'), l = el('span', 'l', t(QUICK_SHORT[m[0]]));
             b.setAttribute('type', 'button');
-            b.setAttribute('title', t(m[1]));
+            var q = quick ? quick[m[0]] : undefined;      // (undefined: the game's list isn't in yet)
+            b.setAttribute('title', q ? q.name : (q === null ? t("The game doesn't offer this between you right now") : t(m[1])));
+            if (q === null) { b.setAttribute('disabled', 'disabled'); }
             c.innerHTML = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
                 'stroke-linecap="round" stroke-linejoin="round">' + QUICK_ICONS[m[0]] + '</svg>';
             b.appendChild(c);
             b.appendChild(l);
             b.addEventListener('click', function () {
+                if (b.getAttribute('disabled')) { return; }
                 b.className = 'qa done';
                 setTimeout(function () { b.className = 'qa'; }, 1500);
                 partnerCall('/partner/action', { action: m[0] }, function () {

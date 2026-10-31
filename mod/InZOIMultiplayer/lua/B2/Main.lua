@@ -191,8 +191,28 @@ local function freeze(id, on)
     am:SetIndividualToggleOption(eid(id), T.FreezeStat, frozen)         -- needs don't decay: never hungry or tired
 end
 
+-- The engine's own teleport: no "cheat applied" notice on screen (movement.teleport shows one every time).
 local function teleport(id, x, y, z)
-    cli(string.format("movement.teleport entity_id=%d x=%f y=%f z=%f", id, x, y, z))
+    local c = char(id)
+    if not c then return end
+    c:Teleport(UE.FVector(x, y, z), c:GetRotation(), false, false, false, true, false, inzoi.EB1LoadingContext.None,
+        inzoi.EB1TeleportReason.None)
+end
+
+-- Native: stop what a Zoi is doing (current interaction and queue), without a cheat notice.
+local function clear_all(id)
+    local c = char(id)
+    if not c then return end
+    INZOI.FB2InteractionComponent.ClearInteractionQueue(interaction(c), IC_CANCEL_CLEAR(), true)
+end
+
+-- Native: queue an interaction like the game does when the player picks it (target: a character/object or none).
+local function queue_interaction(id, bag, target)
+    local c = char(id)
+    if not c then return nil end
+    local t = target and target > 0 and eid(target) or INZOI.FB1EntityId()
+    return INZOI.FB2InteractionComponent.AddInteractionQueueByParam(interaction(c), t, UE.FVector(0, 0, 0), bag,
+        inzoi.EB1InteractionPlayReason.None, true, false, "mp_act", true, false)
 end
 
 -- Turn on the spot to a world yaw (degrees).
@@ -307,7 +327,7 @@ local function adopt_puppet(op)
         pcall(cli, string.format("zoi.destroy entity_id=%d", old.id))
     end
     freeze(id)
-    pcall(cli, string.format("interaction.clear_queue entity_id=%d cancel_current=true", id))
+    pcall(clear_all, id)
     pcall(function() char(id):SetCharacterHiddenInGame(false, "mp_away") end)
     if op.x and op.y and op.z then teleport(id, op.x, op.y, op.z) end
     if op.home_door and op.home_site then
@@ -324,7 +344,7 @@ local function despawn_puppet(op)
     if not p then return "no puppet " .. tostring(op.key) end
     if p.adopted then
         freeze(p.id, false)                             -- their player left: the game looks after them again
-        pcall(cli, string.format("interaction.clear_queue entity_id=%d cancel_current=true", p.id))
+        pcall(clear_all, p.id)
         pcall(function() char(p.id):SetCharacterHiddenInGame(false, "mp_away") end)
     else
         cli(string.format("zoi.destroy entity_id=%d", p.id))
@@ -365,6 +385,7 @@ local ARRIVED, SNAP_AFTER, STUCK_FOR = 70, 1.2, 1.5
 -- speed; anything it starts on its own while its player is online is cancelled (only what they do is done).
 local ME_EVERY, POLL_EVERY, LATENCY, OWN_CHECK = 0.1, 0.03, 0.35, 0.4
 local ACT_LEAVE = 600       -- while copying an action, only a remote player this far from the puppet means "they left"
+local ACT_MOVED = 120       -- ...or one who walked this far from where they started it
 local FACE_GAP, FACE_EVERY = 25, 1.5
 -- Smoothing (no new engine calls: only where the puppet aims and when it redirects):
 --  * the trail arrives late (~0.5-1 s), so while the player is walking aim LEAD cm past their newest point, along the
@@ -392,10 +413,7 @@ end
 
 -- Walk at its player's pace (a bit faster when behind): the engine's walk speed for that character.
 local function match_speed(p, speed, far)
-    local want = speed > 30 and math.max(160, math.min(650, speed * 1.1 + (far > 250 and 120 or 0))) or 190
-    if math.abs(want - (p.speedSet or 190)) < 35 or S.clock - (p.speedT or -10) < 0.5 then return end
-    p.speedSet, p.speedT = want, S.clock
-    pcall(cli, string.format("movement.set_speed entity_id=%d action=set Speed=%.0f", p.id, want))
+    p.fast = speed > 300 or far > SPRINT                -- (walk speed has no native setter: the game's own sprint)
 end
 
 -- Where to send the puppet for trail point `pick`: pick itself, or a point LEAD ahead while the player walks straight.
@@ -432,12 +450,7 @@ end
 local function start_act(c, p)
     local a = p.actQueued
     p.actQueued = nil
-    if a.target and a.target > 0 then
-        cli(string.format("interaction.execute entity_id=%d interaction_bag_id=%s target_entity_id=%d insert_front=true",
-            p.id, a.bag, a.target))
-    else
-        cli(string.format("interaction.execute entity_id=%d interaction_bag_id=%s insert_front=true", p.id, a.bag))
-    end
+    queue_interaction(p.id, a.bag, a.target)
     p.act.started = S.clock
 end
 
@@ -463,7 +476,7 @@ local function drive(key, p, dt)
         -- (walks are ours; Co_/Coop/Social: answering someone's social, e.g. a hug given to it, which stays)
         if bag and bag ~= "None" and bag ~= "nil" and bag ~= "" and not bag:match("^ClickMove")
             and not bag:match("^Co_") and not bag:match("^Coop") and not bag:match("Social") then
-            pcall(cli, string.format("interaction.clear_queue entity_id=%d cancel_current=true", p.id))
+            pcall(clear_all, p.id)
             log_limited(string.format("%s's Zoi started %s on its own: stopped (only what they do is done)", key, bag), 30)
         end
     end
@@ -473,9 +486,12 @@ local function drive(key, p, dt)
     local far = dist2(me.X, me.Y, pick.x, pick.y)
     if p.act then
         -- Doing what the remote player does (the interaction walks the puppet to the object/person itself): stay on
-        -- it until the action ends (act_stop) or they're clearly somewhere else.
-        if far < ACT_LEAVE then return end
-        p.act = nil
+        -- it until the action ends (act_stop), they walk off from where it started (ACT_MOVED), or they're clearly
+        -- somewhere else.
+        local moved = p.act.x and dist2(pick.x, pick.y, p.act.x, p.act.y) > ACT_MOVED
+        if not moved and far < ACT_LEAVE then return end
+        if moved and current_bag(c) == p.act.bag then clear_all(p.id) end
+        p.act, p.actQueued = nil, nil
     end
     if far > TELEPORT then
         teleport(p.id, pick.x, pick.y, pick.z)
@@ -542,7 +558,7 @@ local function drive(key, p, dt)
     local stale = not p.dest or dist2(p.dest.x, p.dest.y, aim.x, aim.y) > reaim
     if walking and not stale then return end
     if not walking and p.aimFor == pick then return end
-    local bag = far > SPRINT and "ClickMove_Sprint_Close" or nil
+    local bag = p.fast and "ClickMove_Sprint_Close" or nil
     p.lastOrderT, p.dest, p.aimFor, p.retried, p.orderFrom = S.clock, aim, pick, false, { x = me.X, y = me.Y }
     if walking then
         cancel_walk(c)
@@ -615,7 +631,7 @@ local OPS = {
         local p = PUPPETS[op.key]
         if not p or not p.act then return nil end
         local c = char(p.id)
-        if current_bag(c) == p.act.bag then cli("interaction.cancel entity_id=" .. p.id) end
+        if current_bag(c) == p.act.bag then clear_all(p.id) end
         p.act, p.actQueued = nil, nil
         return op.key .. " stopped"
     end,
@@ -661,7 +677,7 @@ local OPS = {
         local anim = bag:match("^anim:([%w_]+)$")
         local ok, msg
         if op.now then      -- a couple action the player just asked for: it starts now, not after what's playing
-            cli(string.format("interaction.clear_queue entity_id=%d cancel_current=true", me))
+            pcall(clear_all, me)
         end
         if anim then
             ok, msg = cli(string.format("motion.play entity_id=%d anim_id=%s", me, anim))

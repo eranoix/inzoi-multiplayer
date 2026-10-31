@@ -40,7 +40,8 @@ TARGETED = ("hug", "kiss", "holdhands", "selfie", "spin")   # done to the partne
 TOGETHER = ("dance", "wave")               # with the partner's Zoi when it's here, else alone
 # Family milestones: asked like the couple actions; on "yes" each PC makes it so in its own save (both saves agree).
 FAMILY = ("movein", "engage", "marry", "baby")
-REQUEST_KINDS = ACTIONS + ("invite",) + FAMILY
+REQUEST_KINDS = ACTIONS + ("invite",) + FAMILY + ("interaction",)
+ACCEPTED_FOR = 25                          # s after a "yes" in which the partner's Zoi doing it here isn't asked again
 # Every interaction the game offers between the two Zois (interaction.list_available, with the game's own names),
 # sorted into the panel's groups by their ids. First match wins; the rest is "talk".
 GROUPS = (
@@ -75,15 +76,27 @@ WITH_PARTNER = {
     "spin": ("Co_PicturePose_Couple", "Co_LoverHugDance"),
 }
 ALONE_BAGS = {"dance": "Next_Dance_Start"}  # (checked in the real game)
+# The quick actions, matched against what the game offers right now between the two Zois (first pattern that finds
+# something wins): married couples get "Family_Spouse" ids, friends "Friendship" ones... never a made-up id.
+QUICK_PATTERNS = {
+    "hug": (r"DeepHug", r"HugUp", r"(?<!Kiss)Hug(?!Kiss)", r"HugKiss"),
+    "kiss": (r"DeepKiss", r"Peck", r"KissForehead", r"(?<!Hug)Kiss", r"HugKiss"),
+    "dance": (r"CoupleDance", r"LoverHugDance", r"Dance_Together", r"Dance"),
+    "wave": (r"HighF",),
+    "holdhands": (r"^Co_HoldHand$", r"HoldHand"),
+    "selfie": (r"Selfie", r"Lover_TakePic", r"TakePic"),
+    "spin": (r"PicturePose_Couple", r"Spin", r"Twirl", r"LoverHugDance"),
+}
 LEARN = {"hug": re.compile(r"hug", re.I), "kiss": re.compile(r"kiss", re.I), "dance": re.compile(r"dance", re.I),
          "wave": re.compile(r"(?<!micro)wave", re.I)}             # (not Use_Microwave)
 ACTION_NAMES = {"hug": "hug", "kiss": "kiss", "dance": "dance", "wave": "high five", "holdhands": "hold hands",
                 "selfie": "selfie", "spin": "spin", "invite": "invitation", "movein": "moving in together",
-                "engage": "engagement", "marry": "wedding", "baby": "baby"}       # (chat lines)
+                "engage": "engagement", "marry": "wedding", "baby": "baby", "interaction": "interaction"}  # (chat)
 VERBS = {"hug": "hug you", "kiss": "kiss you", "dance": "dance with you", "wave": "high-five you",
          "holdhands": "hold your hand", "selfie": "take a selfie with you", "spin": "spin you around in a hug",
          "invite": "invite you to their home", "movein": "move in with you (one family, one home)",
-         "engage": "get engaged to you", "marry": "marry you", "baby": "have a baby with you"}
+         "engage": "get engaged to you", "marry": "marry you", "baby": "have a baby with you",
+         "interaction": "interact with you"}
 
 
 class Couple:
@@ -157,7 +170,16 @@ class Couple:
             offered = set()
         if not offered:
             return want[0]                               # (no list from the game: the learned or the checked id)
-        return next((b for b in want if b in offered), None)
+        return next((b for b in want if b in offered), None) or self.quick_match(action, offered)
+
+    def quick_match(self, action: str, offered) -> str | None:
+        """The interaction the game offers now that best fits a quick action (QUICK_PATTERNS), or None."""
+        for pat in QUICK_PATTERNS.get(action, ()):
+            rx = re.compile(pat, re.I)
+            hit = sorted(b for b in offered if b and rx.search(b))
+            if hit:
+                return hit[0]
+        return None
 
     def learn_bag(self, act: dict | None):
         """An interaction one of the players' Zois is doing: remember it as the hug/kiss/dance/wave id if it is one.
@@ -187,7 +209,7 @@ class Couple:
     def couple_view(self) -> dict:
         """For /status: the requests to answer, and the state of the ones this player sent."""
         self.prune_requests()
-        return {"requests": [{k: q.get(k) for k in ("id", "from", "from_id", "action", "at")}
+        return {"requests": [{k: q.get(k) for k in ("id", "from", "from_id", "action", "at", "bag", "label")}
                              for q in sorted(self.requests.values(), key=lambda q: q["at"])],
                 "couple": {"sent": [{k: s.get(k) for k in ("id", "to", "to_id", "action", "name", "at", "state", "message")}
                                     for s in sorted(self.sent.values(), key=lambda s: s["at"])][-5:],
@@ -245,7 +267,7 @@ class Couple:
         self.prune_requests()
         rid = secrets.token_hex(6)
         self.sent[rid] = {"id": rid, "to": r.name, "to_id": r.pid, "action": action, "at": time.time(),
-                          "state": "waiting", "message": ""}
+                          "state": "waiting", "message": "", "bag": extra.get("bag"), "name": extra.get("label")}
         await self.send({"t": "event", "kind": "couple", "to": r.pid,
                          "data": {"type": "request", "id": rid, "action": action, "name": self.cfg.get("name"),
                                   **extra}})
@@ -266,10 +288,19 @@ class Couple:
                 return
             r = self.remotes.get(frm)
             name = r.name if r else str(data.get("name") or "Your partner")[:40]
+            bag = str(data.get("bag") or "")[:80] if action == "interaction" else None
+            if action == "interaction" and not BAG_ID.match(bag or ""):
+                return
             self.requests[rid] = {"id": rid, "from": name, "from_id": frm, "action": action, "at": time.time(),
-                                  "home_site": data.get("home_site") if isinstance(data.get("home_site"), int) else None}
-            self.system_line(f"{name} wants to {VERBS[action]}")
-            log.info("%s asks: %s", name, action)
+                                  "home_site": data.get("home_site") if isinstance(data.get("home_site"), int) else None,
+                                  "bag": bag, "label": str(data.get("label") or "")[:80] or None}
+            if self.always_yes(action, bag):
+                log.info("%s asks: %s %s (always yes)", name, action, bag or "")
+                asyncio.get_running_loop().create_task(self.couple_respond(rid, True))
+                return
+            label = self.requests[rid]["label"]
+            self.system_line(f"{name} wants to {VERBS[action]}" + (f": {label}" if label else ""))
+            log.info("%s asks: %s %s", name, action, bag or "")
         elif data.get("type") == "result":
             s = self.sent.get(rid)
             if not s or s["to_id"] != frm:
@@ -298,11 +329,57 @@ class Couple:
             if data.get("accept"):
                 asyncio.get_running_loop().create_task(self.couple_perform(s, initiator=True))
 
-    async def couple_respond(self, rid: str, accept: bool) -> dict:
+    def always_key(self, action: str, bag: str | None) -> str:
+        return f"interaction:{bag}" if action in ("interaction", "game") and bag else action
+
+    def always_yes(self, action: str, bag: str | None) -> bool:
+        return self.always_key(action, bag) in (self.cfg.get("always_yes") or [])
+
+    def mirror_ok(self, r, bag: str) -> bool:
+        """The partner's Zoi does something to mine in their game: it plays here without asking when it's an "always
+        yes" or right after a yes (the couple action just accepted)."""
+        return self.always_yes("interaction", bag) or time.time() < self.__dict__.get("_accepted", {}).get(r.pid, 0)
+
+    def label_for(self, bag: str) -> str:
+        """A readable name for an interaction id: the game's own (from the last list) or one made from the id."""
+        offered = self.__dict__.get("_offered")
+        if offered and bag in offered[1]:
+            return offered[1][bag]
+        text = re.sub(r"^(Co_|Coop_|Social_)", "", bag)
+        text = re.sub(r"_(Male|Female)To(Male|Female)", "", text)
+        text = re.sub(r"_(Success|Friendship|Romance|Business|Start\d*)$", "", text)
+        return re.sub(r"([a-z])([A-Z])", r"\1 \2", text).replace("_", " ").strip()
+
+    def ask_local(self, r, bag: str, op: dict):
+        """Their Zoi already does it in their game; here, a popup asks before it plays (yes / no / always yes)."""
+        self.prune_requests()
+        if any(q.get("local") and q["from_id"] == r.pid and q.get("bag") == bag for q in self.requests.values()):
+            return
+        rid = secrets.token_hex(6)
+        label = self.label_for(bag)
+        self.requests[rid] = {"id": rid, "from": r.name, "from_id": r.pid, "action": "game", "bag": bag,
+                              "label": label, "at": time.time(), "local": True, "op": op}
+        self.system_line(f"{r.name} wants to interact with you: {label}")
+        log.info("%s's Zoi does %s to yours: asking first", r.name, bag)
+
+    async def couple_respond(self, rid: str, accept: bool, always: bool = False) -> dict:
         self.prune_requests()
         q = self.requests.pop(str(rid), None)
         if not q:
             return {"error": "that request isn't open any more", "code": "expired"}
+        if accept and always:
+            keys = self.cfg.setdefault("always_yes", [])
+            key = self.always_key(q["action"], q.get("bag"))
+            if key not in keys:
+                keys.append(key)
+                self.save_cfg()
+                log.info("always yes from now on: %s", key)
+        if accept:
+            self.__dict__.setdefault("_accepted", {})[q["from_id"]] = time.time() + ACCEPTED_FOR
+        if q.get("local"):                               # their Zoi already did it in their game: show it here or not
+            if accept:
+                self.mail.op("act", key=q["from_id"], **q["op"])
+            return {"ok": True, "result": {"state": "done" if accept else "declined"}}
         if not (self.writer and self.me_id):
             return {"error": "not connected to the server", "code": "not_connected"}
         await self.send({"t": "event", "kind": "couple", "to": q["from_id"],
@@ -331,6 +408,15 @@ class Couple:
                 return self.mark(req, "done")
             res = await self.partner_goto(pid)
             return self.mark(req, "done" if res.get("ok") else "failed", res.get("error", ""))
+        if action == "interaction":
+            if not initiator:
+                return self.mark(req, "done")            # (their Zoi starts it; it shows up here through the live sync)
+            eid = self.puppet_ids.get(pid)
+            if not eid or not self.my_entity:
+                return self.mark(req, "failed", "your partner's Zoi isn't here")
+            self.mail.op("social", rid=req["id"], bag=req["bag"], entity=self.my_entity, key=pid, now=True)
+            log.info("interaction with %s: %s (they said yes)", r.name if r else pid, req["bag"])
+            return self.mark(req, "started")
         if action in FAMILY:                             # both saves: each PC makes it so in its own
             try:
                 res = await self.g(self.family_apply, action, pid, None if initiator else req.get("home_site"))
@@ -349,6 +435,8 @@ class Couple:
             log.warning("couple action %s: not in the game's world, nothing done", action)
             return self.mark(req, "failed", "not in the game's world")
         bag = self.couple_bag(action)
+        if not together and action not in ALONE_BAGS and not (self.cfg.get("couple_bags") or {}).get(action):
+            return self.mark(req, "failed", "your partner's Zoi isn't here")     # (no made-up id for doing it alone)
         op = {"rid": req["id"], "bag": bag, "entity": self.my_entity}
         how = "learned" if (self.cfg.get("couple_bags") or {}).get(action) else "a guess"
         if together:
@@ -359,6 +447,11 @@ class Couple:
             eid = self.puppet_ids[pid]
             await self.g(self.bond_puppet, eid)
             found = await self.g(self.bag_with, action, eid, (r.profile or {}).get("gender") if r else None)
+            if not found:
+                why = f"the game doesn't offer {ACTION_NAMES.get(action, action)} between your Zois right now"
+                log.warning("couple action %s: %s", action, why)
+                self.system_line(f"The game doesn't offer that between you right now ({ACTION_NAMES.get(action, action)})")
+                return self.mark(req, "failed", why)
             if found:
                 op["bag"], how = found, "offered by the game"
             op["key"], op["now"] = pid, True
@@ -603,7 +696,8 @@ class Couple:
                     for k, v in stats.items() if isinstance(v, dict)}
         except Exception:                                # noqa: BLE001
             pass
-        return {"ok": True, "family": bool(r.adopted), "bond": bond,
+        quick = {a: (lambda b: {"bag": b, "name": seen[b]} if b else None)(self.quick_match(a, seen)) for a in QUICK_PATTERNS}
+        return {"ok": True, "family": bool(r.adopted), "bond": bond, "quick": quick,
                 "groups": [{"key": k, "items": sorted(groups[k], key=lambda x: x["name"])}
                            for k in GROUP_ORDER if k in groups]}
 
@@ -619,12 +713,7 @@ class Couple:
         offered = self.__dict__.get("_offered")
         if not BAG_ID.match(bag or "") or not offered or offered[0] != r.pid or bag not in offered[1]:
             return {"error": "the game doesn't offer that right now", "code": "not_offered"}
-        rid = secrets.token_hex(6)
-        self.sent[rid] = {"id": rid, "to": r.name, "to_id": r.pid, "action": bag, "name": offered[1][bag],
-                          "at": time.time(), "state": "started", "message": ""}
-        self.mail.op("social", rid=rid, bag=bag, entity=self.my_entity, key=r.pid, now=True)
-        log.info("interaction with %s: %s", r.name, bag)
-        return {"ok": True, "id": rid}
+        return {"ask": (r, offered[1][bag])}
 
     def mark(self, req: dict, state: str, message: str = "") -> dict:
         req["state"], req["message"] = state, message
@@ -784,7 +873,7 @@ class Couple:
             return await self.couple_request(r, act)
 
         async def respond(body):
-            return await self.couple_respond(str(body.get("id", "")), bool(body.get("accept")))
+            return await self.couple_respond(str(body.get("id", "")), bool(body.get("accept")), bool(body.get("always")))
 
         async def undo(body):
             return await self.world_undo(str(body.get("source") or "auto"), body.get("version"), body.get("backup"))
@@ -797,7 +886,11 @@ class Couple:
             return await self.g(self.partner_interactions, body.get("key"))
 
         async def do(body):
-            return await self.g(self.partner_do, body.get("key"), str(body.get("bag", "")))
+            res = await self.g(self.partner_do, body.get("key"), str(body.get("bag", "")))
+            if "ask" not in res:
+                return res
+            r, label = res["ask"]
+            return await self.couple_request(r, "interaction", bag=str(body.get("bag")), label=label)
 
         async def family(body):
             act = str(body.get("action", ""))

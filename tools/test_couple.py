@@ -193,6 +193,7 @@ async def test_couple():
 
     # --- learned ids: Ben's Zoi hugs Ana's puppet for real, and Ana's own Zoi dances
     ana.on_report("up", f"{ben.me_id}=77")
+    ana.cfg["always_yes"] = ["interaction:Friendly_HugTight"]          # (else a popup asks first: tested below)
     ana.set_state(rb, {"n": 1, "city": "Dowon", "x": 1, "y": 2, "z": 3, "act": {"bag": "Friendly_HugTight",
                                                                                 "player": ana.me_id}})
     assert ana.cfg["couple_bags"]["hug"] == "Friendly_HugTight"
@@ -313,10 +314,34 @@ async def test_couple():
                       "conflict": ["Co_GetOut"], "fun": ["Co_HighFIve_FemaleToMale_Friendship"]}, groups
     assert [g["key"] for g in ia["groups"]] == ["romance", "fun", "talk", "conflict"]
     assert ia["bond"]["romance"] == {"value": 80, "level": 2} and ia["family"] is True
+    n_social = len(ops(ana, "social"))
     res = await ana_routes["/partner/do"]({"bag": "Co_friendship_R10"})
-    assert res.get("ok") and ops(ana, "social")[-1] == {**ops(ana, "social")[-1], "bag": "Co_friendship_R10",
-                                                        "key": ben.me_id, "entity": 10, "now": True}
+    assert res.get("ok") and len(ops(ana, "social")) == n_social, "asked first, not done yet"
+    assert await until(lambda: ben.requests)
+    q = next(iter(ben.requests.values()))
+    assert q["action"] == "interaction" and q["bag"] == "Co_friendship_R10" and q["label"] == "Falar sobre a vida", q
+    assert ben.couple_view()["requests"][-1]["label"] == "Falar sobre a vida"
+    await ben_routes["/partner/respond"]({"id": q["id"], "accept": True, "always": True})
+    assert await until(lambda: len(ops(ana, "social")) > n_social)
+    assert ops(ana, "social")[-1] == {**ops(ana, "social")[-1], "bag": "Co_friendship_R10", "key": ben.me_id,
+                                      "entity": 10, "now": True}
     assert ana.couple_view()["couple"]["sent"][-1]["name"] == "Falar sobre a vida"
+    assert "interaction:Co_friendship_R10" in ben.cfg["always_yes"]
+    # asked again: "always yes" answers by itself (no popup)
+    n_social = len(ops(ana, "social"))
+    await ana_routes["/partner/do"]({"bag": "Co_friendship_R10"})
+    assert await until(lambda: len(ops(ana, "social")) > n_social) and not ben.requests
+    # their Zoi does something to mine from the game's own menu: a popup first here, then it plays
+    ana.__dict__.pop("_accepted", None)
+    n_act = len(ops(ana, "act"))
+    ana.set_state(rb, {"n": 50, "city": "Dowon", "x": 1, "y": 2, "z": 3, "act": {"bag": "Coop_Pillow_Fight",
+                                                                                  "player": ana.me_id}})
+    assert len(ops(ana, "act")) == n_act and ana.requests, "not played before a yes"
+    lq = next(iter(ana.requests.values()))
+    assert lq["local"] and lq["label"] == "Pillow Fight", lq
+    out = await ana_routes["/partner/respond"]({"id": lq["id"], "accept": True})
+    assert out["result"]["state"] == "done" and ops(ana, "act")[-1]["bag"] == "Coop_Pillow_Fight"
+    print("interactions ask first (popup), always yes, game-menu ones too: ok")
     assert (await ana_routes["/partner/do"]({"bag": "Co_SomethingElse"}))["code"] == "not_offered"
     assert (await ana_routes["/partner/do"]({"bag": "bad id; x"}))["code"] == "not_offered"
     print("interactions by group, doing one: ok")

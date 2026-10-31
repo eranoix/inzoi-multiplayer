@@ -14,7 +14,8 @@ MCP_PORT = 11212                                                                
 
 
 # Interactions that are just getting somewhere: a puppet's own follow logic covers them.
-MOVE_BAGS = ("ClickMove", "SelfMove", "Move_", "WalkTo", "Run_", "Sprint")
+MOVE_BAGS = ("ClickMove", "SelfMove", "Move_", "WalkTo", "Run_", "Sprint", "MoveRotate", "Rotate", "Self_GoHome",
+             "GoHome", "GoTo")
 
 _ESCAPE = re.compile(r'\\(["\\/bfnrtu]?)')
 

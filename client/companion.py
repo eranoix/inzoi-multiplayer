@@ -45,7 +45,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.11"
+VERSION = "0.9.12"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -752,7 +752,10 @@ class Companion(couple.Couple, servers.Servers):
                         op["anim"] = st["anim"]
                 self.learn_bag(act)              # (couple actions: the game's own interaction ids)
                 if not act.get("player") or op["target"]:
-                    self.mail.op("act", key=r.pid, **op)
+                    if act.get("player") == self.me_id and not self.mirror_ok(r, act["bag"]):
+                        self.ask_local(r, act["bag"], op)    # (couple.py: a popup first, then it plays here)
+                    else:
+                        self.mail.op("act", key=r.pid, **op)
         if act and act.get("npc") and st.get("anim") and st["anim"] != r.anim:
             r.anim = st["anim"]              # busy with someone only they have: at least show the motion
             self.mail.op("anim", key=r.pid, anim=st["anim"])
