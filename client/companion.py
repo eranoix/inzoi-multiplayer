@@ -1093,6 +1093,19 @@ class Companion(couple.Couple, servers.Servers):
             lobby, self.game.saw_lobby = getattr(self.game, "saw_lobby", True), False
             prev, gs = self.save_session, getattr(self.game, "last_state", {}) or {}
             where = (gs.get("possessed_entity_id"), gs.get("level_name"))
+            game_id = await self.g(servers.netinfo.process_id, "inZOI-Win64-Shipping.exe") if where[0] else None
+            last = self.cfg.get("last_world") or {}
+            if not folder and not prev.get("started") and game_id and last.get("id") == [game_id, *where] \
+                    and last.get("mp") is not None:
+                # this program restarted (an update, a crash) with the game still in the same world: same save
+                log.info("still in the same world as before this program restarted: %s",
+                         "your multiplayer save" if last["mp"] else "not your multiplayer save")
+                self.save_session = {"started": time.time(), "folder": last.get("folder"), "checked": time.time(),
+                                     "where": where, "game": game_id, "mp": last["mp"]}
+                self.save_box = None
+                if last["mp"] is False:
+                    self.show_paused()
+                return
             if not folder and not lobby and prev.get("started") and prev.get("where") == where and where[0]:
                 # a loading screen without the main menu (moving to another lot, "go to my partner"): same save
                 log.info("back in the world after a loading screen: still the same save")
@@ -1101,7 +1114,8 @@ class Companion(couple.Couple, servers.Servers):
                     self.show_paused()
                 return
             self.save_session = {"started": time.time(), "folder": folder, "checked": 0.0, "where": where,
-                            "mp": (folder == mp["folder"]) if folder and mp and mp.get("folder") else None}
+                                 "game": game_id,
+                                 "mp": (folder == mp["folder"]) if folder and mp and mp.get("folder") else None}
             self.save_box = None
             if self.save_session["mp"] is False:
                 self.show_paused()
@@ -1129,6 +1143,18 @@ class Companion(couple.Couple, servers.Servers):
         if self.writer and not self.world_meta and not self.world_asked and (mp or {}).get("folder"):
             self.world_asked = True
             self.check_world()                            # no shared world on this server yet: offer ours
+        self.remember_world()
+
+    def remember_world(self):
+        """Keep which world this is (the game's process, the Zoi played, the map) and whether it's the multiplayer
+        save, so a restart of this program with the game still open picks up where it was (see watch_save)."""
+        s = self.save_session
+        if not s.get("game") or not s.get("where") or s.get("mp") is None:
+            return
+        rec = {"id": [s["game"], *s["where"]], "mp": s["mp"], "folder": s.get("folder")}
+        if self.cfg.get("last_world") != rec:
+            self.cfg["last_world"] = rec
+            save_config(self.cfg)
 
     def set_box(self, key: str, text: str, buttons: list, question: str | None = None, on_text=None):
         self.save_box = {"key": key, "text": text, "buttons": [{"id": b, "label": label} for b, label in buttons]}

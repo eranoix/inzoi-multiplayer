@@ -88,6 +88,22 @@ def running_processes(names) -> set[str]:
     return {n for n in (line.split(",")[0].strip('"').lower() for line in out.splitlines()) if n in want}
 
 
+def process_id(name: str) -> int | None:
+    """The process id of a running program (e.g. "inZOI-Win64-Shipping.exe"), or None. Windows only."""
+    if os.name != "nt":
+        return None
+    try:
+        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {name}", "/FO", "CSV", "/NH"], capture_output=True,
+                             text=True, timeout=8, creationflags=NO_WINDOW).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        cols = [c.strip('"') for c in line.split('","')]
+        if len(cols) > 1 and cols[0].lower() == name.lower() and cols[1].isdigit():
+            return int(cols[1])
+    return None
+
+
 def local_ipv4() -> list[str]:
     """This PC's IPv4 addresses (not loopback or link-local)."""
     ips = set()

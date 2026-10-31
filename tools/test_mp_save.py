@@ -182,6 +182,27 @@ async def main():
         assert not comp.mp_active(), "a different Zoi means another save: multiplayer waits"
         print("  ok: a lot change keeps the save; another save loaded in the game doesn't pass for it")
 
+        # This program restarts (an update) with the game still in the multiplayer save: it carries on, no question.
+        companion.servers.netinfo.process_id = lambda name: 4242
+        game.saw_lobby, game.last_state = True, {"possessed_entity_id": 7, "level_name": "RedCity_Map"}
+        comp.loading_save = comp.cfg["mp_save"]["folder"]
+        await comp.watch_save(entered=True)
+        assert comp.mp_active() and comp.cfg["last_world"]["mp"] is True
+        again = companion.Companion(comp.cfg)
+        again.game = game
+        await again.watch_save(entered=True)
+        await again.watch_save(entered=False)
+        assert again.mp_active() and again.save_box is None, again.save_box
+        # ...but a new game process (the game restarted) is asked about again.
+        companion.servers.netinfo.process_id = lambda name: 5555
+        third = companion.Companion(comp.cfg)
+        third.game = game
+        await third.watch_save(entered=True)
+        await third.watch_save(entered=False)
+        assert not third.mp_active() and third.save_box["key"] == "confirm"
+        companion.servers.netinfo.process_id = lambda name: None
+        print("  ok: a restart of this program keeps the save; a restarted game asks again")
+
         # A server that still keeps a shared world (from "living together", now gone): a friend without a
         # multiplayer save is still asked to make their own copy (it used to be a silent dead end).
         os.environ["APPDATA"] = str(Path(tmp) / "appdata2")
