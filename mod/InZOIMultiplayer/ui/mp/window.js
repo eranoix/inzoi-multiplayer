@@ -334,6 +334,7 @@
         var ox, oy, dragging = false;
         handle.addEventListener('mousedown', function(e) {
             if (e.target.id === 'minimize-btn' || e.target.id === 'close-btn' || e.target.id === 'servers-btn') return;
+            if (e.target.closest && e.target.closest('button')) return;
             dragging = true; root._wasDragged = false;
             ox = e.clientX - root.offsetLeft; oy = e.clientY - root.offsetTop;
         });

@@ -83,7 +83,7 @@ def main():
              "if(b){b.click();}var r=document.getElementById('app-root');if(r){r.style.display='flex';}"
              "document.body.style.visibility='visible';},400);"
              "setTimeout(function(){var r=document.getElementById('app-root');"
-             "if(r&&r._applyMinimize){r._applyMinimize(%s);}},1300);</script>" % (a.tab, "true" if a.closed else "false"))
+             "if(r&&r._applyMinimize){r._applyMinimize(%s);}},5600);</script>" % (a.tab, "true" if a.closed else "false"))
     html = html.replace("</body>", click + "</body>", 1)
     page = UI / "_preview.html"
     page.write_text(html, "utf-8")
@@ -92,7 +92,7 @@ def main():
         with tempfile.TemporaryDirectory() as prof:
             r = subprocess.run([str(EDGE), "--headless=new", "--enable-logging=stderr", "--v=0", "--disable-gpu", f"--user-data-dir={prof}",
                             "--hide-scrollbars", f"--window-size={a.width},{a.height}",
-                            "--virtual-time-budget=6000", "--allow-file-access-from-files",
+                            "--virtual-time-budget=8000", "--allow-file-access-from-files",
                             "--disable-web-security", f"--screenshot={out}", page.as_uri()],
                            capture_output=True, timeout=90, text=True, errors="replace")
             if a.console:

@@ -152,6 +152,7 @@
         'Invite to my home': 'Convidar para casa',
         // the Couple tab
         'inZOI Co-op': 'inZOI Co-op',
+        'Smaller': 'Diminuir', 'Bigger': 'Aumentar',
         'A hug': 'Abraço', 'A kiss': 'Beijo', 'A dance': 'Dança', 'Hands': 'Mãos', 'Twirl': 'Giro',
         'Not connected': 'Desconectado',
         'Waiting for your partner': 'Esperando seu par',

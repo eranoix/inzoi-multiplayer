@@ -23,6 +23,26 @@
     var CHAT_KEEP = 100;
 
     I.apply(document);
+    // the panel's size: smaller by default, - / + in the header or Ctrl + mouse wheel over it; kept on this PC
+    var scale = 0.8;
+    try { scale = parseFloat(localStorage.getItem('mp.scale')) || 0.8; } catch (e) { scale = 0.8; }
+    function applyScale() {
+        scale = Math.max(0.55, Math.min(1.3, Math.round(scale * 100) / 100));
+        var right = (root.offsetLeft || 0) > (window.innerWidth || 1920) / 2;
+        root.style.transformOrigin = right ? 'top right' : 'top left';
+        root.style.transform = 'scale(' + scale + ')';
+        try { localStorage.setItem('mp.scale', String(scale)); } catch (e) {}
+    }
+    applyScale();
+    $('sz-down').addEventListener('click', function (e) { e.stopPropagation(); scale -= 0.1; applyScale(); });
+    $('sz-up').addEventListener('click', function (e) { e.stopPropagation(); scale += 0.1; applyScale(); });
+    root.addEventListener('wheel', function (e) {
+        if (!e.ctrlKey) { return; }
+        e.preventDefault();
+        scale += (e.deltaY < 0 ? 0.05 : -0.05);
+        applyScale();
+    });
+    document.addEventListener('mouseup', function () { setTimeout(applyScale, 0); });   // (moved: keep the corner it grows from)
     setInterval(function () {
         var cls = root._minimized ? 'min' : '';
         if (root.className !== cls) { root.className = cls; if (lastStatus) { renderTitle(lastStatus); } }
