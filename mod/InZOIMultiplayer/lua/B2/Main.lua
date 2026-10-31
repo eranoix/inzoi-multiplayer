@@ -380,6 +380,7 @@ local REAIM, SPRINT, TELEPORT, MIN_GAP = 150, 600, 600, 0.15
 -- Where they are, exactly: closer than ARRIVED cm is there; a walk that stopped short (refused, a door, someone's
 -- home) is finished with a teleport after SNAP_AFTER s, a walk going nowhere after STUCK_FOR s.
 local ARRIVED, SNAP_AFTER, STUCK_FOR = 70, 1.2, 2.2
+local LEAP_AT, LEAP_EVERY = 250, 1.5      -- running and this far behind: a small leap to 1 m behind them
 -- Realtime: the player's own position goes out from here ME_EVERY s (read straight from the engine); a puppet aims
 -- where its player will be LATENCY s from now (their speed, from the sender's clock on each point) and walks at their
 -- speed; anything it starts on its own while its player is online is cancelled (only what they do is done).
@@ -414,7 +415,13 @@ end
 
 -- Walk at its player's pace (a bit faster when behind): the engine's walk speed for that character.
 local function match_speed(p, speed, far)
-    p.fast = speed > 300 or far > SPRINT                -- (walk speed has no native setter: the game's own sprint)
+    -- movement.set_speed (no notice on screen, unlike movement.teleport): their pace + 15%, more when behind
+    local catch = far > 120 and math.min(350, (far - 120) * 0.9) or 0
+    local want = speed > 30 and math.max(170, math.min(450, speed * 1.15 + catch)) or (far > 200 and 300 or 190)
+    p.fast = speed > 330 or far > SPRINT               -- (a fast walk doesn't go faster: the game's own sprint)
+    if math.abs(want - (p.speedSet or 190)) < 30 or S.clock - (p.speedT or -10) < 0.4 then return end
+    p.speedSet, p.speedT = want, S.clock
+    pcall(cli, string.format("movement.set_speed entity_id=%d action=set Speed=%.0f", p.id, want))
 end
 
 -- Where to send the puppet for trail point `pick`: pick itself, or a point LEAD ahead while the player walks straight.
@@ -432,7 +439,7 @@ local function lead_point(p, pick, me)
     local dx, dy = pick.x - back.x, pick.y - back.y
     local len = math.sqrt(dx * dx + dy * dy)
     if len < 50 then return pick end                                          -- too little movement to trust a direction
-    local ahead = math.max(LEAD, math.min(450, remote_speed(p) * (LATENCY + 0.35) + 80))
+    local ahead = math.max(LEAD, math.min(550, remote_speed(p) * (LATENCY + 0.6) + 80))
     local k = ahead / len
     return { x = pick.x + dx * k, y = pick.y + dy * k, z = pick.z }
 end
@@ -521,6 +528,26 @@ local function drive(key, p, dt)
             return
         end
         far = math.max(far, 300)
+    end
+    local stopped = pick.at and S.clock - pick.at > 0.6
+    if stopped and far >= 150 and S.clock - p.lastOrderT > SNAP_AFTER then
+        if walking then cancel_walk(c) end
+        teleport(p.id, pick.x, pick.y, pick.z)
+        p.lastOrderT, p.dest, p.aimFor, p.facedT = S.clock, pick, pick, nil
+        log_limited(string.format("%s placed where they stopped (%.1f m off)", key, far / 100), 20)
+        return
+    end
+    local spd = remote_speed(p)
+    if not stopped and spd > 250 and far > LEAP_AT and S.clock - (p.leapT or -10) > LEAP_EVERY then
+        local back = p.trail[math.max(1, #p.trail - 3)]
+        local dx, dy = pick.x - back.x, pick.y - back.y
+        local len = math.sqrt(dx * dx + dy * dy)
+        if len > 30 and math.abs(me.Z - pick.z) < 150 then
+            p.leapT = S.clock
+            teleport(p.id, pick.x - dx / len * 100, pick.y - dy / len * 100, pick.z)
+            p.lastOrderT, p.dest, p.aimFor = S.clock - MIN_GAP, nil, nil
+            return
+        end
     end
     -- Exactly where they are: a walk the game refused or gave up on (a locked door, someone else's home, a spot it
     -- can't reach) leaves the puppet standing short of them. Once the order has had SNAP_AFTER s, put it there.

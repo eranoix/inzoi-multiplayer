@@ -115,6 +115,9 @@ async def main(a):
             if not best or m < best[1]:
                 best = (d, m)
     print(f"their Zoi here matches where they were {best[0]:.1f} s earlier (median {best[1]:.0f} cm off then)")
+    spd = [v for v in (speed_at(s[0]) for s in states) if v > 40]
+    if spd:
+        print(f"their speed while moving: median {statistics.median(spd):.0f} cm/s, p90 {sorted(spd)[int(len(spd) * 0.9)]:.0f} cm/s")
     acts = [s[4] for s in states if s[4]]
     print("actions seen:", sorted(set(acts))[:12])
 
