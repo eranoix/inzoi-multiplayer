@@ -93,10 +93,11 @@ class Mailbox:
                 self.members[key] = member_lua
             self.bulk_seq += 1
 
-    def add_point(self, key: str, n: int, x, y, z, yaw):
+    def add_point(self, key: str, n: int, x, y, z, yaw, ts=None):
+        """ts: the sender's clock when the point was read (the controller works out their speed from it)."""
         with self.lock:
             t = self.trails.setdefault(key, [])
-            t.append([n, x, y, z, yaw])
+            t.append([n, x, y, z, yaw] + ([round(ts % 100000, 3)] if isinstance(ts, (int, float)) else []))
             del t[:-10]                  # the controller dedups by n; resending the last few covers missed polls
 
     def flush(self) -> bool:

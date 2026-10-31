@@ -153,6 +153,9 @@
         // the Couple tab
         'inZOI Co-op': 'inZOI Co-op',
         'Smaller': 'Diminuir', 'Bigger': 'Aumentar',
+        'Looking for a new version...': 'Procurando versão nova...',
+        'You already have the newest version ({v}).': 'Você já está na versão mais nova ({v}).',
+        'Updating to {v}: the program restarts in a moment (your game keeps running).': 'Atualizando para a {v}: o programa reinicia em instantes (o jogo continua aberto).',
         'A hug': 'Abraço', 'A kiss': 'Beijo', 'A dance': 'Dança', 'Hands': 'Mãos', 'Twirl': 'Giro',
         'Not connected': 'Desconectado',
         'Waiting for your partner': 'Esperando seu par',

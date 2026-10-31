@@ -438,6 +438,17 @@
             flash(r ? (errText(r) || t('Saved - reconnecting...')) : t(NOT_RUNNING));
         });
     });
+    $('s-update').addEventListener('click', function () {
+        var out = $('s-update-out');
+        setText(out, t('Looking for a new version...'));
+        off($('s-update'), true);
+        post('/update/now', {}, function (r) {
+            off($('s-update'), false);
+            if (!r || r.error) { setText(out, r ? errText(r) : t(NOT_RUNNING)); return; }
+            setText(out, r.latest ? t('You already have the newest version ({v}).', { v: r.version })
+                : t('Updating to {v}: the program restarts in a moment (your game keeps running).', { v: r.version }));
+        }, 20000);
+    });
     $('servers-btn').addEventListener('click', function (e) {
         e.stopPropagation();                         // not a title-bar click (that restores a minimized panel)
         post('/page/open', {}, function (r) { if (!r || r.error) { flash(r ? errText(r) : t(NOT_RUNNING)); } });

@@ -342,7 +342,7 @@ local function add_trail(op)
             local last = p.trail[#p.trail]
             if not last or dist2(last.x, last.y, pt[2], pt[3]) > 5 then
                 -- t: last change (moved or turned); at: when it moved here (turning on the spot doesn't count)
-                p.trail[#p.trail + 1] = { t = S.clock, at = S.clock, x = pt[2], y = pt[3], z = pt[4], yaw = pt[5] }
+                p.trail[#p.trail + 1] = { t = S.clock, at = S.clock, x = pt[2], y = pt[3], z = pt[4], yaw = pt[5], st = pt[6] }
             elseif pt[5] and yaw_gap(last.yaw or pt[5], pt[5]) > 10 then
                 last.yaw, last.t = pt[5], S.clock      -- turned on the spot
             end
@@ -355,10 +355,14 @@ end
 -- Follow logic: head for the player's newest position (led a little ahead, see below). Redirecting a walk costs a
 -- short stop, so only re-aim when the player has moved REAIM cm away from where we're headed (or we've stopped);
 -- sprint when far behind; teleport when hopelessly behind (other side of town, loading screen...).
-local REAIM, SPRINT, TELEPORT, MIN_GAP = 300, 600, 1000, 0.4
+local REAIM, SPRINT, TELEPORT, MIN_GAP = 150, 600, 600, 0.15
 -- Where they are, exactly: closer than ARRIVED cm is there; a walk that stopped short (refused, a door, someone's
 -- home) is finished with a teleport after SNAP_AFTER s, a walk going nowhere after STUCK_FOR s.
-local ARRIVED, SNAP_AFTER, STUCK_FOR = 80, 2.5, 3.0
+local ARRIVED, SNAP_AFTER, STUCK_FOR = 70, 1.2, 1.5
+-- Realtime: the player's own position goes out from here ME_EVERY s (read straight from the engine); a puppet aims
+-- where its player will be LATENCY s from now (their speed, from the sender's clock on each point) and walks at their
+-- speed; anything it starts on its own while its player is online is cancelled (only what they do is done).
+local ME_EVERY, POLL_EVERY, LATENCY, OWN_CHECK = 0.1, 0.03, 0.35, 0.4
 local ACT_LEAVE = 600       -- while copying an action, only a remote player this far from the puppet means "they left"
 local FACE_GAP, FACE_EVERY = 25, 1.5
 -- Smoothing (no new engine calls: only where the puppet aims and when it redirects):
@@ -369,7 +373,29 @@ local FACE_GAP, FACE_EVERY = 25, 1.5
 --    REAIM_STRAIGHT away (a turn still re-aims at REAIM);
 --  * trail points carry no sender timestamps (t/at are when they reached us, in batches), so walk vs sprint stays
 --    chosen by distance (SPRINT).
-local LEAD, LEAD_BACK, MOVING_FOR, REAIM_STRAIGHT, STRAIGHT_COS = 150, 150, 0.6, 450, 0.9
+local LEAD, LEAD_BACK, MOVING_FOR, REAIM_STRAIGHT, STRAIGHT_COS = 150, 150, 0.6, 300, 0.9
+
+-- How fast its player moves (cm/s), from the sender's times on the last points (0 when standing or unknown).
+local function remote_speed(p)
+    local n = #p.trail
+    local last = p.trail[n]
+    if not last or not last.st or S.clock - (last.at or 0) > MOVING_FOR then return 0 end
+    for i = n - 1, math.max(1, n - 10), -1 do
+        local q = p.trail[i]
+        if q.st and last.st - q.st >= 0.3 then
+            return dist2(q.x, q.y, last.x, last.y) / (last.st - q.st)
+        end
+    end
+    return 0
+end
+
+-- Walk at its player's pace (a bit faster when behind): the engine's walk speed for that character.
+local function match_speed(p, speed, far)
+    local want = speed > 30 and math.max(160, math.min(650, speed * 1.1 + (far > 250 and 120 or 0))) or 190
+    if math.abs(want - (p.speedSet or 190)) < 35 or S.clock - (p.speedT or -10) < 0.5 then return end
+    p.speedSet, p.speedT = want, S.clock
+    pcall(cli, string.format("movement.set_speed entity_id=%d action=set Speed=%.0f", p.id, want))
+end
 
 -- Where to send the puppet for trail point `pick`: pick itself, or a point LEAD ahead while the player walks straight.
 local function lead_point(p, pick, me)
@@ -386,7 +412,8 @@ local function lead_point(p, pick, me)
     local dx, dy = pick.x - back.x, pick.y - back.y
     local len = math.sqrt(dx * dx + dy * dy)
     if len < 50 then return pick end                                          -- too little movement to trust a direction
-    local k = LEAD / len
+    local ahead = math.max(LEAD, math.min(400, remote_speed(p) * LATENCY + 60))
+    local k = ahead / len
     return { x = pick.x + dx * k, y = pick.y + dy * k, z = pick.z }
 end
 
@@ -418,7 +445,7 @@ local function drive(key, p, dt)
     if not c then error("no character " .. tostring(p.id)) end     -- counted by on_tick: gone for good -> dropped
     if p.pending then                                   -- second half of a redirect: the old walk is gone now
         p.pending.t = p.pending.t + dt
-        if not is_walking(c) or p.pending.t > 0.3 then
+        if not is_walking(c) or p.pending.t > 0.08 then
             order_walk(c, p.pending.x, p.pending.y, p.pending.z, p.pending.bag)
             p.pending = nil
         end
@@ -428,6 +455,16 @@ local function drive(key, p, dt)
         p.actQueued.t = p.actQueued.t + dt
         if not is_walking(c) or p.actQueued.t > 0.3 then start_act(c, p) end
         return
+    end
+    if not p.act and not p.actQueued and S.clock - (p.ownT or -10) > OWN_CHECK then
+        p.ownT = S.clock
+        local bag = current_bag(c)
+        -- (walks are ours; Co_/Coop/Social: answering someone's social, e.g. a hug given to it, which stays)
+        if bag and bag ~= "None" and bag ~= "nil" and bag ~= "" and not bag:match("^ClickMove")
+            and not bag:match("^Co_") and not bag:match("^Coop") and not bag:match("Social") then
+            pcall(cli, string.format("interaction.clear_queue entity_id=%d cancel_current=true", p.id))
+            log_limited(string.format("%s's Zoi started %s on its own: stopped (only what they do is done)", key, bag), 30)
+        end
     end
     if #p.trail == 0 or p.hidden or S.clock - p.lastOrderT < MIN_GAP then return end
     local pick = p.trail[#p.trail]
@@ -498,6 +535,7 @@ local function drive(key, p, dt)
         end
         return
     end
+    match_speed(p, remote_speed(p), far)
     local aim = lead_point(p, pick, me)
     local reaim = (walking and far <= SPRINT and straight_on(p, aim)) and REAIM_STRAIGHT or REAIM
     local stale = not p.dest or dist2(p.dest.x, p.dest.y, aim.x, aim.y) > reaim
@@ -780,8 +818,20 @@ end
 function M.on_tick(self, dt)
     dt = dt or 0
     S.clock = S.clock + dt
+    S.meT = (S.meT or 0) + dt
+    if S.me and S.meT >= ME_EVERY then
+        S.meT = 0
+        pcall(function()
+            local c = char(S.me)
+            if not c then return end
+            local l, r = c:GetLocation(), c:GetRotation()
+            local site = -1
+            pcall(function() site = c:GetLocatedSiteId().Value end)
+            report("me", string.format("%.1f %.1f %.1f %.1f %d", l.X, l.Y, l.Z, r.Yaw, site))
+        end)
+    end
     S.poll = S.poll + dt
-    if S.poll >= 0.1 then
+    if S.poll >= POLL_EVERY then
         S.poll = 0
         local ok, err = pcall(poll)
         if not ok then log_limited("poll ERR " .. tostring(err)) end

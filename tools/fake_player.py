@@ -90,14 +90,15 @@ async def main(a):
             if a.chat and 4 < age and not getattr(main, "said", False):
                 main.said = True
                 await send({"t": "chat", "text": a.chat})
-            await send({"t": "state", "state": {"n": n, **st, "act": act, "anim": anim, "outfit": outfit}})
+            await send({"t": "state", "state": {"n": n, **st, "act": act, "anim": anim, "outfit": outfit,
+                                                "ts": round(time.time(), 3)}})
         except GameError as e:
             print("game:", e, flush=True)
         if a.seconds and time.time() - start > a.seconds:
             writer.close()
             print("fake player left", flush=True)
             return
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(a.rate)
 
 
 if __name__ == "__main__":
@@ -114,5 +115,6 @@ if __name__ == "__main__":
     ap.add_argument("--still", action="store_true", help="stand still and turn 90 degrees every 6 s")
     ap.add_argument("--accept", action="store_true", help="say yes to every couple request (hug, kiss...)")
     ap.add_argument("--offset", type=float, default=0, help="metres to the side of 'moves' (stream your own Zoi)")
+    ap.add_argument("--rate", type=float, default=0.2, help="seconds between states (the real program: ~0.1)")
     ap.add_argument("--seconds", type=float, default=0, help="leave after this many seconds (0: never)")
     asyncio.run(main(ap.parse_args()))

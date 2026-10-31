@@ -45,7 +45,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.8"
+VERSION = "0.9.9"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -342,6 +342,11 @@ class Companion(couple.Couple, servers.Servers):
         self.mail = Mailbox(install.MAILBOX_DIR)
         self.reports = Reports(install.INSTALL_DIR / "out")
         self.remotes: dict[str, Remote] = {}
+        self.fast_pos = None          # my Zoi's position as the in-game controller last read it (realtime path)
+        self.last_full_state = None   # my last full state_of (city, site...) the fast positions go out with
+        self.state_base = {}          # the rest of my state (action, outfit, clock...) as last sent
+        self.sending_state = False    # the slow loop is sending my state (multiplayer on, in the world)
+        self.cur_act = self.cur_anim = None
         self.me_id = None            # my player id on the server
         self.writer = None
         self.connected_at = 0.0
@@ -444,7 +449,7 @@ class Companion(couple.Couple, servers.Servers):
             raise SystemExit("inZOI Multiplayer is already running in another window. Use that one "
                              "(or close it first).") from None
         self.tasks = [asyncio.create_task(self.keep_running(loop)) for loop in (
-            self.game_loop, self.mailbox_loop, self.mods_loop, self.update_loop, self.menu_loop, self.directory_loop,
+            self.game_loop, self.act_loop, self.mailbox_loop, self.mods_loop, self.update_loop, self.menu_loop, self.directory_loop,
             self.ingame_loop, self.lan_loop)]
         backoff = 2
         while True:
@@ -727,7 +732,7 @@ class Companion(couple.Couple, servers.Servers):
         if not r.spawned:
             return
         if "n" in st:
-            self.mail.add_point(r.pid, st["n"], st["x"], st["y"], st["z"], st.get("yaw", 0))
+            self.mail.add_point(r.pid, st["n"], st["x"], st["y"], st["z"], st.get("yaw", 0), st.get("ts"))
         if r.pid not in self.puppet_ids:
             return                       # puppet not confirmed yet; actions wait for it
         act = st.get("act")
@@ -786,9 +791,9 @@ class Companion(couple.Couple, servers.Servers):
                 r.act_sig = r.anim = r.outfit = None
                 log.info("%s is here: their Zoi in your family follows them now", r.name)
                 continue
-            if r.adopted and r.spawned and not here:
-                self.despawn(r.pid)                      # (a family member isn't hidden: the game looks after them)
-                r.spawned = r.adopted = False
+            if r.adopted and r.spawned and here == r.hidden:
+                r.hidden = not here                      # (online elsewhere: out of sight, still only theirs)
+                self.mail.op("hide", key=r.pid, on=r.hidden)
                 continue
             if not r.spawned and here and time.time() - r.spawn_requested > 8:
                 r.adopted = False
@@ -996,6 +1001,8 @@ class Companion(couple.Couple, servers.Servers):
                 r.spawned, r.spawn_requested = False, time.time() - 5        # again in ~3 s (manage_puppets waits 8)
         elif kind == "social":
             self.on_social_report(text)
+        elif kind == "me":
+            self.on_my_position(text)
         elif kind == "log":
             log.info("[game] %s", text)
 
@@ -1041,13 +1048,14 @@ class Companion(couple.Couple, servers.Servers):
                     asyncio.get_running_loop().create_task(self.maybe_upload_world())   # after the game saved
                 if time.time() - last_me > 1:
                     self.my_entity, last_me = await self.g(self.game.possessed), time.time()
-                st = await self.g(self.game.state_of, self.my_entity)
+                fast = self.fast_pos
+                if fast and time.time() - fast["at"] < 1 and tick % 10 and self.last_full_state:
+                    st = {**self.last_full_state, **{k: fast[k] for k in ("x", "y", "z", "yaw", "site")}}
+                else:
+                    st = await self.g(self.game.state_of, self.my_entity)
+                    self.last_full_state = st
                 self.my_city = st["city"]
-                if tick % 2 == 0:
-                    a = await self.g(self.game.activity, self.my_entity)
-                    act = await self.g(self.describe_act, a)
-                    self.learn_bag(act)
-                    anim = a["anim"]["id"] if a.get("anim") else None
+                act, anim = self.cur_act, self.cur_anim                  # (act_loop keeps them fresh)
                 if tick % 10 == 1:
                     try:
                         outfit = await self.g(self.game.outfit, self.my_entity)
@@ -1082,9 +1090,11 @@ class Companion(couple.Couple, servers.Servers):
                         await self.sync_world()
                     self.n += 1
                     clock = list(self.my_clock[:2]) if self.my_clock and world == "play" else None
-                    await self.send({"t": "state", "state": {"n": self.n, **st, "act": act, "anim": anim,
-                                                              "outfit": outfit, "clock": clock, "sleep": self.sleeping,
-                                                              **self.extra_state(st)}})
+                    self.state_base = {"act": act, "anim": anim, "outfit": outfit, "clock": clock,
+                                       "sleep": self.sleeping, **self.extra_state(st)}
+                    self.sending_state = True
+                    await self.send({"t": "state", "state": {"n": self.n, **st, "ts": round(time.time(), 3),
+                                                              **self.state_base}})
                     await self.manage_puppets()
             except GameError as e:
                 log.debug("game: %s", e)
@@ -1095,6 +1105,56 @@ class Companion(couple.Couple, servers.Servers):
                 loop_error("game loop", e)
                 await asyncio.sleep(1)
             await asyncio.sleep(0.2)
+
+    # ------------------------------------------------------------------ realtime
+    def on_my_position(self, text: str):
+        """The controller read my Zoi's position from the engine (10 times a second): it goes out right away, with the
+        rest of my latest state."""
+        try:
+            x, y, z, yaw, site = text.split()[:5]
+            pos = {"x": round(float(x), 1), "y": round(float(y), 1), "z": round(float(z), 1),
+                   "yaw": round(float(yaw), 1), "site": int(float(site)), "at": time.time()}
+        except ValueError:
+            return
+        self.fast_pos = pos
+        base = self.last_full_state
+        if not (self.sending_state and base and self.writer and self.me_id and self.world == "play" and self.mp_active()):
+            return
+        self.n += 1
+        st = {"n": self.n, **base, **{k: pos[k] for k in ("x", "y", "z", "yaw", "site")},
+              "ts": round(pos["at"], 3), **self.state_base}
+        asyncio.get_running_loop().create_task(self.send_quiet({"t": "state", "state": st}))
+
+    async def send_quiet(self, msg: dict):
+        try:
+            await self.send(msg)
+        except (OSError, ConnectionError):
+            pass
+
+    async def act_loop(self):
+        """What my Zoi is doing, 4 times a second, apart from the slower loop: a change goes out right away."""
+        while True:
+            try:
+                if self.world == "play" and self.my_entity:
+                    a = await self.g(self.game.activity, self.my_entity)
+                    act = await self.g(self.describe_act, a)
+                    anim = a["anim"]["id"] if a.get("anim") else None
+                    if act != self.cur_act or anim != self.cur_anim:
+                        self.cur_act, self.cur_anim = act, anim
+                        self.learn_bag(act)
+                        self.state_base = {**self.state_base, "act": act, "anim": anim}
+                        pos = self.fast_pos
+                        if pos and self.sending_state and self.last_full_state and self.writer and self.me_id:
+                            self.n += 1
+                            await self.send_quiet({"t": "state", "state": {
+                                "n": self.n, **self.last_full_state, **{k: pos[k] for k in ("x", "y", "z", "yaw", "site")},
+                                "ts": round(time.time(), 3), **self.state_base}})
+            except GameError:
+                await asyncio.sleep(0.5)
+            except Exception as e:                       # noqa: BLE001
+                loop_error("action loop", e)
+                await asyncio.sleep(1)
+            await asyncio.sleep(0.25)
 
     async def mailbox_loop(self):
         inject = install.MAILBOX_DIR / "inject.json"       # debugging: extra ops dropped in by tools
@@ -1117,7 +1177,7 @@ class Companion(couple.Couple, servers.Servers):
                 log.warning("mailbox: %s", e)
             except Exception as e:                       # noqa: BLE001
                 loop_error("mailbox loop", e)
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.03)              # (realtime: positions come in and go to the game at ~30 Hz)
 
     # ------------------------------------------------------------------ the multiplayer save
     # Multiplayer plays in a save of its own (cfg["mp_save"]), so a player's normal saves stay untouched. At the main
@@ -2306,13 +2366,29 @@ class Companion(couple.Couple, servers.Servers):
             self.update_action(str(body.get("key", "")), str(body.get("action", "")))
             return {"ok": True, "box": self.update_box_view(), "update": self.update_view()}
 
+        async def update_now(_):
+            """The "Update now" button: look for a newer version right away; if there is one, download it and restart
+            into it (the game keeps running)."""
+            try:
+                info = await self.g(updater.latest, VERSION)
+            except (OSError, ValueError) as e:
+                return {"error": f"couldn't reach GitHub: {e}", "code": "update_check_failed"}
+            if not info:
+                return {"ok": True, "latest": True, "version": VERSION}
+            if not self.update or self.update.get("version") != info["version"]:
+                self.update = {**info, "state": "available", "done": 0, "total": info["size"], "path": None,
+                               "error": None}
+            log.info("update now (button): %s", info["version"])
+            self.update_action(info["version"], "update")
+            return {"ok": True, "latest": False, "version": info["version"]}
+
         async def world_answer(body):
             self.world_action(str(body.get("key", "")), str(body.get("action", "")))
             return {"ok": True, "box": self.world_box}
 
         return {"/status": status, "/chat": chat, "/join": join, "/settings": settings,
                 "/houses": house_list, "/share": share, "/add_house": add_house, "/mods": mods_answer,
-                "/save": save_answer, "/update": update_answer, "/world": world_answer, **self.server_routes(),
+                "/save": save_answer, "/update": update_answer, "/update/now": update_now, "/world": world_answer, **self.server_routes(),
                 **self.couple_routes(), **self.support_routes()}
 
 

@@ -293,15 +293,18 @@ async def test_couple():
     ana.__dict__.pop("_family", None)
     await ana.manage_puppets()
     assert ops(ana, "despawn")[-1]["key"] == ben.me_id and not rb.spawned
-    # in another city: the family member is let go (the game looks after them), not hidden
-    ana.puppet_ids[ben.me_id], rb.spawned, rb.adopted = 55, True, True
+    # online but in another city: the family member is hidden and stays theirs (never let go while they're on)
+    ana.puppet_ids[ben.me_id], rb.spawned, rb.adopted, rb.hidden = 55, True, True, False
     rb.state = {**rb.state, "city": "Bliss Bay"}
     n = len(ops(ana, "despawn"))
     await ana.manage_puppets()
-    assert len(ops(ana, "despawn")) == n + 1 and not rb.adopted and not ops(ana, "hide")[-1:] == [{"key": ben.me_id}]
+    assert len(ops(ana, "despawn")) == n and rb.adopted and rb.hidden
+    assert ops(ana, "hide")[-1]["key"] == ben.me_id and ops(ana, "hide")[-1]["on"] is True
     rb.state = {**rb.state, "city": "Dowon"}
+    await ana.manage_puppets()
+    assert ops(ana, "hide")[-1]["on"] is False and not rb.hidden
     ana.puppet_ids[ben.me_id], rb.spawned, rb.adopted = 55, True, True
-    print("family member adopted (not copied), copies replaced, let go elsewhere: ok")
+    print("family member adopted (not copied), copies replaced, hidden (still theirs) elsewhere: ok")
 
     # --- every interaction the game offers, by group; doing one
     ia = await ana_routes["/partner/interactions"]({})
@@ -414,7 +417,7 @@ async def test_couple():
     assert out["result"]["state"] == "failed", out
     assert ("interaction.execute", {"entity_id": 61, "interaction_bag_id": "Co_Cohabit_Friendship",
                                     "target_entity_id": 20, "insert_front": True}) in ben.fake_calls
-    assert await until(lambda: ana.sent[res["id"]]["state"] == "failed")
+    assert await until(lambda: ana.sent[res["id"]]["state"] == "failed"), (ana.sent[res["id"]], out)
     assert "answer yes" in ana.sent[res["id"]]["message"] and any("didn't work in their save" in c["text"] for c in ana.chat)
     print("a move the game refuses: the game's own question, and the asker hears it: ok")
 

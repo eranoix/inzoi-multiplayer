@@ -333,6 +333,8 @@ class Couple:
             except Exception as e:                       # noqa: BLE001 - the game refused: say so in the panel
                 log.warning("family %s failed: %s", action, e)
                 res = {"error": str(e)}
+            if req.get("state") == "failed":             # (their save said it didn't work: that stays)
+                return {"state": "failed", "message": req.get("message", "")}
             return self.mark(req, "done" if res.get("ok") else "failed", res.get("error", ""))
         together = action in TARGETED or (action in TOGETHER and pid in self.puppet_ids)
         if together and not initiator:
