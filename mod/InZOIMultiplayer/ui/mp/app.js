@@ -27,6 +27,13 @@
         var cls = root._minimized ? 'min' : '';
         if (root.className !== cls) { root.className = cls; if (lastStatus) { renderTitle(lastStatus); } }
     }, 150);
+    [2500, 5000].forEach(function (ms) {
+        setTimeout(function () {
+            if (!userOpened && !root._minimized && root._applyMinimize && !document.querySelector('.req')) { root._applyMinimize(true); }
+        }, ms);
+    });
+    var userOpened = false;
+    $('title-bar').addEventListener('click', function () { userOpened = true; });
     setTimeout(function () {
         if (!root._minimized && root._applyMinimize && !document.querySelector('.req')) { root._applyMinimize(true); }
         // the new layout starts clear of the game's compass (an older saved spot sat on it); moved by hand, it stays
@@ -245,7 +252,7 @@
         if (flashText && Date.now() < flashUntil) { showNotice(flashText); return; }
         flashText = null;
         // while disconnected the banner shows the reason; while connected, a notice the companion still has
-        showNotice(s && s.connected && s.notice ? I.notice(s.notice_code, s.notice) : null);
+        showNotice(s && s.connected && s.notice && s.notice_code !== 'version_differs' ? I.notice(s.notice_code, s.notice) : null);
     }
 
     var NOT_RUNNING = "The inZOI Multiplayer program isn't running. Open \"inZOI Multiplayer.exe\" and keep its window open while you play.";
@@ -776,8 +783,9 @@
             seen = s.game === 'stopped' ? t('Your game is paused: {name} shows up when time runs again.', { name: p.name })
                 : t('Close the menu or build mode: {name} shows up when your game runs again.', { name: p.name });
         }
-        setText($('p-seen'), seen);
-        $('p-seen').style.display = seen ? '' : 'none';
+        seenText_ = seen;
+        $('p-seen').style.display = 'none';
+        $('p-where').style.display = p.here || !p.online ? 'none' : '';
         var cant = !s.connected || !p.online;
         off($('p-goto'), cant);
         off($('p-invite'), cant);
@@ -821,6 +829,7 @@
                   ['baby', N('Have a baby'), N('A baby on the way')]];
     var BOND = [['romance', N('Romance')], ['friendship', N('Friendship')], ['family', N('Family')],
                 ['business', N('Business')]];
+    var seenText_ = '';
     var currentTab = 'couple', chip = 'moments', iaData = null, iaAt = 0, iaLoading = false, iaKey = '';
     try { chip = localStorage.getItem('mp.chip') || 'romance'; } catch (e) { chip = 'romance'; }
     if (chip === 'moments') { chip = 'romance'; }
@@ -884,7 +893,7 @@
             var b = el('button', 'qa'), c = el('span', 'c'), l = el('span', 'l', t(QUICK_SHORT[m[0]]));
             b.setAttribute('type', 'button');
             b.setAttribute('title', t(m[1]));
-            c.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
+            c.innerHTML = '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ' +
                 'stroke-linecap="round" stroke-linejoin="round">' + QUICK_ICONS[m[0]] + '</svg>';
             b.appendChild(c);
             b.appendChild(l);
@@ -943,7 +952,7 @@
         if (!s || !s.connected) { msg = t('Not connected to the server.'); }
         else if (!p) { msg = t('Nobody else is on the server yet. When your partner joins, everything you can do together shows up here.'); }
         else if (!p.online) { msg = t('{name} is offline. Their Zoi lives its own life in your save until they come back.', { name: name }); }
-        else if (!p.here) { msg = t("{name}'s Zoi isn't in your world right now (another city, the menu, or a loading screen).", { name: name }); }
+        else if (!p.here) { msg = seenText_ || t("{name}'s Zoi isn't in your world right now (another city, the menu, or a loading screen).", { name: name }); }
         empty.style.display = msg ? 'block' : 'none';
         setText(empty, msg);
         $('c-main').style.display = msg ? 'none' : 'flex';
