@@ -176,7 +176,9 @@ async def test_couple():
     assert not ops(ben, "social"), "the partner's PC starts the hug too (two hugs would fight)"
     assert await until(lambda: ops(ana, "social"))
     social = ops(ana, "social")[0]
-    assert social["key"] == ben.me_id and social["entity"] == 10 and social["bag"] == "Social_Hug", social
+    assert social["key"] == ben.me_id and social["entity"] == 10, social
+    assert social["bag"] == "Co_DeepHug_MaleToFemale_Success", social             # (the checked id, no list here)
+    assert ("relationships.set_value_between", {"owner_id": 10, "target_id": 77, "Value": 100}) in ana.fake_calls
     assert ana.sent[res["id"]]["state"] == "started"
     ana.on_report("social", f"{res['id']} ok")
     assert (await ana_routes["/status"]({}))["couple"]["sent"][-1]["state"] == "done"
@@ -192,7 +194,8 @@ async def test_couple():
     ana.learn_bag({"bag": "Fun_DanceSolo"})
     assert ana.cfg["couple_bags"] == {"hug": "Friendly_HugTight", "dance": "Fun_DanceSolo"}
 
-    # --- dance: Ben asks, Ana declines; asks again, Ana accepts: both start it on their own Zoi
+    # --- dance: Ben asks, Ana declines; asks again, Ana accepts: Ben's Zoi dances with Ana's puppet (a couple
+    # dance), Ana's PC only replays it; the game's own list decides the id
     res = await ben_routes["/partner/action"]({"key": ana.me_id, "action": "dance"})
     assert await until(lambda: ana.requests)
     rid = next(iter(ana.requests))
@@ -201,11 +204,25 @@ async def test_couple():
     assert not ops(ana, "social")[1:] and not ops(ben, "social")
     res = await ben_routes["/partner/action"]({"key": ana.me_id, "action": "dance"})
     assert await until(lambda: ana.requests)
+    offered = {"interactions": [{"interaction_bag_id": "Co_Friendship_G04_Start"},
+                                {"interaction_bag_id": "Co_Dance_Together_MaleToFemale_Friendship"}]}
+    ben.game.call = lambda tool, **kw: ben.fake_calls.append((tool, kw)) or (offered if tool == "interaction.list_available" else {})
+    n_ana = len(ops(ana, "social"))
     await ana_routes["/partner/respond"]({"id": next(iter(ana.requests)), "accept": True})
-    assert ops(ana, "social")[-1] == {**ops(ana, "social")[-1], "bag": "Fun_DanceSolo", "entity": 10}
-    assert "key" not in ops(ana, "social")[-1]
+    assert len(ops(ana, "social")) == n_ana, "the partner's PC replays it through the live sync"
     assert await until(lambda: ops(ben, "social"))
-    assert ops(ben, "social")[0]["bag"] == "Dance_Solo" and "key" not in ops(ben, "social")[0]
+    assert ops(ben, "social")[0]["bag"] == "Co_Dance_Together_MaleToFemale_Friendship", ops(ben, "social")
+    assert ops(ben, "social")[0]["key"] == ana.me_id
+    # without the partner's Zoi here: each one dances alone
+    del ana.puppet_ids[ben.me_id]
+    del ben.puppet_ids[ana.me_id]
+    res = await ben_routes["/partner/action"]({"key": ana.me_id, "action": "dance"})
+    assert await until(lambda: ana.requests)
+    await ana_routes["/partner/respond"]({"id": next(iter(ana.requests)), "accept": True})
+    assert ops(ana, "social")[-1]["bag"] == "Fun_DanceSolo" and "key" not in ops(ana, "social")[-1]
+    assert await until(lambda: len(ops(ben, "social")) == 2)
+    assert ops(ben, "social")[1]["bag"] == "Next_Dance_Start" and "key" not in ops(ben, "social")[1]
+    ana.puppet_ids[ben.me_id], ben.puppet_ids[ana.me_id] = 77, 88
     assert (await ben_routes["/partner/respond"]({"id": "nope", "accept": True}))["code"] == "expired"
     assert (await ben_routes["/partner/action"]({"action": "slap"}))["code"] == "bad_action"
 

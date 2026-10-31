@@ -927,6 +927,7 @@ class Companion(couple.Couple, servers.Servers):
                 r = self.remotes.get(key)
                 if r:
                     r.seen_at = time.time()
+                    asyncio.get_running_loop().create_task(self.g(self.bond_puppet, int(eid)))   # (couple.py)
         elif kind == "despawned":
             key = text.split(" ", 1)[0]
             self.puppet_ids.pop(key, None)
@@ -1010,6 +1011,7 @@ class Companion(couple.Couple, servers.Servers):
                     if self.sent_profile is None or time.time() - last_profile_check > 30:
                         last_profile_check = time.time()
                         profile = await self.g(read_profile, self.game.call, self.my_entity)
+                        self.my_gender = profile.get("gender")
                         h = profile_hash(profile)
                         if h != self.sent_profile:
                             await self.send({"t": "profile", "profile": profile})

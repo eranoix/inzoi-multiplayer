@@ -570,10 +570,14 @@
         if (r.code && ERRORS[r.code]) { return t(ERRORS[r.code], { city: r.city }); }
         return errText(r) || t('Something went wrong.');
     }
+    var ACTS = ['hug', 'kiss', 'dance', 'wave', 'holdhands', 'selfie', 'spin'];
     var ASKS = { hug: N('{name} wants to hug you'), kiss: N('{name} wants to kiss you'),
-                 dance: N('{name} wants to dance with you'), wave: N('{name} is waving at you'),
+                 dance: N('{name} wants to dance with you'), wave: N('{name} wants a high five'),
+                 holdhands: N('{name} wants to hold your hand'), selfie: N('{name} wants a selfie with you'),
+                 spin: N('{name} wants to spin you around in a hug'),
                  invite: N('{name} invited you to their home') };
-    var SENT_NAME = { hug: N('Hug request'), kiss: N('Kiss request'), dance: N('Dance request'), wave: N('Wave request'),
+    var SENT_NAME = { hug: N('Hug request'), kiss: N('Kiss request'), dance: N('Dance request'), wave: N('High five request'),
+                      holdhands: N('Hold hands request'), selfie: N('Selfie request'), spin: N('Spin request'),
                       invite: N('Invitation') };
     var SENT_STATE = { waiting: N('{what}: waiting for {name} to answer...'), accepted: N('{what}: {name} said yes!'),
                        declined: N('{what}: {name} said no.'), expired: N("{what}: {name} didn't answer."),
@@ -718,7 +722,7 @@
         var cant = !s.connected || !p.online;
         off($('p-goto'), cant);
         off($('p-invite'), cant);
-        ['hug', 'kiss', 'dance', 'wave'].forEach(function (a) { off($('a-' + a), cant); });
+        ACTS.forEach(function (a) { off($('a-' + a), cant); });
     }
     function partnerCall(path, body, okText) {
         if (partnerKey) { body.key = partnerKey; }
@@ -738,7 +742,7 @@
     $('p-invite').addEventListener('click', function () {
         partnerCall('/partner/invite', {}, null);
     });
-    ['hug', 'kiss', 'dance', 'wave'].forEach(function (a) {
+    ACTS.forEach(function (a) {
         $('a-' + a).addEventListener('click', function () { partnerCall('/partner/action', { action: a }, null); });
     });
 

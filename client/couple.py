@@ -34,17 +34,32 @@ import world
 
 log = logging.getLogger("couple")
 
-ACTIONS = ("hug", "kiss", "dance", "wave")
-TARGETED = ("hug", "kiss")                 # done to the partner (the rest are done alone)
+ACTIONS = ("hug", "kiss", "dance", "wave", "holdhands", "selfie", "spin")
+TARGETED = ("hug", "kiss", "holdhands", "selfie", "spin")   # done to the partner's Zoi (it must be here)
+TOGETHER = ("dance", "wave")               # with the partner's Zoi when it's here, else alone
 REQUEST_KINDS = ACTIONS + ("invite",)
 REQUEST_TTL = 90                           # seconds a request can be answered
 MAX_PENDING = 20
 BAG_ID = re.compile(r"^(anim:)?[A-Za-z0-9_]{1,80}$")
-# Unverified guesses (no list of the game's interaction ids is available offline): replaced by what's learned.
+# Unverified guesses for doing it alone (no list of the game's interaction ids is available offline).
 GUESS_BAGS = {"hug": "Social_Hug", "kiss": "Social_Kiss", "dance": "Dance_Solo", "wave": "Social_Wave"}
+# Done to the partner's Zoi: the game's own ids, checked in the real game (31/10/2026) with interaction.list_available
+# once the two Zois are close (relationships.set_value_between, see bond_puppet). {g}: Male/Female of each Zoi.
+WITH_PARTNER = {
+    "hug": ("Co_DeepHug_{me}To{them}_Success", "Co_HugUp_{me}To{them}_Success", "Co_HugKiss_{me}To{them}_Romance"),
+    "kiss": ("Co_Peck_{me}To{them}_Success", "Co_KissForehead_{me}To{them}_Success", "Co_DeepKiss_{me}To{them}_Success",
+             "Co_HugKiss_{me}To{them}_Romance"),
+    "dance": ("Co_CoupleDance", "Co_LoverHugDance", "Co_Dance_Together_{me}To{them}_Friendship", "CoDance"),
+    "wave": ("Co_HighFIve_{me}To{them}_Friendship", "Co_Friendship_G04_Start", "Co_Friendship_G04_Start2"),
+    "holdhands": ("Co_HoldHand", "Co_HoldHands_{me}To{them}_Romance"),
+    "selfie": ("Co_Friend_Selfie_Together_{me}To{them}_Friendship", "Co_Lover_TakePic_{me}To{them}_Romance"),
+    "spin": ("Co_PicturePose_Couple", "Co_LoverHugDance"),
+}
+ALONE_BAGS = {"dance": "Next_Dance_Start"}  # (checked in the real game)
 LEARN = {"hug": re.compile(r"hug", re.I), "kiss": re.compile(r"kiss", re.I), "dance": re.compile(r"dance", re.I),
          "wave": re.compile(r"(?<!micro)wave", re.I)}             # (not Use_Microwave)
-VERBS = {"hug": "hug you", "kiss": "kiss you", "dance": "dance with you", "wave": "wave at you",
+VERBS = {"hug": "hug you", "kiss": "kiss you", "dance": "dance with you", "wave": "high-five you",
+         "holdhands": "hold your hand", "selfie": "take a selfie with you", "spin": "spin you around in a hug",
          "invite": "invite you to their home"}
 
 
@@ -67,7 +82,36 @@ class Couple:
         return next(iter(self.remotes.values())) if len(self.remotes) == 1 else None
 
     def couple_bag(self, action: str) -> str:
-        return (self.cfg.get("couple_bags") or {}).get(action) or GUESS_BAGS[action]
+        return ((self.cfg.get("couple_bags") or {}).get(action) or ALONE_BAGS.get(action) or GUESS_BAGS.get(action)
+                or WITH_PARTNER[action][0].format(me="Male", them="Female"))
+
+    def bond_puppet(self, eid: int):
+        """The partner's Zoi just came into my world: the two are a couple, so their relationship is set high
+        (both ways). Without it the game offers a stranger's interactions only: no hug, kiss or couple dance."""
+        if not self.my_entity or not eid or eid == self.my_entity:
+            return
+        try:
+            self.game.call("relationships.set_value_between", owner_id=self.my_entity, target_id=eid, Value=100)
+        except Exception as e:                           # noqa: BLE001 (a game without it: guesses only)
+            log.debug("couldn't set the relationship with puppet %s: %s", eid, e)
+
+    def bag_with(self, action: str, eid: int, them: str | None) -> str | None:
+        """The interaction id for doing `action` to the partner's Zoi (entity eid): the first of WITH_PARTNER (or
+        the learned one) that the game offers right now; None if it offers none of them."""
+        me = (self.__dict__.get("my_gender") or "Male").title()
+        them = (them or "Female").title()
+        want = [b.format(me=me, them=them) for b in WITH_PARTNER[action]]
+        learned = (self.cfg.get("couple_bags") or {}).get(action)
+        if learned and learned not in want:
+            want.append(learned)                         # (learned from either Zoi: maybe the other way round)
+        try:
+            avail = self.game.call("interaction.list_available", entity_id=self.my_entity, target_entity_id=eid)
+            offered = {i.get("interaction_bag_id") for i in (avail or {}).get("interactions") or [] if i.get("enabled", True)}
+        except Exception:                                # noqa: BLE001
+            offered = set()
+        if not offered:
+            return want[0]                               # (no list from the game: the learned or the checked id)
+        return next((b for b in want if b in offered), None)
 
     def learn_bag(self, act: dict | None):
         """An interaction one of the players' Zois is doing: remember it as the hug/kiss/dance/wave id if it is one.
@@ -214,7 +258,8 @@ class Couple:
                 return self.mark(req, "done")
             res = await self.partner_goto(pid)
             return self.mark(req, "done" if res.get("ok") else "failed", res.get("error", ""))
-        if action in TARGETED and not initiator:
+        together = action in TARGETED or (action in TOGETHER and pid in self.puppet_ids)
+        if together and not initiator:
             # (their Zoi starts it in their game; it reaches mine through the live sync, on my own Zoi)
             log.info("%s: %s's Zoi starts it; it shows up here through the live sync", action, r.name if r else pid)
             return self.mark(req, "done")
@@ -223,16 +268,20 @@ class Couple:
             return self.mark(req, "failed", "not in the game's world")
         bag = self.couple_bag(action)
         op = {"rid": req["id"], "bag": bag, "entity": self.my_entity}
-        if action in TARGETED:
+        how = "learned" if (self.cfg.get("couple_bags") or {}).get(action) else "a guess"
+        if together:
             if pid not in self.puppet_ids:
                 log.warning("couple action %s: %s's Zoi isn't in your world, nothing done", action,
                             r.name if r else pid)
                 return self.mark(req, "failed", "your partner's Zoi isn't here")
-            op["key"] = pid
-        learned = bool((self.cfg.get("couple_bags") or {}).get(action))
-        log.info("couple action %s: interaction %s (%s)%s", action, bag, "learned" if learned else
-                 "a GUESS: do it once by hand in the game so the program learns the real one",
-                 " on your partner's Zoi" if action in TARGETED else "")
+            eid = self.puppet_ids[pid]
+            await self.g(self.bond_puppet, eid)
+            found = await self.g(self.bag_with, action, eid, (r.profile or {}).get("gender") if r else None)
+            if found:
+                op["bag"], how = found, "offered by the game"
+            op["key"], op["now"] = pid, True
+        log.info("couple action %s: interaction %s (%s)%s", action, op["bag"], how,
+                 " on your partner's Zoi" if together else "")
         self.mail.op("social", **op)
         return self.mark(req, "started")
 

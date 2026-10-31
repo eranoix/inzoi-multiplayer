@@ -58,6 +58,12 @@ async def main(a):
                 others.append(m["player"]["id"])
             elif m.get("t") == "chat":
                 print(f"[chat] {m['name']}: {m['text']}", flush=True)
+            elif m.get("t") == "event" and m.get("kind") == "couple" and (m.get("data") or {}).get("type") == "request":
+                d = m["data"]                                  # (--accept: say yes to hugs, kisses, invites...)
+                print(f"[couple] asked: {d.get('action')} -> {'yes' if a.accept else 'ignored'}", flush=True)
+                if a.accept:
+                    await send({"t": "event", "kind": "couple", "to": m.get("from"),
+                                "data": {"type": "reply", "id": d.get("id"), "accept": True}})
 
     asyncio.create_task(drain())
     start, n, act, anim, outfit, cache = time.time(), 0, None, None, None, {}
@@ -106,6 +112,7 @@ if __name__ == "__main__":
     ap.add_argument("--chat", help="chat line to send 4 s in")
     ap.add_argument("--share-house", help="library folder id of a saved lot to share")
     ap.add_argument("--still", action="store_true", help="stand still and turn 90 degrees every 6 s")
+    ap.add_argument("--accept", action="store_true", help="say yes to every couple request (hug, kiss...)")
     ap.add_argument("--offset", type=float, default=0, help="metres to the side of 'moves' (stream your own Zoi)")
     ap.add_argument("--seconds", type=float, default=0, help="leave after this many seconds (0: never)")
     asyncio.run(main(ap.parse_args()))

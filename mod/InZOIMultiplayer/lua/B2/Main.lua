@@ -581,6 +581,9 @@ local OPS = {
         end
         local anim = bag:match("^anim:([%w_]+)$")
         local ok, msg
+        if op.now then      -- a couple action the player just asked for: it starts now, not after what's playing
+            cli(string.format("interaction.clear_queue entity_id=%d cancel_current=true", me))
+        end
         if anim then
             ok, msg = cli(string.format("motion.play entity_id=%d anim_id=%s", me, anim))
         elseif target then
