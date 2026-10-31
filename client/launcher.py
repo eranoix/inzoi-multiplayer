@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -156,6 +157,71 @@ def single_instance(wait: float) -> bool:
         return True
     single_instance.handle = h                                   # held until the program exits
     return k32.WaitForSingleObject(ctypes.c_void_p(h), int(wait * 1000)) in (0, 0x80)   # mine, or left by a crash
+
+
+DESKTOP_NAME = "inZOI Co-op.exe"
+OTHER_COPIES = ("inZOI-Multiplayer*.exe", "inZOI-Coop*.exe", "inZOI-Multiplayer*.zip",
+                "inZOI*Co-op*.lnk", "inZOI-Coop*.lnk", "inZOI-Multiplayer*.lnk")
+
+
+def settle_on_desktop(args: list[str]) -> bool:
+    """coop-casal: one program to open, on the Desktop. A copy started from anywhere else (Downloads: sent over
+    Taildrop) puts itself there as "inZOI Co-op.exe", starts that one and closes (True: the caller exits); the one on
+    the Desktop deletes the other copies and shortcuts (Desktop, Downloads). A copy installed in
+    %LOCALAPPDATA%\\Programs with a shortcut (the host's PC) stays as it is."""
+    if not updater.frozen() or os.environ.get("INZOI_MP_NO_SETTLE"):
+        return False
+    exe = Path(sys.executable).resolve()
+    programs = Path(os.environ.get("LOCALAPPDATA", "~")).expanduser() / "Programs"
+    if str(exe).lower().startswith(str(programs.resolve()).lower() + os.sep):
+        return False
+    desktop = companion.desktop_dir()
+    home = desktop / DESKTOP_NAME
+    if str(exe).lower() != str(home.resolve()).lower():
+        try:
+            if home.exists():
+                plain_file(home)
+            shutil.copy2(exe, home)
+            try:
+                os.remove(str(home) + ":Zone.Identifier")          # (no "downloaded from the internet" warning)
+            except OSError:
+                pass
+            env = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+            subprocess.Popen([str(home), *args, "--restarted"], env=env, close_fds=True)
+            log.info("moved to the Desktop: %s (from %s)", home, exe)
+            return True
+        except OSError as e:
+            log.warning("couldn't put the program on the Desktop: %s", e)
+            return False
+    places = [desktop, Path.home() / "Desktop", Path.home() / "Downloads"]
+    for place in dict.fromkeys(p for p in places if p.is_dir()):
+        for f in [f for pat in OTHER_COPIES for f in place.glob(pat)] + \
+                 [f for d in place.iterdir() if d.is_dir() for pat in OTHER_COPIES for f in d.glob(pat)]:
+            if f.is_file() and f.resolve() != exe:
+                for _ in range(10):                              # (the copy that started this one may still be closing)
+                    try:
+                        f.unlink()
+                        log.info("deleted another copy: %s", f)
+                        break
+                    except PermissionError:
+                        time.sleep(1)
+                    except OSError as e:
+                        log.warning("couldn't delete %s: %s", f, e)
+                        break
+    old = Path.home() / "inZOI-Coop"                             # the very first install (from the source, entrar.bat)
+    if (old / "entrar.bat").exists() and (old / "client" / "companion.py").exists():
+        shutil.rmtree(old, ignore_errors=True)
+        log.info("deleted the old install: %s", old)
+    return False
+
+
+def plain_file(path: Path):
+    """Make a hidden or read-only file writable again before replacing it."""
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x80)        # FILE_ATTRIBUTE_NORMAL
+    except (OSError, AttributeError):
+        pass
 
 
 def bring_up_game():
@@ -417,6 +483,8 @@ def main():
             return
         except OSError as e:
             log.warning("couldn't apply the update: %s", e)
+    if settle_on_desktop([a for a in sys.argv[1:] if a != "--restarted"]):
+        return
 
     if mode == "host-only":
         cfg = saved                                       # a server needs no player settings
