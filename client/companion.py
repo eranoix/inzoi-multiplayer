@@ -391,6 +391,21 @@ class Companion(couple.Couple, servers.Servers):
         self.world_asked = False     # offered to make my multiplayer save the shared world (once per run)
         self.servers_init(SERVER_DATA, CONFIG_DIR / "page-browser")
         self.couple_init()                   # couple features: requests, backups, undo (couple.py)
+        self.forget_shared_world()
+
+    def forget_shared_world(self):
+        """Own saves only now: a multiplayer save that was the host's shared world (downloaded by 0.8.6-0.8.8) is
+        the host's game, not this player's. Forget it, so they're asked to make a copy of their own save."""
+        mp = self.cfg.get("mp_save") or {}
+        if self.shared_world_on() or not str(mp.get("name", "")).endswith("(shared world)"):
+            return
+        log.info("your multiplayer save was the host's shared world (%s): you'll make one of your own",
+                 mp.get("name"))
+        self.cfg["old_shared_mp_save"] = mp
+        self.cfg.pop("mp_save", None)
+        self.cfg.pop("world", None)
+        self.cfg.pop("last_world", None)
+        save_config(self.cfg)
         install.MAILBOX_DIR.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ helpers

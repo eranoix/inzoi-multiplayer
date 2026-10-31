@@ -214,6 +214,16 @@ async def main():
         await friend.watch_save(entered=False)
         assert friend.save_box and friend.save_box["key"] == "setup", friend.save_box
         print("  ok: a stale shared world on the server doesn't block a friend's own save")
+
+        # A friend whose multiplayer save was the host's shared world (0.8.6-0.8.8): forgotten, they make their own.
+        old = companion.Companion({"key": "o" * 20, "name": "old", "server": "x", "port": 1, "password": "",
+                                   "mp_save": {"folder": "20261031-011800", "name": "Oliveira (shared world)"},
+                                   "world": {"version": 1, "folder": "20261031-011800", "mtime": 0}})
+        assert "mp_save" not in old.cfg and "world" not in old.cfg and old.cfg["old_shared_mp_save"]["folder"]
+        mine = companion.Companion({"key": "m" * 20, "name": "me", "server": "x", "port": 1, "password": "",
+                                    "mp_save": {"folder": "20261030-234520", "name": "Oliveira (multiplayer copy)"}})
+        assert mine.cfg["mp_save"]["folder"] == "20261030-234520", "an own copy stays"
+        print("  ok: a multiplayer save that was the host's world is forgotten; an own copy stays")
     print("multiplayer save tests passed")
 
 
