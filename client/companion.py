@@ -45,7 +45,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.8.7"
+VERSION = "0.8.8"
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
@@ -1077,11 +1077,11 @@ class Companion(couple.Couple, servers.Servers):
         if s["mp"] is None and not self.save_box and not self.save_busy:
             if mp:
                 self.ask_confirm()
-            elif not self.world_meta:                     # with a shared world, that becomes the multiplayer save
-                self.ask_setup()
+            elif not self.world_meta or not self.shared_world_on():
+                self.ask_setup()                          # each plays their own save (the usual way)
             elif not self.world_busy and time.time() - self.__dict__.get("_world_tried", 0) > 30:
-                self._world_tried = time.time()           # coop-casal: fetch it (again, if a download failed)
-                self.check_world()
+                self._world_tried = time.time()           # living together: the shared world becomes it (again,
+                self.check_world()                        # if a download failed)
         if self.writer and not self.world_meta and not self.world_asked and (mp or {}).get("folder"):
             self.world_asked = True
             self.check_world()                            # no shared world on this server yet: offer ours
@@ -1226,7 +1226,7 @@ class Companion(couple.Couple, servers.Servers):
         mp = self.cfg.get("mp_save")
         if not mp or not mp.get("folder") or self.auto_loaded or self.save_busy or self.world_busy:
             return
-        if self.world_meta and self.world_meta["version"] > self.local_world().get("version", 0):
+        if self.shared_world_on() and self.world_meta and self.world_meta["version"] > self.local_world().get("version", 0):
             return                                        # a newer shared world is on its way: load that one
         try:
             st = await self.g(self.game.call, "game.get_state")
@@ -1252,7 +1252,7 @@ class Companion(couple.Couple, servers.Servers):
         """The shared world is switched on once each player gets a household of their own in it (stages 2-3);
         until then only tests and cfg["shared_world"] turn it on."""
         return bool(self.cfg.get("shared_world") or self.cfg.get("shared_household")
-                    or os.environ.get("INZOI_MP_SHARED_WORLD") or self.world_meta)   # (the host shares one: join it)
+                    or os.environ.get("INZOI_MP_SHARED_WORLD"))
 
     def check_world(self):
         meta, mine = self.world_meta, self.local_world()

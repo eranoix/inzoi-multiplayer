@@ -39,7 +39,7 @@ Se usar NordVPN, desligue-o ou desative a "Invisibilidade na LAN".
 - **Card do par:** onde o outro está e o que está fazendo, com os botões **Ir até meu par** e **Convidar para minha casa**.
 - **Ações a dois:** Abraçar, Beijar, Dançar e Acenar. O outro recebe um pedido com **Aceitar** / **Recusar**.
   Na primeira vez, faça cada ação uma vez à mão para o programa aprender a interação certa.
-- **Ajustes → Morar juntos:** save compartilhado, backup automático e **Desfazer último save**.
+- **Ajustes → Morar juntos** (opcional, fica desligado): os dois jogam no MESMO save, o de quem hospeda. Desligado, cada um joga o próprio save e vocês se veem no mesmo mapa.
 - **Ajustes → Relógio:** seguir quem hospeda (padrão) ou ajustar entre os dois.
 - **Ajuda:** **Verificar conexão** (diz o que está errado e como resolver) e **Enviar diagnóstico**, que gera um zip
   na Área de Trabalho para mandar ao Arthur.
