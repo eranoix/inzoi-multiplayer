@@ -187,6 +187,8 @@ local function freeze(id, on)
     local am = inzoi.getB2Manager("FB2AutonomyOptionManager")
     local T = inzoi.EB1AutonomyOptionType
     local frozen = on ~= false
+    -- (with "follow the global autonomy" on, the game ignores each Zoi's own setting: the puppet had a will of its own)
+    if frozen then pcall(function() am:SetFollowGlobalAutonomy(false) end) end
     am:SetIndividualToggleOption(eid(id), T.AutonomyEnable, not frozen) -- no free will
     am:SetIndividualToggleOption(eid(id), T.FollowSchedule, not frozen) -- no wandering off to work/school
     am:SetIndividualToggleOption(eid(id), T.FreezeStat, frozen)         -- needs don't decay: never hungry or tired
@@ -364,6 +366,10 @@ local function add_trail(op)
     local p = PUPPETS[op.key]
     if not p then return nil end
     for _, pt in ipairs(op.pts or {}) do                -- batches overlap; only take samples we haven't seen
+        if p.lastN and pt[1] + 100 < p.lastN then      -- (their program restarted: its count starts over)
+            p.lastN, p.trail = nil, {}
+            log(op.key .. ": their sample count started over (their program restarted): following again")
+        end
         if pt[1] > (p.lastN or -1) then
             p.lastN = pt[1]
             local last = p.trail[#p.trail]

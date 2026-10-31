@@ -72,6 +72,7 @@ def direction(title, sender_rows, receiver_rows, sender_name, out):
     tt = [t for t, _ in truth]
     t0 = pups[0]["t"]
     errs, site_bad, act_total, act_ok = [], 0, 0, 0
+    mot_total, mot_ok = 0, 0
     wrong = Counter()
     wrong_as = defaultdict(Counter)
     reasons = defaultdict(Counter)
@@ -87,6 +88,10 @@ def direction(title, sender_rows, receiver_rows, sender_name, out):
         if st.get("site") is not None and p.get("site") is not None and int(st["site"]) != int(p["site"]):
             site_bad += 1
         tb = bag_of(st.get("act"))
+        want_m = {m.get("id") for m in st.get("motions") or [] if isinstance(m, dict)}
+        if want_m:
+            mot_total += 1
+            mot_ok += want_m <= set(p.get("motions") or [])
         shown = p.get("bag") or "-"
         if tb:
             act_total += 1
@@ -119,6 +124,8 @@ def direction(title, sender_rows, receiver_rows, sender_name, out):
     out.append(f"  position: median {pct(0.5):.2f} m, 90% under {pct(0.9):.2f} m, worst {errs[-1] / 100:.1f} m; "
                f"within 1 m {100 * sum(e <= 100 for e in errs) / len(errs):.0f}% of the time; "
                f"on another lot {100 * site_bad / len(errs):.0f}%")
+    if mot_total:
+        out.append(f"  poses: every animation they played was playing here {100 * mot_ok / mot_total:.0f}% of the time")
     if act_total:
         out.append(f"  actions: the same action shown {100 * act_ok / act_total:.0f}% of the time they were doing one")
     if wrong:
