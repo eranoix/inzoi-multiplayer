@@ -1,6 +1,8 @@
 -- inZOI Multiplayer - B1 (client) boot script. Ticks while the simulation is paused (build mode), so it runs the
--- companion's client-side commands: lua/B1/MPB1Cmd.lua = return { id = "...", code = "..." }; each new id runs once
--- (with `owner`, a family Zoi actor of this world, for widget lookups) and its result goes to out/b1.cfg.
+-- companion's client-side commands: <mod>/in/b1cmd.cfg = "<10-digit hex id><code as hex>" (read with uimod.cfg_load: the game's
+-- mod check refuses requiring modules it doesn't ship, and cfg_load turns quotes into apostrophes, hence the hex);
+-- each new id runs once (with `owner`, a family Zoi actor of this world, for widget lookups) and its result goes to
+-- out/b1.cfg.
 local M = {}
 local MOD = "InZOIMultiplayer"
 local LAST, EVERY, t = nil, 0.25, 0
@@ -10,20 +12,27 @@ local function result(text)
         (tostring(text):gsub('"', "'"))))
 end
 
+local function read_box()
+    local called, ok, _, data = pcall(inzoi.cli.execute, "uimod.cfg_load mod_id=" .. MOD .. " section=in key=b1cmd")
+    local v = called and ok and tostring(data):match("value%W+(%x+)")
+    if not v or #v < 10 then return nil end
+    local id, hex = v:sub(1, 10), v:sub(11)
+    return id, (hex:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end))
+end
+
 function M.on_begin() end
 
 function M.on_tick(dt)
     t = t + (tonumber(dt) or 0.03)
     if t < EVERY then return end
     t = 0
-    package.loaded["MPB1Cmd"] = nil
-    local ok, box = pcall(require, "MPB1Cmd")
-    if not ok or type(box) ~= "table" or not box.id or box.id == LAST then return end
-    LAST = box.id
-    local f, err = load(box.code or "", "b1cmd", "t", setmetatable({ owner = _G.MP_B1_OWNER }, { __index = _G }))
+    local id, code = read_box()
+    if not id or id == LAST then return end
+    LAST = id
+    local f, err = load(code, "b1cmd", "t", setmetatable({ owner = _G.MP_B1_OWNER }, { __index = _G }))
     local okR, res = false, err
     if f then okR, res = pcall(f) end
-    result(box.id .. " " .. ((okR and "" or "ERR ") .. tostring(res)))
+    result(id .. " " .. ((okR and "" or "ERR ") .. tostring(res)))
 end
 
 function M.on_end() end

@@ -8,7 +8,7 @@ the game serializes it - and a thumbnail), and the property preset list applies 
 applied to the whole house"). This drives those two screens:
 
 - save_lot: enter build mode on the lot, Save Site, type the name (the B1 script sets the text box: B1/Main.lua runs
-  MPB1Cmd.lua, it ticks while build mode pauses the simulation), wake the thumbnail camera (the dialog refuses to save
+  in/b1cmd.cfg, it ticks while build mode pauses the simulation), wake the thumbnail camera (the dialog refuses to save
   until the thumbnail was adjusted: two notches of the mouse wheel over it), Save, leave build mode; the new folder's
   files are returned (and the folder removed, so the player's own creations stay as they were).
 - apply_lot: write the files as a new preset whose thumbnail has a size no other entry has (that's how the entry is
@@ -37,7 +37,7 @@ import install
 
 log = logging.getLogger("lotsync")
 
-B1_DIR = install.INSTALL_DIR / "lua" / "B1"
+IN_DIR = install.INSTALL_DIR / "in"              # (B1/Main.lua reads in/b1cmd.cfg)
 OUT_DIR = install.INSTALL_DIR / "out"
 MYSITES = install.INSTALL_DIR.parents[2] / "Creations" / "MySites"     # Documents/inZOI/Creations/MySites
 FILES = ("meta.json", "site.dat")
@@ -147,7 +147,8 @@ class Screens:
         """Run a Lua chunk in the client (B1/Main.lua's mailbox); -> what it returned. Raises LotError on error."""
         cid = uuid.uuid4().hex[:10]
         out = OUT_DIR / "b1.cfg"
-        (B1_DIR / "MPB1Cmd.lua").write_text("return { id = [==[%s]==], code = [==[%s]==] }\n" % (cid, code), "utf-8")
+        IN_DIR.mkdir(parents=True, exist_ok=True)
+        (IN_DIR / "b1cmd.cfg").write_text(cid + code.encode("utf-8").hex(), "utf-8")      # (hex only)
         end = time.time() + timeout
         while time.time() < end:
             time.sleep(0.25)
