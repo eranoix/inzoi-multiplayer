@@ -341,7 +341,7 @@ end
 -- Follow logic: head for the player's newest position (led a little ahead, see below). Redirecting a walk costs a
 -- short stop, so only re-aim when the player has moved REAIM cm away from where we're headed (or we've stopped);
 -- sprint when far behind; teleport when hopelessly behind (other side of town, loading screen...).
-local REAIM, SPRINT, TELEPORT, MIN_GAP = 300, 800, 1500, 0.4
+local REAIM, SPRINT, TELEPORT, MIN_GAP = 300, 600, 1500, 0.4
 local ACT_LEAVE = 600       -- while copying an action, only a remote player this far from the puppet means "they left"
 local FACE_GAP, FACE_EVERY = 25, 1.5
 -- Smoothing (no new engine calls: only where the puppet aims and when it redirects):
@@ -352,7 +352,7 @@ local FACE_GAP, FACE_EVERY = 25, 1.5
 --    REAIM_STRAIGHT away (a turn still re-aims at REAIM);
 --  * trail points carry no sender timestamps (t/at are when they reached us, in batches), so walk vs sprint stays
 --    chosen by distance (SPRINT).
-local LEAD, LEAD_BACK, MOVING_FOR, REAIM_STRAIGHT, STRAIGHT_COS = 100, 150, 0.6, 450, 0.9
+local LEAD, LEAD_BACK, MOVING_FOR, REAIM_STRAIGHT, STRAIGHT_COS = 150, 150, 0.6, 450, 0.9
 
 -- Where to send the puppet for trail point `pick`: pick itself, or a point LEAD ahead while the player walks straight.
 local function lead_point(p, pick, me)
