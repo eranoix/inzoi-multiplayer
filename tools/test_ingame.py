@@ -13,6 +13,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+# (never the real game's Mods folder: launcher.start_game installs the mod there - this repo's files, mid-session,
+# under a running game: its program then put its own back and reloaded the mod)
+os.environ["INZOI_MP_DOCUMENTS"] = tempfile.mkdtemp()
 sys.path.insert(0, str(ROOT / "client"))
 import ingame  # noqa: E402
 import ue4ss  # noqa: E402
