@@ -29,5 +29,26 @@ def main():
     print("install tests passed")
 
 
+# Unreal types the game's mod check is known to accept ("accessed via UE" must be in its ue_global_table.json, else the
+# game refuses the whole mod when it starts: EBoneSpaces was refused). A new one needs checking in the game first.
+UE_ALLOWED = {"FVector", "FRotator", "FTransform", "FQuat", "TArray", "AActor", "UGameplayStatics",
+              "USkinnedMeshComponent", "UPoseableMeshComponent"}
+
+
+def ue_types_allowed():
+    import re
+    lua = Path(__file__).resolve().parents[1] / "mod" / "InZOIMultiplayer" / "lua"
+    bad = []
+    for f in lua.rglob("*.lua"):
+        for n, line in enumerate(f.read_text("utf-8").splitlines(), 1):
+            code = line.split("--", 1)[0]
+            for t in re.findall(r"\bUE\s*(?:\.\s*|\[\s*[\"'])([A-Za-z_][A-Za-z0-9_]*)", code):
+                if t not in UE_ALLOWED:
+                    bad.append(f"{f.relative_to(lua)}:{n}: UE.{t}")
+    assert not bad, "Unreal types the game's mod check may refuse:\n" + "\n".join(bad)
+    print("Unreal types in the mod: all known to pass the game's mod check")
+
+
 if __name__ == "__main__":
     main()
+    ue_types_allowed()

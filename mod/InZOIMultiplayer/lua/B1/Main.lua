@@ -199,7 +199,9 @@ local function apply(r, vals, changed)
         local n = li == 1 and r.key.n1 or r.key.n2
         local pm, names = rig.poseables[li], rig.names[li]
         if pm:GetNumBones() == n then
-            local space = UE.EBoneSpaces.ComponentSpace
+            -- EBoneSpaces.ComponentSpace (= 1 in Unreal). By number: the game's mod check refuses that enum by name
+            -- ("not in ue_global_table.json") and then won't load the mod when the game starts.
+            local space = 1
             for b = 0, n - 1 do
                 if not changed or changed[base + b] then
                     local o = (base + b) * 7
