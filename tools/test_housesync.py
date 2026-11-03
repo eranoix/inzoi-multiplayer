@@ -149,65 +149,50 @@ async def main():
     assert len(ana.build_site["objects"]) == 4
     ga.phase = "none"
     await ana.house_tick()                                   # left build mode: sent
-    assert await until(lambda: any(q.get("action") == "house" and q.get("label") for q in ben.requests.values()))
-    q = next(q for q in ben.requests.values() if q["action"] == "house")
-    assert q["label"] == "2 new, 1 removed", q
+    # the server's version reaches Ben and his game is brought to it, without asking (it's the truth), once
+    assert await until(lambda: sorted(o["table_id"] for o in gb.objects) == ["Chair02", "Plant01", "TV03", "Table03"])
+    item = ana.shared["house:1038:live"]
+    assert item["by"] == ana.me_id and ben.shared["house:1038:live"]["v"] == item["v"]
     assert any("changed the house: 2 new, 1 removed" in c["text"] for c in ben.chat)
-    st = ben.couple_view()["requests"][-1]
-    assert st["action"] == "house" and st["label"] == "2 new, 1 removed"
-    out = await ben.couple_respond(q["id"], True)
-    assert out["result"]["state"] == "done" and out["result"]["placed"] == 2 and out["result"]["removed"] == 1, out
+    assert await until(lambda: ben.seen("house:1038:live") == item["v"] and ana.seen("house:1038:live") == item["v"])
     tools = [c[0] for c in gb.calls]
     assert tools.index("build.enter_mode") < tools.index("build.remove_object") < tools.index("building.place_object") \
         < tools.index("build.exit_mode")
-    assert sorted(o["table_id"] for o in gb.objects) == ["Chair02", "Plant01", "TV03", "Table03"]
-    # leaving build mode after applying doesn't send the house back
-    n = len([1 for q in ana.requests.values() if q.get("action") == "house"])
+    # Ben leaving build mode after applying doesn't send the house back: the server's stays Ana's version
     await ben.house_tick()
     await asyncio.sleep(0.5)
-    assert len([1 for q in ana.requests.values() if q.get("action") == "house"]) == n
-    print("Ana's changes reach Ben: asked, applied in build mode, not sent back: ok")
+    assert ana.shared["house:1038:live"]["v"] == item["v"] and ana.shared["house:1038:live"]["by"] == ana.me_id
+    n = len(gb.calls)
+    ben.shared_changed("house:1038:live", ben.shared["house:1038:live"], snapshot=True)    # (a restart: seen, kept)
+    await asyncio.sleep(0.3)
+    assert len(gb.calls) == n
+    print("Ana's change goes through the server: Ben's game brought to it once, not sent back: ok")
 
-    # Ben asks for Ana's house as it is now (she isn't in build mode): it's read and sent, and what differs is asked
-    ga.objects.append(obj(6, "Rug01", 700, 700))
-    for q in [q for q in list(ben.requests.values()) if q.get("action") == "house"]:
-        ben.requests.pop(q["id"], None)
+    # Ben's house drifted (an object gone in his save): "get my partner's house" brings it back to the server's version
+    gb.objects = [o for o in gb.objects if o["table_id"] != "Chair02"]
     assert (await ben.request_house(ben.remotes[ana.me_id]))["ok"]
-    assert await until(lambda: any(q.get("action") == "house" and q.get("label") == "1 new, 0 removed"
-                                   for q in ben.requests.values()))
-    print("asking for the partner's house as it is now: ok")
+    assert await until(lambda: any(o["table_id"] == "Chair02" for o in gb.objects))
+    print("a drifted house is brought back to the server's version: ok")
 
-    # Ana's Zoi is out on another lot (the scans would read that lot, not the home): never read -> nothing is sent;
-    # read before (kept) -> that reading is sent
-    def clear():
-        for q in [q for q in list(ben.requests.values()) if q.get("action") == "house"]:
-            ben.requests.pop(q["id"], None)
-    ga.where = 839
-    kept = ana.lot_file.read_text("utf-8")
-    ana.lot_file.unlink()
-    clear()
-    await ben.request_house(ben.remotes[ana.me_id])
-    await asyncio.sleep(1)
-    assert not [q for q in ben.requests.values() if q.get("action") == "house"]
-    ana.lot_file.write_text(kept, "utf-8")
-    await ben.request_house(ben.remotes[ana.me_id])
-    assert await until(lambda: any(q.get("action") == "house" and q.get("label") == "1 new, 0 removed"
-                                   for q in ben.requests.values()))
-    ga.where = 1038
-    clear()
-    print("asked while out of the home: the kept reading, never another lot: ok")
-
-    # Ben's Zoi gets home: he asks Ana again (once; not again within ASK_AGAIN)
-    ben.last_full_state = {"site": 839}
-    await ben.home_tick()
-    ben.last_full_state = {"site": 1038}
-    await ben.home_tick()
-    asked = ben.asked_at
-    assert asked
-    await ben.home_tick()
-    assert ben.asked_at == asked
-    assert ben.saved_lot(1038), "the home was read and kept on getting there"
-    print("getting home: asks the partner again and keeps a reading of the home: ok")
+    # Ben changes the house while the server can't be reached: kept as changed, not overwritten by the server's older
+    # version, pushed as soon as it can be
+    writer = ben.writer
+    ben.writer = None
+    lot = dict(ben.scan_lot(), site=1038, site_id="X")
+    lot["objects"].append(housesync.object_key(obj(0, "Rug07", 300, 300)) | {"entity_id": 77})
+    await ben.publish_house(lot)
+    assert ben.dirty(1038, "live")
+    ben.on_shared_house_live("house:1038:live", dict(item, v=item["v"] + 50), snapshot=True)
+    await asyncio.sleep(0.3)
+    assert not [q for q in ben.requests.values() if q.get("action") == "house"], "the older server version won"
+    ben.writer = writer
+    gb.objects.append(obj(77, "Rug07", 300, 300))
+    gb.where = 1038
+    await ben.push_dirty_house()
+    assert await until(lambda: ana.shared.get("house:1038:live", {}).get("by") == ben.me_id)
+    assert not ben.dirty(1038, "live")
+    assert await until(lambda: any(o["table_id"] == "Rug07" for o in ga.objects))
+    print("a change made without the server is kept, pushed when it can be, and reaches the partner: ok")
 
     # another lot (not Ben's home): ignored; "always yes": applied without asking
     gb.home = 2000
@@ -260,6 +245,8 @@ async def main():
     ben.cfg["always_yes"] = []
     for q in [q for q in list(ben.requests.values()) if q.get("action") == "house"]:
         ben.requests.pop(q["id"], None)
+    ga.phase = "none"
+    await ana.house_tick()                                   # (out of the build mode her applying left)
     ga.phase = "ready"
     await ana.house_tick()
     ana.build_site["at"] = 0
@@ -268,22 +255,19 @@ async def main():
     ga.phase = "none"
     await ana.house_tick()
     assert await until(lambda: saved and ana.cfg.get("lot_hash") == "h1")
-    assert await until(lambda: any(q.get("action") == "house" for q in ben.requests.values()))
-    assert await until(lambda: any(q["house"].get("lot") for q in ben.requests.values() if q.get("action") == "house")
-                       or ben.cfg.get("pending_lot"))
-    q = next(q for q in ben.requests.values() if q.get("action") == "house")
-    await ben.couple_respond(q["id"], True)
+    assert await until(lambda: ben.cfg.get("pending_lot"))                  # (through the server, no question)
     p = ben.cfg.get("pending_lot")
     assert p and p["hash"] == "h1" and (lotsync.MYSITES / p["folder"] / "site.dat").read_bytes() == b"DAT", p
+    assert ana.shared["house:1038:exact"]["value"]["hash"] == "h1"
     assert any("comes in when you reopen" in c["text"] for c in ben.chat)
     ben.world, ben.in_build_mode = "play", False
     await ben.maybe_apply_pending()
     assert applied == [p["title"]] and not ben.cfg.get("pending_lot") and ben.cfg["lot_hash"] == "h1"
     assert not (lotsync.MYSITES / p["folder"]).exists()
-    ben.on_lot(ana.me_id, {"hash": "h1", "files": {"site.dat": "", "meta.json": ""}, "site": 1038})
+    ben.on_shared_house_exact("house:1038:exact", ana.shared["house:1038:exact"], snapshot=True)
     await asyncio.sleep(0.3)
     assert not ben.cfg.get("pending_lot")
-    print("exact house: saved by the builder, kept as a property on yes, applied on reopen, same house ignored: ok")
+    print("exact house: saved by the builder, through the server, applied on reopen, same house ignored: ok")
     for t in tasks:
         t.cancel()
     print("house sync tests passed")

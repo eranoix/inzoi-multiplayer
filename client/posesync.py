@@ -95,8 +95,8 @@ class PoseSync:
                             continue
                         if not text:
                             continue
-                        for r in partners:
-                            await self.send({"t": "event", "kind": "pose", "to": r.pid, "data": {kind: text}})
+                        # (to everyone, through the server: it keeps the latest frames for whoever joins later)
+                        await self.send({"t": "event", "kind": "pose", "data": {kind: text}})
                         self.pose_counts["sent"] += 1
                 if time.time() - map_at > MAP_EVERY:
                     map_at = time.time()

@@ -135,6 +135,20 @@ Defined by the companion app; the server never needs to know them.
   hug/kiss on the partner's puppet (the partner's PC replays it through `state.act`); dance/wave start on both PCs;
   an accepted `invite` takes the guest's Zoi to the host's.
 
+- `pose` (client/posesync.py), to everyone: `data` = `{"k": keyframe}` or `{"d": frame}`, the sender's Zoi skeleton
+  (see lua/B1/Main.lua). The server keeps each player's latest `k` and `d` and sends them to whoever joins.
+
+## Shared state (the truth for everyone)
+
+The server keeps keyed values, each with a version (a server-wide sequence), who set it and when, in data/shared/.
+
+- `{"t":"set","key","value","base"?,"ref"?}` → everyone (the sender too: its confirmation) gets
+  `{"t":"shared","key","item":{"key","value","v","by","by_name","at"},"v","ref_by","ref"}`; `value: null` removes the
+  key (`item: null`). With `base` (the version the change was made on) a change on an older version gets
+  `{"t":"set_refused","key","ref","current":item}` instead. Keys: `[a-z0-9_.:-]{1,96}`; values up to 4 MB of JSON.
+- The welcome carries `"shared": {key: item}` and `"seq"`; `{"t":"shared_get"}` → `{"t":"shared_all","shared","seq"}`.
+- Keys used by the companion (client/shared.py): `house:<lot>:live`, `house:<lot>:exact`, `family`.
+
 ## Storage
 
 data/*.json files are written to a .tmp, flushed (fsync) and swapped in; the previous copy stays as `.bak`. A damaged

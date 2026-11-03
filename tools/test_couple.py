@@ -385,7 +385,7 @@ async def test_couple():
     ana.leader = ben.leader = ana.me_id
     await ana.couple_perform({"action": "movein", "from_id": ben.me_id, "home_site": 777}, initiator=False)
     await ben.couple_perform({"action": "movein", "to_id": ana.me_id, "partner_home": 1038}, initiator=True)
-    assert seen[:2] == [("Ana", None), ("Ben", 1038)], seen
+    assert ("Ana", None) in seen and ("Ben", 1038) in seen and ("Ana", 1038) not in seen, seen
     del ana.family_apply, ben.family_apply
     print("the host's family is the family, whoever asks: ok")
 

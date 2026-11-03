@@ -250,7 +250,7 @@ class HouseSync:
         b, self.build_site = self.build_site, None
         if b and not self.applying_house and st.get("phase") in ("none", None):
             self.keep_lot(b)
-            await self.send_house(b)
+            await self.publish_house(b)
             if self.cfg.get("exact_house", True):
                 asyncio.get_running_loop().create_task(self.capture_lot(b))
         if not st.get("in_build_mode"):
@@ -281,13 +281,110 @@ class HouseSync:
             self.cfg["lot_hash"] = res["hash"]
             self.save_cfg()
             log.info("saved the exact house (%s)", res["hash"])
-            await self.send_lot(preset)
+            await self.publish_exact(preset)
         except lotsync.LotError as e:
             log.warning("couldn't save the exact house: %s", e)
         except Exception as e:                           # noqa: BLE001
             log.warning("saving the exact house failed: %s", e)
         finally:
             self.lot_busy = False
+
+    # ------------------------------------------------------------------ the server's shared state (shared.py)
+    async def publish_house(self, b: dict):
+        """My home changed (I left build mode on it): its new version goes to the server, which hands it to everyone.
+        Not connected: kept as changed here, pushed when the server can be reached (not overwritten by its version)."""
+        objs = [{k: o[k] for k in ("table_id", "x", "y", "z", "yaw", "floor")} for o in b["objects"]]
+        value = {"site": b["site"], "site_id": b.get("site_id"), "objects": objs, "walls": b.get("walls") or [],
+                 "heights": b.get("heights") or {}}
+        if await self.share(f"house:{b['site']}:live", value):
+            self.set_dirty(b["site"], "live", False)
+            log.info("my house went to the server (%d objects, %d walls)", len(objs), len(value["walls"]))
+        else:
+            self.set_dirty(b["site"], "live", True)
+
+    async def publish_exact(self, preset: dict):
+        value = {k: preset[k] for k in ("site", "site_id", "hash", "files")}
+        if await self.share(f"house:{preset['site']}:exact", value):
+            self.set_dirty(preset["site"], "exact", False)
+            log.info("my exact house went to the server (%s)", preset["hash"])
+        else:
+            self.set_dirty(preset["site"], "exact", True)
+
+    def set_dirty(self, site, part: str, on: bool):
+        d = self.cfg.setdefault("house_dirty", {})
+        k = f"{site}:{part}"
+        if bool(d.get(k)) != on:
+            if on:
+                d[k] = True
+            else:
+                d.pop(k, None)
+            self.save_cfg()
+
+    def dirty(self, site, part: str) -> bool:
+        return bool((self.cfg.get("house_dirty") or {}).get(f"{site}:{part}"))
+
+    async def push_dirty_house(self):
+        """Changes made while the server couldn't be reached: pushed now (they're newer than its version)."""
+        d = self.cfg.get("house_dirty") or {}
+        if not d or not (self.writer and self.me_id) or self.world == "out" or self.lot_busy:
+            return
+        home = await self.home_site_cached()
+        if home and d.get(f"{home}:live") and await self.g(self.at_home_now, home):
+            info = await self.g(self.game.call, "build.get_site_info") or {}
+            lot = dict(await self.g(self.scan_lot), site=int(home), site_id=info.get("site_id"))
+            self.keep_lot(lot)
+            await self.publish_house(lot)
+        preset = self.saved_preset(home) if home else None
+        if preset and d.get(f"{home}:exact"):
+            await self.publish_exact(preset)
+
+    def on_shared_house_live(self, key: str, item: dict | None, snapshot: bool):
+        if not item:
+            return
+        v, site = int(item.get("v") or 0), key.split(":")[1]
+        if item.get("by") == self.me_id:
+            self.mark_seen(key, v)                       # (my own version, confirmed: nothing to apply)
+            return
+        if self.seen(key) >= v:
+            return
+        if self.dirty(site, "live"):
+            log.info("the server's house is v%d, but mine changed while it couldn't be reached: mine goes up", v)
+            return
+        log.info("house v%d from %s (the server's): bringing mine to it", v, item.get("by_name"))
+        self.on_house(item.get("by"), item.get("value") or {}, name=item.get("by_name"), auto=True, shared=(key, v))
+
+    def on_shared_house_exact(self, key: str, item: dict | None, snapshot: bool):
+        if not item:
+            return
+        v, val = int(item.get("v") or 0), item.get("value") or {}
+        if item.get("by") == self.me_id:
+            if val.get("hash"):
+                self.cfg["lot_hash"] = val["hash"]
+            self.mark_seen(key, v)
+            return
+        if self.seen(key) >= v or self.dirty(key.split(":")[1], "exact"):
+            return
+        if val.get("hash") in (self.cfg.get("lot_hash"), (self.cfg.get("pending_lot") or {}).get("hash")):
+            self.mark_seen(key, v)
+            return
+        asyncio.get_running_loop().create_task(self.take_shared_exact(key, v, item.get("by_name") or "Your partner", val))
+
+    async def take_shared_exact(self, key: str, v: int, name: str, val: dict):
+        home = await self.g(self.my_home_site)
+        if not home or int(home) != int(val.get("site") or -1):
+            log.info("%s's exact house is lot %s, mine is %s: not taken", name, val.get("site"), home)
+            return
+        self.stash_lot(name, val)
+        self.mark_seen(key, v)
+
+    def reapply_shared_house(self) -> bool:
+        """Compare my home with the server's version again (the panel's "get my partner's house", getting home)."""
+        keys = [k for k in self.shared if k.startswith("house:")]
+        for k in keys:
+            seen = self.cfg.setdefault("shared_seen", {})
+            seen.pop(k, None)
+            self.shared_changed(k, self.shared[k], snapshot=False)
+        return bool(keys)
 
     async def send_lot(self, preset: dict):
         r = self.partner(None) if hasattr(self, "partner") else None
@@ -418,9 +515,13 @@ class HouseSync:
         log.info("sent the house to %s (%d objects, %d walls)", r.name, len(objs), len(b.get("walls") or []))
 
     async def request_house(self, r) -> dict:
-        """Ask the partner's program for their home as it is now (they needn't be in build mode)."""
+        """Ask the partner's program for their home as it is now (they needn't be in build mode). With the server's
+        shared state: compare with its version (the truth) instead."""
         if not (self.writer and self.me_id):
             return {"error": "not connected to the server", "code": "not_connected"}
+        if self.reapply_shared_house():
+            log.info("comparing my house with the server's version")
+            return {"ok": True}
         await self.send({"t": "event", "kind": "couple", "to": r.pid,
                          "data": {"type": "house_request", "id": secrets.token_hex(6)}})
         log.info("asked %s for their house", r.name)
@@ -451,10 +552,11 @@ class HouseSync:
         await self.send_house(lot)
         await self.send_lot(self.saved_preset(site))
 
-    def on_house(self, frm: str, data: dict):
-        """The partner left build mode on our home: compare, and ask before changing anything here."""
+    def on_house(self, frm: str, data: dict, name: str | None = None, auto: bool = False, shared=None):
+        """The partner left build mode on our home: compare, and ask before changing anything here (auto: the server's
+        version, the truth: applied without asking; shared: (key, version) marked applied once done)."""
         r = self.remotes.get(frm)
-        name = r.name if r else "Your partner"
+        name = name or (r.name if r else "Your partner")
         objs = [o for o in (data.get("objects") or [])[:MAX_OBJECTS] if isinstance(o, dict) and o.get("table_id")]
         walls = []
         for w in (data.get("walls") or [])[:MAX_WALLS]:
@@ -471,7 +573,7 @@ class HouseSync:
         self.requests[rid] = {"id": rid, "from": name, "from_id": frm, "action": "house", "at": time.time(),
                               "local": True, "house": {"site": data.get("site"), "site_id": data.get("site_id"),
                                                        "objects": objs, "walls": walls, "heights": heights},
-                              "label": None}
+                              "label": None, "auto": auto, "shared": shared}
         asyncio.get_running_loop().create_task(self.prepare_house(rid))
 
     async def prepare_house(self, rid: str):
@@ -500,11 +602,15 @@ class HouseSync:
             if not place and not remove and not build and not delete and not storeys:
                 self.requests.pop(rid, None)
                 log.info("%s's house is the same as mine", q["from"])
+                if q.get("shared"):
+                    self.mark_seen(*q["shared"])
                 return
             q["label"] = house_label(place, remove, len(build) + len(delete))
         self.system_line(f"{q['from']} changed the house" + (f": {q['label']}" if q["label"] else ""))
-        if self.always_yes("house", None):
-            await self.couple_respond(rid, True)
+        if self.always_yes("house", None) or q.get("auto"):
+            out = await self.couple_respond(rid, True)
+            if q.get("shared") and ((out or {}).get("result") or {}).get("state") == "done":
+                self.mark_seen(*q["shared"])
 
     async def apply_house(self, q: dict) -> dict:
         """Enter build mode on the lot, remove and place what differs, leave build mode (it saves the lot)."""

@@ -454,6 +454,10 @@ class Couple:
                 res = {"error": str(e)}
             if req.get("state") == "failed":             # (their save said it didn't work: that stays)
                 return {"state": "failed", "message": req.get("message", "")}
+            if action == "movein" and res.get("ok") and (self.leader == self.me_id or not self.leader):
+                # the family is the server's truth from now on: every save is brought to it (shared.py)
+                asyncio.get_running_loop().create_task(
+                    self.share_family(await self.g(self.my_home_site), [self.me_id, pid]))
             return self.mark(req, "done" if res.get("ok") else "failed", res.get("error", ""))
         together = action in TARGETED or (action in TOGETHER and pid in self.puppet_ids)
         if together and not initiator:

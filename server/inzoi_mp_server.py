@@ -42,7 +42,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "0.9.1"
+VERSION = "0.9.36"
 PROTOCOL = 1
 MAX_LINE = 32 * 1024 * 1024        # house snapshots can be large (only after a successful hello)
 MAX_LINE_BEFORE_HELLO = 64 * 1024  # hello, info, directory messages: small; a stranger can't make us buffer 32 MB
@@ -58,6 +58,8 @@ SHA = re.compile(r"[0-9a-f]{64}")
 FILE_MESSAGES = {"blob_check", "blob_put", "blob_get", "ping", "pong"}
 BEFORE_HELLO = {"info", "ping", "pong", "dir_announce", "dir_list", "dir_remove"}   # allowed without joining
 PART_TTL = 86400                   # an unfinished upload (.part) older than this is deleted
+SHARED_KEY = re.compile(r"[a-z0-9_.:-]{1,96}")
+MAX_SHARED = 4 * 1024 * 1024       # bytes of JSON one shared value may take (a house with its exact copy fits)
 LINGER = 10                        # seconds a player who dropped without "bye" stays (a blip, a restart): no Zoi flicker
 BLOB_GRACE = 3600                  # an unreferenced blob younger than this is kept (it may be part of an upload)
 HISTORY = 20                       # world versions kept (their files stay on disk: an admin can go back to one)
@@ -196,6 +198,31 @@ class Store:
 
     def save_players(self) -> None:
         self._save(self.players_file, self.players)
+
+    # The shared state: what's true for everyone (the couple's house, their family, ...). Each key holds the latest
+    # value with the version (a server-wide sequence number) it got when it was set, who set it and when.
+    def load_shared(self) -> tuple[int, dict]:
+        folder = self.root / "shared"
+        folder.mkdir(exist_ok=True)
+        seq, items = int(self._load(folder / "_seq.json", {"seq": 0}).get("seq") or 0), {}
+        for f in folder.glob("*.json"):
+            if f.name == "_seq.json":
+                continue
+            item = self._load(f, None)
+            if isinstance(item, dict) and SHARED_KEY.fullmatch(str(item.get("key", ""))):
+                items[item["key"]] = item
+                seq = max(seq, int(item.get("v") or 0))
+        return seq, items
+
+    def save_shared(self, seq: int, item: dict | None, key: str) -> None:
+        folder = self.root / "shared"
+        path = folder / (hashlib.sha1(key.encode()).hexdigest()[:20] + ".json")
+        if item is None:
+            for p in (path, path.with_name(path.name + ".bak")):
+                p.unlink(missing_ok=True)
+        else:
+            self._save(path, item)
+        self._save(folder / "_seq.json", {"seq": seq})
 
     def set_profile(self, pid: str, profile) -> None:
         self.players[pid]["profile"] = profile
@@ -438,6 +465,8 @@ class Server:
         self.restart_requested = False
         self.claims: dict[str, collections.deque] = {}   # address -> times of its recent admin_claim attempts
         self.udp = None                          # the LAN discovery endpoint (start())
+        self.seq, self.shared = store.load_shared()   # the shared state (on_set): what's true for every player
+        self.last_pose: dict[str, dict] = {}     # player id -> {"k": keyframe, "d": latest frame} (for latecomers)
         store.gc_blobs()
 
     @property
@@ -532,6 +561,7 @@ class Server:
             return
         if c.id and self.clients.get(c.id) is c:
             del self.clients[c.id]
+            self.last_pose.pop(c.id, None)
             log.info("%s (%s) left", c.name, c.id)
             await self.broadcast({"t": "left", "id": c.id, "name": c.name})
             if self.leader is c and reelect:
@@ -610,6 +640,7 @@ class Server:
             await old.close()
             log.info("%s (%s) reconnected from %s", c.name, c.id, c.addr)
             await c.send(self.welcome(c))
+            await self.send_poses(c)
             await self.broadcast({"t": "rejoined", "player": c.public()}, exclude=c)
             return
         self.clients[c.id] = c
@@ -622,6 +653,7 @@ class Server:
         log.info("%s (%s) joined from %s%s", c.name, c.id, c.addr, " - the host" if is_host else "")
         modset = self.modset()
         await c.send(self.welcome(c, modset))
+        await self.send_poses(c)
         await self.broadcast({"t": "joined", "player": c.public()}, exclude=c)
         if before not in (None, self.leader.id):                    # the clock changed hands
             await self.broadcast({"t": "leader", "id": self.leader.id}, exclude=c)
@@ -634,7 +666,16 @@ class Server:
             "players": [o.public() for o in self.clients.values() if o is not c],
             "houses": self.store.list_houses(), "modset": modset or self.modset(), "world_save": self.store.world_save(),
             "server": self.summary(), "admin": self.is_admin(c),
+            "shared": self.shared, "seq": self.seq,
         }
+
+    async def send_poses(self, c: Client) -> None:
+        """A newcomer gets everyone's latest skeleton frames at once (they're only sent again when they change)."""
+        for pid, frames in list(self.last_pose.items()):
+            if pid != c.id and pid in self.clients:
+                for kind in ("k", "d"):
+                    if frames.get(kind):
+                        await c.send({"t": "event", "from": pid, "kind": "pose", "data": {kind: frames[kind]}})
 
     async def on_ping(self, c: Client, msg: dict) -> None:
         await c.send({"t": "pong", "time": now(), "echo": msg.get("echo")})
@@ -676,6 +717,11 @@ class Server:
         """Generic relay: {"t":"event","kind":"...","to":<player id or omitted for everyone>,"data":{...}}.
         Interactions, visit invites, gifts... anything new the companions agree on."""
         out = {"t": "event", "from": c.id, "kind": str(msg.get("kind", "")), "data": msg.get("data")}
+        if out["kind"] == "pose" and isinstance(out["data"], dict):
+            frames = self.last_pose.setdefault(c.id, {})
+            for kind in ("k", "d"):
+                if isinstance(out["data"].get(kind), str):
+                    frames[kind] = out["data"][kind]
         to = msg.get("to")
         if to:
             target = self.clients.get(str(to))
@@ -685,6 +731,38 @@ class Server:
                 await c.send({"t": "error", "code": "not_online", "error": f"{to} is not online", "ref": msg.get("ref")})
         else:
             await self.broadcast(out, exclude=c)
+
+    async def on_set(self, c: Client, msg: dict) -> None:
+        """{"t":"set","key","value","base"?,"ref"?}: the shared state changes. The new value gets the next version and
+        goes to everyone, the sender too (that's its confirmation: every player applies the same values in the same
+        order). With "base" (the version the sender's change was made on) a change made on an older version is refused
+        ("set_refused" with the current one): nobody overwrites what they haven't seen. value null removes the key."""
+        key, ref = str(msg.get("key", "")), msg.get("ref")
+        if not SHARED_KEY.fullmatch(key):
+            await c.send({"t": "error", "code": "bad_key", "error": f"bad shared key {key!r}", "ref": ref})
+            return
+        value = msg.get("value")
+        if len(json.dumps(value)) > MAX_SHARED:
+            await c.send({"t": "error", "code": "too_big", "error": f"{key} is too big", "ref": ref})
+            return
+        cur = self.shared.get(key)
+        base = msg.get("base")
+        if base is not None and int(base) != int((cur or {}).get("v") or 0):
+            await c.send({"t": "set_refused", "key": key, "ref": ref, "current": cur})
+            return
+        self.seq += 1
+        item = None if value is None else {"key": key, "value": value, "v": self.seq, "by": c.id, "by_name": c.name,
+                                           "at": now()}
+        if item is None:
+            self.shared.pop(key, None)
+        else:
+            self.shared[key] = item
+        self.store.save_shared(self.seq, item, key)
+        log.info("shared %s v%d by %s%s", key, self.seq, c.name, " (removed)" if item is None else "")
+        await self.broadcast({"t": "shared", "key": key, "item": item, "v": self.seq, "ref_by": c.id, "ref": ref})
+
+    async def on_shared_get(self, c: Client, msg: dict) -> None:
+        await c.send({"t": "shared_all", "shared": self.shared, "seq": self.seq})
 
     async def on_house_put(self, c: Client, msg: dict) -> None:
         meta = self.store.put_house(c.id, msg.get("house"))
