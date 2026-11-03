@@ -102,6 +102,8 @@ class StandIn:
         self.walls, self.height = list(walls), height
         self.where = home                               # the lot my Zoi is on
         self.cant_place, self.slow = set(), 0.0         # (table ids the game refuses to place; s per object)
+        self.miss = {}                                  # table id -> readings in build mode that leave it out (as the
+        #                                                 game's build.scan_objects did once, for a moment)
 
     def tables(self):
         return sorted(o["table_id"] for o in self.objects)
@@ -121,8 +123,12 @@ class StandIn:
             self.phase = "none"
             return {}
         if tool == "build.scan_objects":
-            off = kw.get("Offset", 0)
-            return {"objects": [dict(o) for o in self.objects[off:off + kw.get("Limit", 500)]]}
+            off, objs = kw.get("Offset", 0), self.objects
+            if off == 0 and self.phase != "none" and any(self.miss.values()):
+                left_out = {t for t, n in self.miss.items() if n > 0}
+                self.miss = {t: n - (t in left_out) for t, n in self.miss.items()}
+                objs = [o for o in objs if o["table_id"] not in left_out]
+            return {"objects": [dict(o) for o in objs[off:off + kw.get("Limit", 500)]]}
         if tool == "build.remove_object":
             time.sleep(self.slow)
             self.objects = [o for o in self.objects if str(o["entity_id"]) != kw["entity_id"]]
@@ -307,6 +313,22 @@ def pure():
                                  after) is None
     print("edits made while an apply had build mode open: the player's counted, the apply's own work isn't: ok")
 
+    # identical copies stacked on one spot (2 cm, 1 degree): beyond what the version has there, the newest entity goes
+    # (as in a game whose reading missed sofa 28984 and an apply placed 48384 on it); one entity read twice is one; two
+    # 5 cm apart aren't stacked; as many as the version lists there stay
+    old, new = dict(key(obj(28984, "Sofa04_v01", 1612, 2050, 90)), entity_id=28984), \
+        dict(key(obj(48384, "Sofa04_v01", 1612.5, 2050, 90.5)), entity_id=48384)
+    near = dict(key(obj(50, "Sofa04_v01", 1617, 2050, 90)), entity_id=50)
+    house = {"objects": [key(obj(0, "Sofa04_v01", 1612, 2050, 90))]}
+    assert housesync.stacked_extras([new, old, dict(old)], house) == [new]
+    assert housesync.stacked_extras([old, near], house) == []
+    assert housesync.stacked_extras([old, new], {"objects": house["objects"] * 2}) == []
+    assert housesync.stacked_extras([old, new], house, before=[new]) == [old], "what the apply placed goes first"
+    d = housesync.session_delta({"objects": [old, new]}, {"objects": [old]})
+    assert d is None, "one of two stacked copies taken out, the other still there, isn't a removal"
+    print("identical copies stacked on one spot: the extras beyond the version's (the newest first) and never a "
+          "removal while one stays: ok")
+
 
 async def main():
     pure()
@@ -384,6 +406,31 @@ async def main():
     await settle(ana, ben)
     assert ga.tables() == gb.tables(), (ga.tables(), gb.tables())
     print("#6 bought in play mode: kept through the partner's change, sent up, in both games: ok")
+
+    # what the game puts in the home and takes away by itself (dust, food served, a book off the shelf) isn't the house:
+    # not sent with a purchase, not put in from a version that has it (an older program's), not brought back
+    passing = {"DEV_DustDecal", "ServedSoup01", "Book_6"}
+    gb.objects += [obj(210, "DEV_DustDecal", 300, 300), obj(211, "ServedSoup01", 320, 300), obj(212, "Book_6", 340, 300),
+                   obj(213, "Lamp77", 360, 300)]            # (and a real purchase with them)
+    await build(ana, ga, lambda g: g.objects.append(obj(214, "Plant88", 380, 300)))
+    assert await until(lambda: "Lamp77" in ga.tables()), "the purchase didn't reach Ana"
+    await settle(ana, ben)
+    on_server = {o["table_id"] for o in ana.shared[KEY]["value"]["objects"]}
+    assert not on_server & passing and not set(ga.tables()) & passing, (on_server & passing, ga.tables())
+    cur = ana.shared[KEY]
+    dusty = json.loads(json.dumps(cur["value"]))
+    proto = dict(dusty["objects"][0])
+    dusty["objects"] += [dict(proto, table_id="DEV_DustDecal", x=600.0, y=600.0), dict(proto, table_id="ServedSoup01",
+                                                                                         x=620.0, y=600.0)]
+    await ana.share(KEY, dusty, base=cur["v"])                # (as an older program sent it)
+    assert await until(lambda: ben.seen(KEY) > cur["v"]), "Ben didn't take the version"
+    await settle(ana, ben)
+    gb.objects = [o for o in gb.objects if o["table_id"] not in passing]      # (cleaned, eaten, put back)
+    await build(ana, ga, lambda g: g.objects.append(obj(215, "Plant89", 400, 300)))
+    await settle(ana, ben)
+    assert not set(gb.tables()) & passing, gb.tables()
+    assert not {o["table_id"] for o in ana.shared[KEY]["value"]["objects"]} & passing, "it stayed in the house"
+    print("dust, food served, a book taken out: never the house, never brought back: ok")
 
     # --- #7: nothing is applied while Ben is in build mode on the home; his edits go up on top of hers
     gb.phase = "ready"
@@ -2176,7 +2223,10 @@ async def joining():
 
 
 REGRESSIONS = ("offline_then_older_save", "offline_then_exact_at_start", "first_version_after_reset",
-               "back_from_another_server", "purchase_then_exact_at_start", "edits_while_walls_built")
+               "back_from_another_server", "purchase_then_exact_at_start", "edits_while_walls_built",
+               "offline_move_redone_with_walls", "gone_kept_through_late_apply", "exact_waits_for_worker",
+               "same_house_sent_as_is", "bought_again_where_taken_out", "stacked_copy_healed",
+               "one_of_two_copies_removed")
 
 
 async def regressions(only: str | None = None):
@@ -2193,11 +2243,27 @@ async def regressions(only: str | None = None):
     - purchase_then_exact_at_start: bought in play mode, not read before the game closed, the partner's exact house
       waiting for the next start: the purchase goes up before the property replaces the lot, and comes back after it
     - edits_while_walls_built: what the player changes in the build mode an apply has open while it builds the walls
-      goes up as theirs, and what they took out isn't put back"""
+      goes up as theirs, and what they took out isn't put back
+    - offline_move_redone_with_walls: a move and a wall made offline, then an older save loaded: the apply that does
+      them again builds the wall, and the moved object's new spot is still placed after it (not taken for a beaten
+      move once its old spot is gone)
+    - gone_kept_through_late_apply: my offline removal lands while my partner's older version (with it in) is being put
+      in: it's still remembered as taken out, so an older save loaded later doesn't send it back up as bought
+    - exact_waits_for_worker: the partner's exact house kept for the start waits while the house worker has the live
+      house in hand (off the queue, before the lock): a purchase not read yet isn't wiped by the property
+    - same_house_sent_as_is: a house my partner's program sends as it is (no server version) that's the same as mine
+      ends quietly (no error)
+    - bought_again_where_taken_out: something of a kind taken out on purpose before shows up again at that spot in
+      play mode (no save loaded): it goes up as new, not kept in my game only
+    - stacked_copy_healed: the game's reading in build mode misses an object once and the apply places another on top
+      of it: the extra copy is taken out at the end of the apply (and so is an identical one from before), never sent
+    - one_of_two_copies_removed: one of two identical copies stacked on a spot taken out in build mode, the other still
+      there: not a removal (the partner's single one stays)"""
     import base64
     import hashlib
     import logging
     import shutil
+    import threading
     import inzoi_mp_server as mp
     import lotsync
     real = (lotsync.save_lot, lotsync.apply_by_title, lotsync.MYSITES)
@@ -2229,25 +2295,37 @@ async def regressions(only: str | None = None):
         servers.append((server, srv))
         return server, srv, srv.sockets[0].getsockname()[1], data
 
-    def players(names, port):
+    def players(names, port, walls=()):
         out = []
         for name in names:
-            g = StandIn([dict(o, location=dict(o["location"])) for o in home])
+            g = StandIn([dict(o, location=dict(o["location"])) for o in home], walls=[dict(w) for w in walls])
             p = player(name, port, g)
             p.last_full_state = {"site": 1038}
             games[g.call] = g
             out.append((p, g))
         return out
 
+    owned = {}                                           # player -> its session task (disconnect)
+
     def connect(*ps):
         for p in ps:
-            tasks.append(asyncio.create_task(p.session()))
+            owned[id(p)] = asyncio.create_task(p.session())
+            tasks.append(owned[id(p)])
+
+    async def disconnect(p):                             # (this player's server can't be reached any more)
+        t = owned.pop(id(p), None)
+        if t:
+            t.cancel()
+            await asyncio.gather(t, return_exceptions=True)
+            tasks.remove(t)
+        p.writer, p.me_id = None, None
 
     async def stop(*ps):
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         tasks.clear()
+        owned.clear()
         for p in ps:
             p.writer, p.me_id = None, None               # (as run() does after a session)
 
@@ -2273,9 +2351,9 @@ async def regressions(only: str | None = None):
     def said(p, since, text):
         return [c["text"] for c in p.chat if c["time"] >= since and text in c["text"]]
 
-    async def in_step(tag, exact=False):
+    async def in_step(tag, exact=False, walls=()):
         _, _, port, _ = await serve()
-        (ana, ga), (ben, gb) = players((f"Ana{tag}", f"Ben{tag}"), port)
+        (ana, ga), (ben, gb) = players((f"Ana{tag}", f"Ben{tag}"), port, walls=walls)
         ana.cfg["exact_house"] = exact
         connect(ana, ben)
         await joined(ana, ben)
@@ -2287,9 +2365,9 @@ async def regressions(only: str | None = None):
         await ticks(ben, ana)
         return ana, ga, ben, gb
 
-    async def game_back(p, g, restarted, objects=None):
+    async def game_back(p, g, restarted, objects=None, walls=None):
         """The game to the main menu and back (restarted: closed and started again - it lists the properties written
-        before; else another save loaded: objects, its home)."""
+        before; else another save loaded: objects and walls, its home)."""
         p.world = "out"
         await p.house_tick()
         reopen(p, restarted=restarted)
@@ -2297,7 +2375,25 @@ async def regressions(only: str | None = None):
             listed.update(f.name for f in lotsync.MYSITES.iterdir() if f.is_dir())
         if objects is not None:
             g.objects = objects
+        if walls is not None:
+            g.walls = walls
         p.world = "play"
+
+    def copy_objs(g):
+        return [dict(o, location=dict(o["location"])) for o in g.objects]
+
+    def hold_at(p, g, tool, **match):
+        """The game takes its time over the first such call (it waits until released): -> (entered, release)."""
+        real_call, entered, release = g.call, threading.Event(), threading.Event()
+
+        def call(t, **kw):
+            if t == tool and all(kw.get(k) == v for k, v in match.items()) and not entered.is_set():
+                entered.set()
+                release.wait(15)
+            return real_call(t, **kw)
+        p.game.call = call
+        games[call] = g
+        return entered, release
 
     async def offline_change_then(lose, tag):
         """Ben, while the server can't be reached, takes the sofa out - or moves the table - in build mode; then his lot
@@ -2493,12 +2589,197 @@ async def regressions(only: str | None = None):
         await stop(ana, ben)
         print("what the player changes while an apply builds the walls goes up as theirs, nothing of it put back: ok")
 
+    async def offline_move_redone_with_walls():
+        side = wall(1012.5, 12.5, 1012.5, 312.5)
+        ana, ga, ben, gb = await in_step("RA", walls=[wall(12.5, 12.5, 512.5, 12.5)])
+        older, older_walls = copy_objs(gb), [dict(w) for w in gb.walls]
+        await disconnect(ben)                            # (the server can't be reached)
+
+        def move_and_wall(g):
+            g.objects = [o for o in g.objects if o["table_id"] != "Table03"] + [obj(903, "Table03", 200, 600)]
+            g.walls.append(dict(side))
+        await build(ben, gb, move_and_wall)
+        want = layout(gb)
+        await game_back(ben, gb, restarted=False, objects=older, walls=older_walls)     # (an older save)
+        await ticks(ben)                                 # (its first reading: brought to the server's house again)
+        assert layout(gb) == want, f"the move done again was lost in the apply that built the wall: {layout(gb)}"
+        connect(ben)
+        await joined(ana, ben)
+        for _ in range(3):
+            ben.house_push_at = 0.0
+            await ben.push_dirty_house()
+            await settle(ana, ben)
+        for _ in range(2):
+            await ticks(ben, ana)
+            await ticks(ana, ben)
+        assert live(ana) == layout(ga) == layout(gb) == want, (live(ana), layout(ga), layout(gb))
+        k = housesync.wall_key(side)
+        assert all(housesync.covered(k, [housesync.wall_key(w) for w in g.walls]) for g in (ga, gb))
+        await stop(ana, ben)
+        print("a move and a wall made offline, then an older save loaded: the apply that does them again builds the "
+              "wall and still places the moved object: ok")
+
+    async def gone_kept_through_late_apply():
+        ana, ga, ben, gb = await in_step("RG")
+        older = copy_objs(gb)                            # (Ben's autosave: the lamp in it)
+        await disconnect(ben)
+        await build(ben, gb, lambda g: setattr(g, "objects", [o for o in g.objects if o["table_id"] != "Lamp01"]))
+        await build(ana, ga, lambda g: g.objects.append(obj(60, "Rug05", 250, 250)))    # (Ana, meanwhile)
+        await settle(ana)
+        entered, release = hold_at(ben, gb, "building.place_object", object_table_id="Rug05")
+        try:
+            connect(ben)
+            await joined(ana, ben)
+            assert await until(entered.is_set, 15), "(test: Ana's version wasn't put in)"
+            ben.house_push_at = 0.0
+            await ben.push_dirty_house()                 # (the 5 s shared loop, while her older version is put in)
+            assert not ben.pending(KEY), "(test: Ben's removal didn't land during the apply)"
+        finally:
+            release.set()
+        await settle(ana, ben, timeout=30)
+        for _ in range(2):
+            await ticks(ben, ana)
+            await ticks(ana, ben)
+        assert "Lamp01" in [o["table_id"] for o in ben.gone(KEY).get("objects") or []], ben.gone(KEY)
+        await game_back(ben, gb, restarted=False, objects=older)     # (the older save: the lamp back)
+        for _ in range(2):
+            await ticks(ben, ana)
+            await ticks(ana, ben)
+        assert "Lamp01" not in [x[0] for x in live(ana)] and "Lamp01" not in ga.tables(), (live(ana), layout(ga))
+        assert [o["table_id"] for o in (ben.hs().get("local_only") or {}).get("objects") or []] == ["Lamp01"]
+        await stop(ana, ben)
+        print("my offline removal landing while my partner's older version is put in: still remembered, an older "
+              "save doesn't send it back up: ok")
+
+    async def exact_waits_for_worker():
+        ana, ga, ben, gb = await in_step("RC", exact=True)
+        for _ in range(2):
+            await ben.house_tick()                       # (play mode at home: the reading is fresh)
+            await settle(ana, ben)
+        gb.objects.append(obj(88, "Fridge09", 700, 700))     # (bought in play mode, not read yet)
+        await ben.house_tick()
+        await settle(ana, ben)
+        assert "Fridge09" not in [x[0] for x in live(ana)], "(test: read already)"
+        await game_back(ben, gb, restarted=True)         # (the next start: Ana's exact house is listed)
+        entered, release = hold_at(ben, gb, "household.list")
+        try:
+            ben._home_cache = (1038, time.time())        # (asked a moment ago: house_tick doesn't ask the game)
+            await ben.house_tick()                       # (the home's first reading in this load: live house queued)
+            assert await until(entered.is_set, 10), "(test: the house worker didn't ask the game for the home)"
+            assert (not ben.house_next and ben.house_worker and not ben.house_worker.done()
+                    and not ben.house_lock.locked()), "(test: not between the queue and the lock)"
+            await ben.house_tick()                       # (the 2 s tick, in that moment)
+        finally:
+            release.set()
+        await settle(ana, ben, timeout=30)
+        for _ in range(3):
+            await ben.house_tick()
+            await settle(ana, ben)
+        await ticks(ben, ana)
+        await ticks(ana, ben)
+        assert not ben.cfg.get("pending_lot"), "(test: the exact house wasn't applied)"
+        assert "Fridge09" in [x[0] for x in live(ana)] and "Fridge09" in gb.tables() and "Fridge09" in ga.tables(), \
+            (live(ana), layout(gb))
+        await stop(ana, ben)
+        print("the partner's exact house kept for the start waits while the house worker has the live house in hand: "
+              "the purchase not read yet survives: ok")
+
+    async def same_house_sent_as_is():
+        _, _, port, _ = await serve()
+        (ben, gb), = players(("BenRE",), port)
+        lot = await ben.g(ben.scan_lot)
+        data = {"type": "house", "site": 1038, "site_id": "RedCity_Residence_Free03", "walls": [], "heights": {},
+                "objects": [{k: o[k] for k in housesync.OBJ_FIELDS} for o in lot["objects"]]}
+        q = ben.house_request("partner-pid", data, name="Ana")
+        await ben.prepare_q(q)                           # (raised a TypeError: no server version to name)
+        assert not ben.requests and not gb.count("build.enter_mode")
+        print("a house my partner's program sends as it is, the same as mine: ends quietly: ok")
+
+    async def bought_again_where_taken_out():
+        ana, ga, ben, gb = await in_step("RF")
+        await build(ben, gb, lambda g: setattr(g, "objects", [o for o in g.objects if o["table_id"] != "Lamp01"]))
+        assert await until(lambda: "Lamp01" not in ga.tables())
+        await settle(ana, ben)
+        await ticks(ben, ana)
+        for _ in range(2):
+            await ben.house_tick()                       # (play mode at home: the reading is fresh, not read again)
+            await settle(ana, ben)
+        gb.objects.append(obj(77, "Lamp01", 302, 49))    # (one of that kind shows up there in play mode: a gift)
+        since = time.time()
+        await build(ana, ga, lambda g: g.objects.append(obj(61, "Rug05", 250, 250)))    # (before Ben's next reading)
+        assert await until(lambda: "Rug05" in gb.tables(), 15)
+        await settle(ana, ben)
+        for _ in range(2):
+            await ticks(ben, ana)
+            await ticks(ana, ben)
+        assert not said(ben, since, "kept in your game only"), said(ben, since, "kept in your game only")
+        assert "Lamp01" in [x[0] for x in live(ana)] and "Lamp01" in ga.tables(), (live(ana), layout(ga))
+        assert layout(ga) == layout(gb) == live(ana)
+        await stop(ana, ben)
+        print("something of a kind taken out before showing up there again in play mode (no save loaded): it goes up "
+              "as new: ok")
+
+    def sofas(g):
+        return sorted(o["entity_id"] for o in g.objects if o["table_id"] == "Sofa01")
+
+    async def stacked_copy_healed():
+        ana, ga, ben, gb = await in_step("RH")
+        gb.miss["Sofa01"] = 1                            # (the game's next reading in build mode misses the sofa)
+        v0 = ana.shared[KEY]["v"]
+        await build(ana, ga, lambda g: g.objects.append(obj(62, "Plant01", 50, 60)))
+        assert await until(lambda: "Plant01" in gb.tables(), 15)
+        await settle(ana, ben)
+        assert not gb.miss["Sofa01"], "(test: the reading didn't miss it)"
+        assert sofas(gb) == [1], f"the apply placed a second sofa on the one its reading missed: {sofas(gb)}"
+        # an identical copy from before (as that apply left in a game without this): taken out by the next apply, the
+        # newest entity; the one the server has stays in both games
+        gb.objects.append(obj(48384, "Sofa01", 100, 100))
+        await ticks(ben, ana)
+        await build(ana, ga, lambda g: g.objects.append(obj(63, "Chair02", 520, 470)))
+        assert await until(lambda: "Chair02" in gb.tables(), 15)
+        await settle(ana, ben)
+        for _ in range(2):
+            await ticks(ben, ana)
+            await ticks(ana, ben)
+        assert sofas(gb) == [1], f"the identical copy from before wasn't taken out: {sofas(gb)}"
+        assert sorted(o["table_id"] for o in (ben.hs().get("base") or {}).get("lot", {}).get("objects")
+                      or []).count("Sofa01") == 1
+        assert sofas(ga) == [1] and "Sofa01" in [x[0] for x in live(ana)], (layout(ga), live(ana))
+        assert layout(ga) == layout(gb) == live(ana) and not ben.pending(KEY)
+        assert ana.shared[KEY]["v"] == v0 + 2, "Ben sent something of his own"
+        await stop(ana, ben)
+        print("a reading that missed an object once, the apply placing another on it: the extra copy taken out at the "
+              "end of the apply (and an identical one from before), nothing sent: ok")
+
+    async def one_of_two_copies_removed():
+        ana, ga, ben, gb = await in_step("RD")
+        gb.objects.append(obj(4343, "Sofa01", 100, 100))     # (an identical copy from before: the server has one)
+        await ticks(ben, ana)                            # (the reading of the home has both)
+        assert len([o for o in ben.saved_lot(1038)["objects"] if o["table_id"] == "Sofa01"]) == 2
+        await build(ben, gb, lambda g: setattr(g, "objects", [o for o in g.objects if o["entity_id"] != 1]))
+        await settle(ana, ben)
+        for _ in range(2):
+            await ticks(ben, ana)
+            await ticks(ana, ben)
+        assert "Sofa01" in [x[0] for x in live(ana)] and sofas(ga) == [1], (live(ana), layout(ga))
+        assert sofas(gb) == [4343] and layout(ga) == layout(gb) == live(ana)
+        await stop(ana, ben)
+        print("one of two identical copies taken out in build mode, the other still there: not a removal, the "
+              "partner's stays: ok")
+
     cases = {"offline_then_older_save": offline_then_older_save,
              "offline_then_exact_at_start": offline_then_exact_at_start,
              "first_version_after_reset": first_version_after_reset,
              "back_from_another_server": back_from_another_server,
              "purchase_then_exact_at_start": purchase_then_exact_at_start,
-             "edits_while_walls_built": edits_while_walls_built}
+             "edits_while_walls_built": edits_while_walls_built,
+             "offline_move_redone_with_walls": offline_move_redone_with_walls,
+             "gone_kept_through_late_apply": gone_kept_through_late_apply,
+             "exact_waits_for_worker": exact_waits_for_worker,
+             "same_house_sent_as_is": same_house_sent_as_is,
+             "bought_again_where_taken_out": bought_again_where_taken_out,
+             "stacked_copy_healed": stacked_copy_healed,
+             "one_of_two_copies_removed": one_of_two_copies_removed}
     assert set(cases) == set(REGRESSIONS)
     try:
         for name in REGRESSIONS:

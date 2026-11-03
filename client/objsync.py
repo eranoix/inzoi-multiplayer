@@ -35,7 +35,9 @@ that, it's sent for the new spot (the partner's game places it anew, in its defa
 where it was are removed once that's confirmed. A change of mine still unconfirmed when the world is left (or
 multiplayer paused) isn't forgotten: at the next first read it goes again if the game still has the object so and the
 server got nothing newer for it meanwhile. A change made before anything of the server was known in this run (the
-program started while it couldn't be reached) wins when the connection comes: it goes on the server's version then.
+program started while it couldn't be reached) wins when the connection comes - it goes on the server's version then -
+unless the server's state of that object was set after it (the server's "at", against when it was made here: the last
+change wins, as live).
 """
 import asyncio
 import hashlib
@@ -131,6 +133,14 @@ def version(item) -> int:
         return int((item or {}).get("v") or 0)
     except (TypeError, ValueError, AttributeError):
         return 0
+
+
+def _at(item) -> float:
+    """When the server set a shared item (its clock; 0: not said)."""
+    try:
+        return float((item or {}).get("at") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
 
 
 class ObjSync:
@@ -461,8 +471,9 @@ class ObjSync:
             "moved": list(moved) + [m for m in (old or {}).get("moved") or [] if m not in moved],
             # made before anything of the server was known in this run (no snapshot yet: the program started while it
             # couldn't be reached): base, seq and scope above mean nothing; the first snapshot gives them
-            # (on_objects_snapshot) and this change wins, as one made live would
-            "blind": getattr(self, "shared_conn", None) is None}
+            # (on_objects_snapshot) and this change wins, as one made live would - unless the server's state of that
+            # object came after it ("made": when, by this PC's clock; blind_beaten)
+            "blind": getattr(self, "shared_conn", None) is None, "made": time.time()}
         if connected:
             p["busy"] = True
             self.shared_task(self.send_object(k, p))
@@ -579,15 +590,62 @@ class ObjSync:
     def on_objects_snapshot(self):
         """The whole shared state came (joining, reconnecting): the lot's objects are brought to it at once (the newest
         item of each object, not every item in turn), and my unconfirmed changes go again on the version they saw.
-        One made before anything of the server was known in this run ("blind") goes on the server's current version:
-        it wins, as a change made live would (when it was made against what the server had can't be known)."""
-        for k, p in list(self.obj_pending.items()) + list(self.obj_kept.items()):
-            if p.get("blind"):
-                p.update(base=version(self.shared.get(k)), seq=int(getattr(self, "shared_seq", 0) or 0),
-                         scope=self.obj_scope(), blind=False)
-            p["use_base"] = True
+        One made before anything of the server was known in this run ("blind") goes on the server's current version -
+        it wins, as a change made live would - unless the server's newest state of that object came after it
+        (blind_beaten): then that one counts, as it would have live, and mine is dropped."""
+        groups = self.obj_groups(self.obj_site, self.obj_last) if self.obj_site is not None else {}
+        ahead = self.server_ahead()
+        for store in (self.obj_pending, self.obj_kept):
+            for k, p in list(store.items()):
+                if p.get("blind"):
+                    if self.blind_beaten(k, p, groups, ahead):
+                        del store[k]
+                        log.info("my change of %s made before the server could be reached is older than the server's "
+                                 "state of it: that counts", (p.get("o") or {}).get("t"))
+                        continue
+                    p.update(base=version(self.shared.get(k)), seq=int(getattr(self, "shared_seq", 0) or 0),
+                             scope=self.obj_scope(), blind=False)
+                p["use_base"] = True
         if self.obj_site is not None:
             self.reconcile_objects(self.obj_site, full=True)
+
+    def server_ahead(self) -> float:
+        """How far the server's clock is at least ahead of this PC's, by what it has (s; 0: not known to be ahead).
+        Every item it holds was set before now by its clock, so one stamped later than now by mine shows the gap."""
+        stamps = [_at(i) for i in self.shared.values() if isinstance(i, dict)]
+        return max([0.0] + [s - time.time() for s in stamps])
+
+    def blind_beaten(self, k: str, p: dict, groups: dict, ahead: float) -> bool:
+        """The server's newest state of the object a blind change of mine is about (by the server's order: the newest
+        version among its keys for that object - groups, or for one kept through leaving the world, the keys of that
+        kind within NEAR of where it was) is a partner's set after my change was made: its "at" (the server's clock)
+        is later than when I made mine (this PC's clock, moved by what the server is at least ahead: server_ahead).
+        A PC clock running fast still favours mine; an item without a time doesn't beat it."""
+        site, hk = k.split(":")[1], k.split(":", 2)[2]
+        if self.obj_site is not None and str(self.obj_site) == site and hk in self.obj_last:
+            items = [e[2] for e in groups.get(hk) or []]
+        else:
+            o, items = p.get("o") or {}, []
+            try:
+                x, y, z = (float(c) for c in o["p"])
+            except (KeyError, TypeError, ValueError):
+                return False
+            for key, item in self.shared.items():
+                v = item.get("value") if isinstance(item, dict) else None
+                if not key.startswith(f"obj:{site}:") or not isinstance(v, dict) or v.get("t") != o.get("t"):
+                    continue
+                try:
+                    if sum((float(a) - b) ** 2 for a, b in zip(v["p"], (x, y, z))) < NEAR ** 2:
+                        items.append(item)
+                except (KeyError, TypeError, ValueError):
+                    continue
+        if self.shared.get(k):
+            items.append(self.shared[k])
+        newest = max(items, key=version, default=None)
+        me = self.me_id
+        if not newest or (me and newest.get("by") == me):
+            return False
+        return _at(newest) > float(p.get("made") or 0) + ahead
 
     def recheck_object(self, k: str):
         site = k.split(":")[1]

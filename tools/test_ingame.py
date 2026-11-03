@@ -367,9 +367,10 @@ def lifetime_tests():
     import launcher
     import menu
     windows = iter([None, None, 7, 7] + [None] * 20)
-    orig = (menu.game_window, asyncio.sleep)
+    orig = (menu.game_window, asyncio.sleep, menu.game_running)
     real_sleep = asyncio.sleep
     menu.game_window = lambda: next(windows)
+    menu.game_running = lambda: False                    # (inZOI's process gone too: never the real one's)
     asyncio.sleep = lambda s, *a: real_sleep(0)
     try:
         check(asyncio.run(launcher.follow_game()) == "inZOI closed", "inZOI closed: the program closes too")
@@ -378,7 +379,7 @@ def lifetime_tests():
         check(asyncio.run(launcher.follow_game()) == "inZOI didn't start", "inZOI never came: it doesn't linger")
         launcher.NEVER_STARTED = keep
     finally:
-        menu.game_window, asyncio.sleep = orig
+        menu.game_window, asyncio.sleep, menu.game_running = orig
 
     class FakeComp:
         def __init__(self, cfg):

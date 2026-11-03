@@ -11,6 +11,11 @@ Reading and comparing:
   the home is read there only while my Zoi is on it; the last reading is kept (home-lot.json) for when it's out.
 - Objects of the same kind within 10 cm and 5 degrees are the same object. A wall is there when every point along it
   lies on a wall of the other reading (one long wall and the two short ones that make it up are the same).
+- Copies of one kind stacked on one spot (within 2 cm and 1 degree: identical) are never on purpose: the game's reading
+  can miss an object for a moment, and an apply then places it again. An apply takes out such copies beyond what the
+  version it brings in has there, at its end (what it placed first, else the newest entity: heal_stacked) - its own
+  doing, never sent; and one of two such copies taken out in build mode, the other still there, isn't a removal (put
+  on the server's house, which has one there, it would take that one out of my partner's game).
 
 The server keeps the home's version for both (shared.py: house:<lot>:live, versioned, compare-and-set):
 - What I change goes up as a change, never as my whole lot over theirs. My home as build mode opened on it (the last
@@ -37,8 +42,8 @@ The server keeps the home's version for both (shared.py: house:<lot>:live, versi
   or a save loaded from before) isn't sent as removed, so a rolled-back save never deletes my partner's things. Nor
   does it bring back what was deleted: what was taken out of my home on purpose (by an apply - my partner's removals
   and moves -, or by me in build mode) is remembered ("gone", home-lot-sync.json; forgotten once a version my game is
-  brought to has it again, unless a change of mine on its way takes it out), and what my game has beyond the server's
-  version that's one of those is never sent as bought, whatever the base. When the base's reading (below) may
+  brought to has it again and so does the server's current one, unless a change of mine on its way takes it out). When
+  the base's reading (below) may
   be older than the save my game holds (it wasn't made since that save was loaded - a loading screen that keeps the
   save isn't a load; a save loaded from the main menu, the game restarted, this program started, the exact house
   applied may be), the first reading of the home brings my game to the server's version again (what that save lacks
@@ -135,6 +140,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -146,6 +152,7 @@ log = logging.getLogger("housesync")
 EXACT_TRIES = 2           # runs of the game in which applying a kept exact house may fail before it stops trying
 SCAN_EVERY = 4            # s between readings while in build mode
 SAME_CM, SAME_DEG = 10.0, 5.0
+IDENT_CM, IDENT_DEG = 2.0, 1.0    # copies of one kind this close are stacked on one spot: never on purpose (identical)
 MAX_OBJECTS = 2000
 MAX_WALLS = 2000
 ON_WALL_CM = 4.0          # a point this close to a wall's centre line is on it (centre lines sit on 25*k+12.5)
@@ -186,6 +193,17 @@ def landed(d: dict, applied) -> bool:
     """Change d is in a server version whose "applied" is `applied` (a set): it got there, whatever its word."""
     ids = delta_ids(d)
     return bool(ids) and all(i in applied for i in ids)
+
+
+# What the game puts in a home and takes away by itself while it's played - dust and dirt (DEV_DustDecal...), food served
+# (ServedSoup01...), a book taken off the shelf (Book_6), dirty dishes, puddles, trash, leftovers - isn't the house:
+# never read, sent, put in or brought back (it was: the dust a Zoi cleaned came back every few minutes, in both games).
+TRANSIENT = re.compile(r"^(DEV_|Served|Book_\d|Dirty|Puddle|Leftover|Trash(?!Can))", re.I)
+
+
+def lasting(o: dict) -> bool:
+    """A piece of the house (furniture, decoration, doors and windows), not something the game puts and takes away."""
+    return not TRANSIENT.match(str(o.get("table_id") or ""))
 
 
 def object_key(o: dict) -> dict:
@@ -328,6 +346,50 @@ def has(objs: list[dict], o: dict) -> bool:
     return any(same(o, m) for m in objs)
 
 
+def identical(a: dict, b: dict) -> bool:
+    """Two copies of one kind stacked on one spot (same floor, within IDENT_CM and IDENT_DEG): nobody puts two there on
+    purpose - one of them is the game's reading having missed the other for a moment, and an apply placing it again."""
+    d_yaw = abs((a["yaw"] - b["yaw"] + 180) % 360 - 180)
+    return (a["table_id"] == b["table_id"] and a["floor"] == b["floor"] and d_yaw <= IDENT_DEG
+            and math.dist((a["x"], a["y"], a["z"]), (b["x"], b["y"], b["z"])) <= IDENT_CM)
+
+
+def _eid_order(o: dict):
+    try:
+        return int(o.get("entity_id"))
+    except (TypeError, ValueError):
+        return -1
+
+
+def stacked_extras(objs: list[dict], house: dict, before: list[dict] = ()) -> list[dict]:
+    """The copies of `objs` (a reading of my lot, with entity ids) stacked on a spot where another identical one stands
+    (identical), beyond as many as `house` (the version an apply brings in) has there - never fewer than one is kept.
+    Of each such spot's copies, the ones that go are first those not in `before` (the reading before the apply: what
+    it placed), then the newest entity. One entity read twice counts once."""
+    kinds: dict[tuple, list] = {}                        # (kind, floor) -> its spots: [[copies...], ...]
+    seen = set()
+    for o in objs:
+        e = o.get("entity_id")
+        if e is None or str(e) in seen:
+            continue
+        seen.add(str(e))
+        spots = kinds.setdefault((o["table_id"], o["floor"]), [])
+        spot = next((s for s in spots if identical(s[0], o)), None)
+        if spot is None:
+            spots.append([o])
+        else:
+            spot.append(o)
+    had = {str(o.get("entity_id")) for o in before if o.get("entity_id") is not None}
+    theirs = (house or {}).get("objects") or []
+    out = []
+    for spot in (s for spots in kinds.values() for s in spots if len(s) > 1):
+        keep = max(1, sum(1 for t in theirs if same(t, spot[0])))
+        if len(spot) > keep:
+            spot = sorted(spot, key=lambda o: (str(o.get("entity_id")) not in had, _eid_order(o)))
+            out += spot[keep:]
+    return out
+
+
 def matched(gone: list[dict], objs: list[dict]) -> list[dict]:
     """The objects of `objs` that match those in `gone`, one for one."""
     left, out = list(objs), []
@@ -409,6 +471,12 @@ def session_delta(before: dict, after: dict) -> dict | None:
         log.warning("the home's last reading has no objects (it had %d): not taken as a change", len(bo))
         return None
     added, removed = diff(ao, bo)
+    # (one of two identical copies stacked on a spot taken out, the other still there: not a removal - put on the
+    # server's house, which has one there, it would take that one out of my partner's game)
+    by_kind: dict[tuple, list] = {}
+    for a in ao:
+        by_kind.setdefault((a["table_id"], a["floor"]), []).append(a)
+    removed = [r for r in removed if not any(identical(r, a) for a in by_kind.get((r["table_id"], r["floor"]), ()))]
     bw, aw = before.get("walls") or [], after.get("walls") or []
     walls_add, walls_del = (pieces(aw, bw), pieces(bw, aw)) if aw else ([], [])   # (no walls read: not "all gone")
     bh, ah = before.get("heights") or {}, after.get("heights") or {}
@@ -775,7 +843,7 @@ class HouseSync:
             for o in objs:
                 k = object_key(o)
                 k["entity_id"] = o.get("entity_id")
-                if k["table_id"]:
+                if k["table_id"] and lasting(k):
                     out.append(k)
             offset += len(objs)
             if len(objs) < 500:
@@ -1030,14 +1098,20 @@ class HouseSync:
         purpose (note_gone) is in the shared house again - put back by someone since - and isn't "taken out" any more:
         a save loaded later that has it, or a first version of a new server's house (house_value), mustn't take it for
         something come back. Unless a change of mine on its way takes it out: the server's house still has it only
-        because that change isn't there yet (my removal made offline). (The caller saves.)"""
+        because that change isn't there yet (my removal made offline). Nor unless the server's current version has it
+        too: one reached late (an apply that finished after my removal landed: nothing of mine waits any more, and that
+        older version still has it) isn't the house any more. (The caller saves.)"""
         e = self.gone(key)
         if not (e.get("objects") or e.get("walls")):
             return
         keep = self.pending_keep(key)
+        cur = (self.shared.get(key) or {}).get("value")
+        cur = cur if isinstance(cur, dict) else {}
         vo, vw = value.get("objects") or [], value.get("walls") or []
-        o = [g for g in e.get("objects") or [] if not has(vo, g) or has(keep["removed"], g)]
-        w = [g for g in e.get("walls") or [] if not (vw and covered(g, vw)) or overlaps(g, keep["walls_del"])]
+        co, cw = cur.get("objects") or [], cur.get("walls") or []
+        o = [g for g in e.get("objects") or [] if not (has(vo, g) and has(co, g)) or has(keep["removed"], g)]
+        w = [g for g in e.get("walls") or [] if not (vw and covered(g, vw) and cw and covered(g, cw))
+             or overlaps(g, keep["walls_del"])]
         if len(o) != len(e.get("objects") or []) or len(w) != len(e.get("walls") or []):
             self.hs()["gone"][key] = {"objects": o, "walls": w}
 
@@ -1330,7 +1404,8 @@ class HouseSync:
             site_id = lot.get("site_id")
             history = grow_history(None, value, diff(removed, value["objects"])[0],
                                    pieces(walls_removed, value["walls"]) if value["walls"] else walls_removed)
-        out = {"site": lot.get("site"), "site_id": site_id, "objects": value["objects"][:MAX_OBJECTS],
+        out = {"site": lot.get("site"), "site_id": site_id,
+               "objects": [o for o in value["objects"] if lasting(o)][:MAX_OBJECTS],     # (TRANSIENT: leaves the house)
                "walls": value["walls"][:MAX_WALLS], "heights": value["heights"],
                "change": {"removed": removed[:MAX_OBJECTS], "walls_removed": walls_removed[:MAX_WALLS]},
                "applied": applied[-APPLIED_KEEP:]}
@@ -2120,10 +2195,13 @@ class HouseSync:
             return                                       # ("apply now" in the panel tries again: apply_lot_now)
         k = p.get("key")
         live = f"house:{k.split(':')[1]}:live" if isinstance(k, str) and k.count(":") == 2 else None
-        if live and self.shared.get(live) and (live in self.house_next or live in self.house_pushing):
+        if live and self.shared.get(live) and (live in self.house_next or live in self.house_pushing
+                                               or (self.house_worker and not self.house_worker.done())):
             # (the first reading of the home in this load queued the live house: what it found that the server doesn't
             # know yet - bought in play mode and not read before the game closed - goes up with that apply first; the
-            # property, the whole lot, would wipe it. My changes merely waiting for the server don't hold it back)
+            # property, the whole lot, would wipe it. The house worker has it in hand from the moment it takes it off
+            # the queue - before the lock, while it asks the game which lot is home. My changes merely waiting for the
+            # server don't hold it back)
             return
         if self.exact_waits(p):
             if self.__dict__.get("_exact_wait_said") != p.get("hash"):
@@ -2431,9 +2509,13 @@ class HouseSync:
         """My changes on their way (deltas), put on my game as it is (`mine`) the way my push puts them on a version
         (fold): what they take out that my game has again, what they add that it lacks, their wall pieces -> (to place,
         to remove, to build, to delete), beyond what `plan` does already. Not my copies of moves a newer version beat
-        (`copies`: they go), nor walls of the plan's own (a partner's wall knocked down isn't built again)."""
+        (`copies`: they go), nor walls of the plan's own (a partner's wall knocked down isn't built again). What they
+        take out that my game doesn't have (any more: this very apply removed it before building the walls, and the
+        plan is worked out again on the reading after them) is put in first: a move whose old spot is gone already
+        still has its new spot placed - fold would take it for a move a newer version beat, and drop it."""
         M, Mw = mine.get("objects") or [], mine.get("walls") or []
-        v = {"objects": list(M), "walls": list(Mw), "heights": {}}
+        out_already = [r for d in deltas for r in d.get("removed") or [] if not has(M, r)]
+        v = {"objects": list(M) + out_already, "walls": list(Mw), "heights": {}}
         for d in deltas:
             v = fold(v, d)[0]
         add, out = diff(v["objects"], M)
@@ -2459,6 +2541,8 @@ class HouseSync:
         key = (q.get("shared") or q.get("redo") or (None,))[0]
         mode = q.get("mode") or "full"
         h = q["house"]
+        if h.get("objects") is not None:                 # (what the game puts and takes away isn't put in: lasting)
+            h = dict(h, objects=[o for o in h["objects"] if lasting(o)])
         live = f"house:{h.get('site')}:live"
         st = state or self.plan_state(key, live)
         base = st["base"] if mode == "merge" else None
@@ -2571,9 +2655,9 @@ class HouseSync:
                 plan, _ = self.plan_for(q, mine)
                 if not plan_size(plan):
                     self.requests.pop(rid, None)
-                    v_q = (q.get("shared") or q.get("redo"))[1]
+                    sh = q.get("shared") or q.get("redo")       # (none: a house my partner's program sent as it is)
                     log.info("%s is the same as my game%s",
-                             f"the shared house (v{v_q}, mine)" if q.get("own") else f"{q['from']}'s house",
+                             f"the shared house (v{sh[1]}, mine)" if q.get("own") and sh else f"{q['from']}'s house",
                              " (what's left differs only where my game keeps its own)" if q.get("shared") else "")
                     self.house_done(q, mine, mine)
                     return
@@ -2638,10 +2722,11 @@ class HouseSync:
                 new = self.local_additions(key, mine, q["house"], base, after, skip=skip)
             elif add:
                 new = self.local_extras(key, mine, q["house"], after, skip=skip)
-            if merge or add:
-                # (whether the base is current or not: a save loaded, or the exact house applied, while a change of mine
-                # was on its way puts back what it took out - the base takes my change in once it lands, confirm_landed,
-                # so what's back then reads as mine and new; it's never sent as bought)
+            if (merge and not self.base_current(base)) or add:
+                # (only when a save may have been loaded, or the exact house applied, since the base's reading - or with
+                # no base: what's beyond the version then may be what came back with it. With the base current it's
+                # new since: something of that kind showing up again where one was taken out - a gift, bought again - is
+                # just new. My changes on their way that the lot replaced lost are done again by the apply: redo_mine)
                 back, back_w = self.came_back(key, new, after, q["house"])
                 new = [o for o in new if not any(o is b for b in back)]
                 rec = self.hs().get("local_only")        # (what's kept only in my game already isn't said again)
@@ -2837,14 +2922,22 @@ class HouseSync:
             except Exception as e:                   # noqa: BLE001
                 failed += 1
                 log.debug("couldn't place %s: %s", o["table_id"], e)
-        after = None
+        after, healed = None, set()
         try:
             after = run["after"] = await self.g(self.scan_lot)
+            healed = await self.heal_stacked(after, h, mine)
+            if healed:                               # (the apply's own removals: not the player's, nor "taken out")
+                after = run["after"] = dict(after, objects=[o for o in after["objects"]
+                                                            if str(o.get("entity_id")) not in healed])
+                run["mine"] = dict(mine, objects=[o for o in mine["objects"] if str(o.get("entity_id")) not in healed])
             self.keep_lot(dict(after, site=int(h["site"]), site_id=h.get("site_id")))
         except Exception as e:                       # noqa: BLE001
             log.debug("reading the house after applying: %s", e)
         if after is not None:                        # (what the player did meanwhile, in the build mode on screen)
             before = mid or dict(mine, objects=kept)
+            if healed:
+                before = dict(before, objects=[o for o in before.get("objects") or []
+                                               if str(o.get("entity_id")) not in healed])
             run["edits"] = apply_edits(plan, before, after)
             if pre[0] or pre[1]:
                 run["edits"] = join_edits(pre[0], pre[1], run["edits"], after.get("objects") or [])
@@ -2861,6 +2954,24 @@ class HouseSync:
                              (f" ({max(failed, left_over)} couldn't be changed)" if failed or left_over else ""))
         return {"state": "done", "placed": len(place), "removed": len(plan["remove"]), "walls": walls,
                 "failed": failed, "left": left_over}
+
+    async def heal_stacked(self, after: dict, house: dict, mine: dict) -> set:
+        """At the end of an apply (its build mode still open): identical copies stacked on one spot beyond what the
+        version brought in has there (stacked_extras: the game's reading missed one for a moment and the apply placed
+        it again, or such a pair from before) are taken out - what the apply placed first, else the newest entity. The
+        apply's own doing: never sent as the player's change, nor remembered as taken out on purpose. -> the entity ids
+        taken out."""
+        done = set()
+        for o in stacked_extras(after.get("objects") or [], house, before=mine.get("objects") or []):
+            try:
+                await self.g(self.game.call, "build.remove_object", entity_id=str(o["entity_id"]))
+                done.add(str(o["entity_id"]))
+            except Exception as e:                       # noqa: BLE001
+                log.debug("couldn't take out a stacked copy of %s: %s", o["table_id"], e)
+        if done:
+            log.info("%d identical copies stacked on a spot where the house has fewer (a reading missed one?): taken out",
+                     len(done))
+        return done
 
     def note_leftover(self, plan: dict, held: list, after: dict, name: str | None) -> int:
         """After an apply: what the game didn't take (by the reading after it) is counted, so it's tried again only a

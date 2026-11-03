@@ -1044,11 +1044,48 @@ async def blind_kept(server, port):
         await p.drop()
 
 
+async def blind_later(server, port):
+    """A change made before the server was ever reached in this run, then the partner's change of the same object made
+    after it, while this PC still couldn't reach the server: the partner's, the later one, counts when the connection
+    comes (the blind change used to go on top of it - overwriting a newer change in both games). A blind change of
+    another object nobody touched since still goes."""
+    again, ben = await before_joining(port, "R4")
+    again.game.of("Tv01")["s"] = {"OnOff": "Off"}            # (Ana, while the server can't be reached)
+    again.game.of("Lamp01")["s"] = {"OnOff": "Off"}
+    again.tick()
+    assert len(again.obj_pending) == 2 and all(p.get("blind") for p in again.obj_pending.values())
+    await asyncio.sleep(0.05)
+    ben.game.of("Tv01")["s"] = {"OnOff": "Off"}              # (Ben, later: the TV off, then on again)
+    ben.tick()
+    await settle(ben)
+    ben.obj_applied = []
+    ben.game.of("Tv01")["s"] = {"OnOff": "On"}
+    ben.tick()
+    await settle(ben)
+    assert newest(server, "Tv01")["by"] == ben.me_id and newest(server, "Tv01")["value"]["s"] == ["OnOff:On"]
+    await again.connect(port)
+    again.retry_objects()
+    await settle(again, ben)
+    for _ in range(2):
+        again.tick(), ben.tick()
+        await settle(again, ben)
+    tv, lamp = newest(server, "Tv01"), newest(server, "Lamp01")
+    assert tv["by"] == ben.me_id and tv["value"]["s"] == ["OnOff:On"], ("Ben's later change was overwritten", tv)
+    assert again.game.look("Tv01")[0] == ben.game.look("Tv01")[0] == ["OnOff:On"], (again.game.objs, ben.game.objs)
+    assert lamp["by"] == again.me_id and lamp["value"]["s"] == ["OnOff:Off"], ("the untouched one didn't go", lamp)
+    assert again.game.look("Lamp01")[0] == ben.game.look("Lamp01")[0] == ["OnOff:Off"]
+    assert not again.obj_pending
+    print("a partner's change made after a change of mine from before the server was reached counts (the later one); "
+          "a blind change of an object nobody touched since still goes: ok")
+    for p in (again, ben):
+        await p.drop()
+
+
 async def main():
     logging.basicConfig(level=logging.WARNING)
     for n, case in enumerate((basics, reload, lambda s, p: crossing(s, p, "ana"), lambda s, p: crossing(s, p, "ben"),
                               lost, aliases, lambda s, p: near(s, p, False), lambda s, p: near(s, p, True), quiet,
-                              placed_again, moves, kept, settle_again, blind_start, blind_kept)):
+                              placed_again, moves, kept, settle_again, blind_start, blind_kept, blind_later)):
         server = mp.Server(mp.Store(TMP / f"server{n}"))         # (each case on its own server: a clean lot)
         srv = await asyncio.start_server(server.handle, "127.0.0.1", 0, limit=mp.MAX_LINE)
         await case(server, srv.sockets[0].getsockname()[1])
