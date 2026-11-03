@@ -89,7 +89,10 @@ def main():
                              stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NEW_CONSOLE)
             first = wait(lambda: post("/status"), 30, "the program")
             print("running:", first["version"], "connected:", first["connected"])
-            assert (game / "dwmapi.dll").exists(), "the main menu's button goes in by itself"
+            if os.environ.get("INZOI_MP_NO_UE4SS"):      # (built without UE4SS: the antivirus took dwmapi.dll)
+                print("(built without UE4SS: the main menu's button isn't checked)")
+            else:
+                assert (game / "dwmapi.dll").exists(), "the main menu's button goes in by itself"
             offer = wait(lambda: (lambda s: s if s["update"]["state"] == "available" else None)(post("/status")), 90,
                          "the update to be found")
             print("update offered:", offer["update"]["box"]["text"][:70], "...")
