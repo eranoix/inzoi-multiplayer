@@ -360,16 +360,25 @@ local function receive(pid, r)
     apply(r, cur, changed)
 end
 
+-- The drawn actor goes where they're drawn, smoothly (place and facing); far off (a jump, another floor), at once.
+-- An actor the game let go (a loading screen, the Zoi spawned again) gives its rig back, and it's built on the new one.
 local function glide(dt)
     for _, r in pairs(remotes) do
         local tg, rig = r.target, r.rig
         if tg and rig then
-            local a = rig.actor
-            local l = a:K2_GetActorLocation()
-            local k = math.min(1, dt * 12)
-            local nx, ny, nz = l.X + (tg.x - l.X) * k, l.Y + (tg.y - l.Y) * k, l.Z + (tg.z - l.Z) * k
-            if (tg.x - l.X) ^ 2 + (tg.y - l.Y) ^ 2 > 300 * 300 then nx, ny, nz = tg.x, tg.y, tg.z end
-            a:K2_SetActorLocationAndRotation(UE.FVector(nx, ny, nz), UE.FRotator(0, tg.yaw, 0), false, nil, false)
+            local ok = pcall(function()
+                local a = rig.actor
+                local l, yaw = a:K2_GetActorLocation(), a:K2_GetActorRotation().Yaw
+                local k, kr = math.min(1, dt * 12), math.min(1, dt * 14)
+                local nx, ny, nz = l.X + (tg.x - l.X) * k, l.Y + (tg.y - l.Y) * k, l.Z + (tg.z - l.Z) * k
+                local turn = ((tg.yaw - yaw + 540) % 360) - 180
+                local nyaw = yaw + turn * kr
+                if (tg.x - l.X) ^ 2 + (tg.y - l.Y) ^ 2 > 300 * 300 or math.abs(tg.z - l.Z) > 150 then
+                    nx, ny, nz, nyaw = tg.x, tg.y, tg.z, tg.yaw
+                end
+                a:K2_SetActorLocationAndRotation(UE.FVector(nx, ny, nz), UE.FRotator(0, nyaw, 0), false, nil, false)
+            end)
+            if not ok then restore(r) end
         end
     end
 end
@@ -391,8 +400,7 @@ local function pose_tick(dt)
             if r.rig and clock - r.at > STALE then restore(r) end
         end
     end
-    -- (the actor's place: the B2 controller sets the simulation where they are every tick ("skel") and the game
-    -- draws the actor there; setting it here as well fought that - the body slid and snapped back)
+    glide(dt)    -- (the drawn actor: B2 sets only the simulation where they are ("skel"), which doesn't move it)
 end
 
 function M.on_begin() end
