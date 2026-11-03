@@ -96,7 +96,7 @@ end
 
 local function read_pose(actor)
     local by = meshes(actor)
-    local vals, counts = {}, {}
+    local vals, counts, scales = {}, {}, {}
     for li, name in ipairs(LEADERS) do
         local m = by[name]
         local n = m and m:GetNumBones() or 0
@@ -108,23 +108,30 @@ local function read_pose(actor)
             vals[k + 1], vals[k + 2], vals[k + 3] = round(p.X * 10), round(p.Y * 10), round(p.Z * 10)
             vals[k + 4], vals[k + 5] = round(q.X * 10000), round(q.Y * 10000)
             vals[k + 6], vals[k + 7] = round(q.Z * 10000), round(q.W * 10000)
+            -- (the bone's size: the Zoi's proportions - body shape, age - are bone scales, 153 of 370 body bones;
+            -- left at 1 the mirrored skull and body came out bigger than the hair made for them: "bald", hair behind)
+            local s, j = tr.Scale3D, #scales
+            scales[j + 1], scales[j + 2], scales[j + 3] = round(s.X * 1000), round(s.Y * 1000), round(s.Z * 1000)
         end
     end
     local l, r = actor:K2_GetActorLocation(), actor:K2_GetActorRotation()
-    return vals, counts, string.format("%d,%d,%d,%d", round(l.X * 10), round(l.Y * 10), round(l.Z * 10), round(r.Yaw * 100))
+    return vals, counts, string.format("%d,%d,%d,%d", round(l.X * 10), round(l.Y * 10), round(l.Z * 10), round(r.Yaw * 100)),
+        scales
 end
 
 local function send_pose()
     local id = my_entity()
     local actor = id and actor_of(id)
     if not actor then return end
-    local vals, counts, head = read_pose(actor)
+    local vals, counts, head, scales = read_pose(actor)
     send.seq = send.seq + 1
     local key = send.key
     if not key or clock - send.keyAt >= KEY_EVERY or key.n1 ~= counts[1] or key.n2 ~= counts[2] then
         send.kid = send.kid % 100000 + 1
         send.key, send.keyAt = { vals = vals, n1 = counts[1], n2 = counts[2] }, clock
-        cfg_save("posek", string.format("%d|%s|%d|%d|%s", send.kid, head, counts[1], counts[2], table.concat(vals, ",")))
+        -- (the bones' sizes after their place and turn: an older receiver reads 7 values a bone and ignores the rest)
+        cfg_save("posek", string.format("%d|%s|%d|%d|%s,%s", send.kid, head, counts[1], counts[2], table.concat(vals, ","),
+            table.concat(scales, ",")))
         cfg_save("posed", string.format("%d|%d|%s|", send.kid, send.seq, head))
         return
     end
@@ -272,6 +279,7 @@ end
 
 local function apply(r, vals, changed)
     local rig = r.rig
+    local sc = r.key.scales
     local base = 0
     for li = 1, 2 do
         local n = li == 1 and r.key.n1 or r.key.n2
@@ -282,10 +290,11 @@ local function apply(r, vals, changed)
             local space = 1
             for b = 0, n - 1 do
                 if not changed or changed[base + b] then
-                    local o = (base + b) * 7
+                    local o, so = (base + b) * 7, (base + b) * 3
+                    local size = sc and UE.FVector(sc[so + 1] / 1000, sc[so + 2] / 1000, sc[so + 3] / 1000) or UE.FVector(1, 1, 1)
                     pm:SetBoneTransformByName(names[b], UE.FTransform(
                         UE.FQuat(vals[o + 4] / 10000, vals[o + 5] / 10000, vals[o + 6] / 10000, vals[o + 7] / 10000),
-                        UE.FVector(vals[o + 1] / 10, vals[o + 2] / 10, vals[o + 3] / 10), UE.FVector(1, 1, 1)), space)
+                        UE.FVector(vals[o + 1] / 10, vals[o + 2] / 10, vals[o + 3] / 10), size), space)
                 end
             end
         end
@@ -319,7 +328,14 @@ local function receive(pid, r)
         local k = cfg_load("in", "posek_" .. pid)
         local kk, khead, n1, n2, kv = (k or ""):match("^(%d+)|([%-%d,]+)|(%d+)|(%d+)|(.*)$")
         if not kk or tonumber(kk) ~= kid then return end              -- (its keyframe isn't here yet)
-        r.kid, r.key = kid, { vals = split_ints(kv), n1 = tonumber(n1), n2 = tonumber(n2) }
+        local all, nb = split_ints(kv), tonumber(n1) + tonumber(n2)
+        local vals, scales = all, nil
+        if #all >= nb * 10 then                                     -- (sizes sent: 3 a bone after the 7)
+            vals, scales = {}, {}
+            for i = 1, nb * 7 do vals[i] = all[i] end
+            for i = 1, nb * 3 do scales[i] = all[nb * 7 + i] end
+        end
+        r.kid, r.key = kid, { vals = vals, scales = scales, n1 = tonumber(n1), n2 = tonumber(n2) }
         r.fresh = true
     end
     r.seq, r.at = seq, clock
