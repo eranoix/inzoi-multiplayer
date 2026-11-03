@@ -49,7 +49,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.36"
+VERSION = "0.9.37"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -95,6 +95,31 @@ def save_time(entry: dict) -> float:
 def save_label(entry: dict, extra: str = "") -> str:
     who = f"{entry.get('first_name', '')} {entry.get('last_name', '')}".strip()
     return f"{entry.get('slot') or who}" + (f" ({who}, {extra})" if extra else f" ({who})")
+
+
+def slot_base(slot: str) -> str:
+    """"Oliveira_AutoSave_3" -> "Oliveira": the save's own name, whichever of its slots."""
+    return re.sub(r"_AutoSave_\d+$", "", str(slot or "")).strip().casefold()
+
+
+def mp_identity(mp: dict) -> tuple[str, str, str] | None:
+    """(save name, first name, last name) of the multiplayer save: stored, or read back from its label
+    "Oliveira (Arthur Oliveira, multiplayer copy)"."""
+    if mp.get("slot") and mp.get("first"):
+        return slot_base(mp["slot"]), str(mp["first"]).casefold(), str(mp.get("last") or "").casefold()
+    m = re.match(r"^(.+?) \((\S+) ([^,)]+)", str(mp.get("name") or ""))
+    return (slot_base(m.group(1)), m.group(2).casefold(), m.group(3).strip().casefold()) if m else None
+
+
+def same_save(entry: dict, ident) -> bool:
+    return bool(ident) and slot_base(entry.get("slot")) == ident[0]         and str(entry.get("first_name") or "").casefold() == ident[1]         and str(entry.get("last_name") or "").casefold() == ident[2]
+
+
+def moved_mp_save(entry: dict, mp: dict, listed: set) -> bool:
+    """entry is the multiplayer save written into a new folder: same save and character, the old folder gone from the
+    game's list, a newer folder than it, and not the save it was copied from (the copy and its original share a name)."""
+    folder = str(entry.get("folder") or "")
+    return bool(folder) and mp.get("folder") not in listed and folder > str(mp.get("folder") or "")         and folder != mp.get("copied_from") and same_save(entry, mp_identity(mp))
 
 
 def size_text(n: int) -> str:
@@ -1430,7 +1455,12 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     mp["folder"] = s["folder"]             # they said this is the one (e.g. a Save As in the game)
                     save_config(self.cfg)
                 elif mp and s["mp"] is None:
-                    s["mp"] = mp.get("folder") == s["folder"]
+                    listed = {e.get("folder") for e in await self.g(self.game.saves, 200) or []}
+                    s["mp"] = mp.get("folder") == s["folder"] or moved_mp_save(newest, mp, listed)
+                    if s["mp"] and mp.get("folder") != s["folder"]:
+                        log.info("this is your multiplayer save, written to a new folder (%s)", s["folder"])
+                        mp["folder"] = s["folder"]
+                        save_config(self.cfg)
                     if s["mp"] is False:
                         self.show_paused()
         if s["mp"] is None and not self.save_box and not self.save_busy:
@@ -1586,16 +1616,46 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         finally:
             self.save_busy = False
 
+    def resolve_mp_folder(self) -> str | None:
+        """The multiplayer save's folder as the game lists it now. The game can write the same save ("Oliveira") into a
+        new folder and drop the old one from its list (a save on leaving to the main menu...): then the newest folder
+        of the same save and character is the multiplayer save, and cfg follows it."""
+        mp = self.cfg.get("mp_save") or {}
+        try:
+            saves = self.game.saves(limit=200, autosave=True, refresh=True) or []
+        except (GameError, OSError, ValueError):
+            return mp.get("folder")
+        listed = {s.get("folder") for s in saves}
+        if mp.get("folder") in listed:
+            return mp.get("folder")
+        ident = mp_identity(mp)
+        same = [s for s in saves if moved_mp_save(s, mp, listed) and not s.get("is_broken")]
+        if not same:
+            return mp.get("folder")
+        new = max(same, key=lambda s: str(s.get("saved_time") or ""))["folder"]
+        log.info("your multiplayer save is in folder %s now (the game saved it again; it was %s)", new,
+                 mp.get("folder"))
+        mp.update(folder=new, slot=ident[0], first=ident[1], last=ident[2])
+        save_config(self.cfg)
+        return new
+
     async def load_mp_save(self):
+        await self.g(self.resolve_mp_folder)
         mp = self.cfg["mp_save"]
         await self.g(self.backup_save, mp.get("folder"), "before-load")     # (never fails: see couple.py)
         self.loading_save, self.auto_loaded = mp["folder"], True
-        newest = await self.g(self.newest_slot_file, mp["folder"])
-        log.info("loading %s: its newest slot %s", mp["folder"], newest or "(the game's choice)")
-        if newest:
-            await self.g(self.game.call, "game.load", folder=mp["folder"], file=newest)
-        else:
-            await self.g(self.game.call, "game.load", folder=mp["folder"])
+        newest = None
+        for _ in range(10):                               # (right after the game starts its list may not be read yet)
+            newest = await self.g(self.newest_slot_file, mp["folder"])
+            if newest:
+                break
+            await asyncio.sleep(3)
+            await self.g(self.resolve_mp_folder)
+        if not newest:
+            # never "the game's choice": game.load without a file opens the main slot (older than the autosaves)
+            raise GameError(f"the game doesn't list the multiplayer save ({mp['folder']})")
+        log.info("loading %s: its newest slot %s", mp["folder"], newest)
+        await self.g(self.game.call, "game.load", folder=mp["folder"], file=newest)
 
     def newest_slot_file(self, folder: str) -> str | None:
         """The newest slot of a save folder (an autosave is often newer than the main slot, and game.load without a

@@ -227,5 +227,21 @@ async def main():
     print("multiplayer save tests passed")
 
 
+def moved_folder_rules():
+    """The game wrote the multiplayer save into a new folder (and dropped the old one from its list): the newer folder
+    of the same save and character is it; never the original it was copied from, never while the old one is listed."""
+    import companion as c
+    mp = {"folder": "20261031-143721", "name": "Oliveira (Arthur Oliveira, multiplayer copy)", "copied_from": "20261030-135916"}
+    new = {"folder": "20261031-180214", "slot": "Oliveira_AutoSave_1", "first_name": "Arthur", "last_name": "Oliveira"}
+    orig = dict(new, folder="20261030-135916", slot="Oliveira")
+    other = dict(new, folder="20261101-000000", slot="Lima")
+    assert c.moved_mp_save(new, mp, {new["folder"], orig["folder"]})
+    assert not c.moved_mp_save(new, mp, {new["folder"], mp["folder"]}), "the old folder is still listed"
+    assert not c.moved_mp_save(orig, mp, {orig["folder"]}), "the original it was copied from"
+    assert not c.moved_mp_save(other, mp, {other["folder"]}), "another save"
+    print("  ok: the multiplayer save found again in the new folder the game wrote it to")
+
+
 if __name__ == "__main__":
+    moved_folder_rules()
     asyncio.run(main())
