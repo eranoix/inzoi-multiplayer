@@ -243,5 +243,5 @@ def moved_folder_rules():
 
 
 if __name__ == "__main__":
-    moved_folder_rules()
     asyncio.run(main())
+    moved_folder_rules()                    # (after main: companion was imported with a temporary APPDATA)
