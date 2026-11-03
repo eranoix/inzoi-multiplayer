@@ -152,16 +152,7 @@ local function split_ints(s)
     return out
 end
 
-local function restore(r)
-    local rig = r.rig
-    r.rig = nil
-    if not rig then return end
-    pcall(function()
-        for name, c in pairs(rig.followers) do c:SetLeaderPoseComponent(rig.orig[c] or nil, true, false) end
-        for _, L in pairs(rig.leaders) do L:SetVisibility(true, false) end
-        for _, pm in pairs(rig.poseables) do pm:K2_DestroyComponent(pm) end
-    end)
-end
+local restore              -- (defined below clean_actor, which it uses)
 
 local function asset_name(c)
     local ok, a = pcall(function() return c:GetSkinnedAsset() end)
@@ -192,6 +183,20 @@ local function clean_actor(actor)
     end
     for _, L in pairs(own) do pcall(function() L:SetVisibility(true, false) end) end
     return n
+end
+
+-- The Zoi given back to the game. Every step on its own: one that fails (a mesh the game just replaced - a new look, new
+-- clothes) mustn't leave the rest undone - that left the frozen poseable head on screen with the hair following the
+-- game's own hidden head (bald, the hair floating where the game's own pose had it). Then whatever is still left of the
+-- rig on the actor goes too (clean_actor).
+restore = function(r)
+    local rig = r.rig
+    r.rig = nil
+    if not rig then return end
+    for _, c in pairs(rig.followers) do pcall(function() c:SetLeaderPoseComponent(rig.orig[c] or nil, true, false) end) end
+    for _, L in pairs(rig.leaders) do pcall(function() L:SetVisibility(true, false) end) end
+    for _, pm in pairs(rig.poseables) do pcall(function() pm:K2_DestroyComponent(pm) end) end
+    pcall(clean_actor, rig.actor)
 end
 
 -- Once per run of this script: what an earlier run left on any Zoi goes (clean_actor).
