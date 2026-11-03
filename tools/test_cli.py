@@ -97,7 +97,7 @@ def main():
           environment_get_simulation={"time_scale": 3, "is_paused": True},
           environment_get_state={"season": "Fall", "weather": "Rain"})
     assert g.possessed() == 42
-    assert g.clock() == (7, 30, 3, True)                    # speed/pause from get_simulation
+    assert g.clock() == (7, 30, 3, True, 3)                 # speed/pause from get_simulation; the day from get_time
     assert g.environment()["season"] == "Fall"
     assert len([c for c in FAKE.calls if c[1] == "cli_list"]) == 1      # cached
     assert g.has_cli("environment.time_speed") and not g.has_cli("appearance.export")
@@ -119,7 +119,7 @@ def main():
 
     # get_time carrying speed/pause itself: no get_simulation needed
     reset(environment_get_time={"hour": 1, "minute": 2, "time_scale": 2, "paused": False})
-    assert g.clock() == (1, 2, 2, False) and not tools_called("environment_get_simulation")
+    assert g.clock() == (1, 2, 2, False, None) and not tools_called("environment_get_simulation")
 
     # --- CLI errors / odd answers: legacy path
     reset(entity_get_possessed="error")
@@ -148,7 +148,7 @@ def main():
     FAKE.listing = None
     g = game.Game(url)
     reset(entity_get_possessed={"entity_id": 11}, environment_get_time={"hour": 5, "minute": 6, "time_scale": 1})
-    assert g.possessed() == 11 and g.clock() == (5, 6, 1, False)
+    assert g.possessed() == 11 and g.clock() == (5, 6, 1, False, None)
     assert g.cli_list() == set()
     assert len([c for c in FAKE.calls if c[1] == "cli_list"]) == 1
     # ...but tools/list alone is enough to know a command exists

@@ -290,13 +290,14 @@ class Game:
             raise GameError(f"no possessed Zoi ({e!r})") from None
 
     def clock(self) -> tuple:
-        """(hour, minute, speed, paused) of the game's clock."""
+        """(hour, minute, speed, paused, day) of the game's clock (day: the game's day count, None if not told)."""
         # CLI: environment.get_time -> hour, minute, day (CLI_DOCS + "environment/environment-get-time"). Speed and
         # pause are documented on environment.get_simulation (CLI_DOCS + "environment/environment-get-simulation"):
         # read from there when get_time doesn't carry them.
         def attempt():
             c = self.cli("environment.get_time")
             h, m = int(c["hour"]), int(c["minute"])
+            day = int(c["day"]) if isinstance(c.get("day"), (int, float)) else None
             speed, paused = c.get("time_scale"), c.get("paused")
             if (speed is None or paused is None) and self.has_cli("environment.get_simulation"):
                 sim = self.cli("environment.get_simulation")
@@ -304,13 +305,14 @@ class Game:
                     speed = next((sim[k] for k in ("time_scale", "time_speed", "speed") if k in sim), None)
                 if paused is None:
                     paused = next((sim[k] for k in ("paused", "is_paused") if k in sim), None)
-            return h, m, 1 if speed is None else speed, bool(paused)
+            return h, m, 1 if speed is None else speed, bool(paused), day
         return self._cli_or(self._clock_legacy, attempt)
 
     def _clock_legacy(self) -> tuple:
         c = self.call("environment.get_time")
         try:
-            return int(c["hour"]), int(c["minute"]), c.get("time_scale", 1), bool(c.get("paused"))
+            day = int(c["day"]) if isinstance(c.get("day"), (int, float)) else None
+            return int(c["hour"]), int(c["minute"]), c.get("time_scale", 1), bool(c.get("paused")), day
         except (KeyError, TypeError, ValueError, AttributeError) as e:
             raise GameError(f"odd clock ({e!r})") from None
 

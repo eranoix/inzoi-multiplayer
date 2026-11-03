@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.47"
+VERSION = "0.9.48"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -693,7 +693,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                              "(or close it first).") from None
         self.tasks = [asyncio.create_task(self.keep_running(loop)) for loop in (
             self.game_loop, self.act_loop, self.mailbox_loop, self.mods_loop, self.update_loop, self.menu_loop, self.directory_loop,
-            self.ingame_loop, self.lan_loop, self.pose_loop, self.shared_loop, self.objsync_loop)]
+            self.ingame_loop, self.lan_loop, self.pose_loop, self.shared_loop, self.objsync_loop,
+            self.answer_loop)]
         backoff = 2
         while True:
             self.wake.clear()
@@ -1522,7 +1523,10 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     if tick % 15 == 3 and world == "play":
                         await self.sync_world()
                     self.n += 1
-                    clock = list(self.my_clock[:2]) if self.my_clock and world == "play" else None
+                    # [hour, minute, day]: the day too, so a game a whole day behind isn't taken for one a little
+                    # ahead (older programs read only the first two)
+                    clock = (list(self.my_clock[:2]) + ([self.my_clock[4]] if len(self.my_clock) > 4
+                             and self.my_clock[4] is not None else [])) if self.my_clock and world == "play" else None
                     self.state_base = {"act": act, "anim": anim, "outfit": outfit, "clock": clock,
                                        "sleep": self.sleeping, **self.extra_state(st)}
                     self.sending_state = True
@@ -2611,7 +2615,26 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         if not lc:
             return                                       # the leader is paused, away or not in the game
         mine, theirs = self.my_clock[0] * 60 + self.my_clock[1], lc[0] * 60 + lc[1]
-        d = (theirs - mine) % 1440
+        my_day = self.my_clock[4] if len(self.my_clock) > 4 else None
+        their_day = lc[2] if len(lc) > 2 and isinstance(lc[2], (int, float)) else None
+        if my_day is not None and their_day is not None:
+            # both days known: the whole difference (a game a day behind is a day behind, not a little ahead)
+            total = (int(their_day) * 1440 + theirs) - (int(my_day) * 1440 + mine)
+            if total >= CLOCK_SLACK:
+                days, rest = divmod(total, 1440)
+                log.info("following the host's time: %s%d minutes forward", f"{days} day(s) and " if days else "", rest)
+                await self.g(self.game.call, "environment.time_skip", minutes=int(total))
+                return
+            if total > -CLOCK_SLACK:
+                return
+            if int(my_day) != int(their_day):            # (a day or more ahead: no way back across midnight - the
+                if self.__dict__.get("_ahead_said") != their_day:   # host's clock comes to it)
+                    self._ahead_said = their_day
+                    log.info("this game is a day or more ahead of the host's: waiting for the host's time")
+                return
+            d = (theirs - mine) % 1440                   # (ahead on the same day: back to the host's time, below)
+        else:
+            d = (theirs - mine) % 1440
         if CLOCK_SLACK <= d < 720:
             log.info("following the host's time: %d minutes forward", d)
             await self.g(self.game.call, "environment.time_skip", minutes=d)

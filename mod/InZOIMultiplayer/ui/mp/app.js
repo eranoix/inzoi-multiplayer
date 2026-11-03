@@ -667,7 +667,7 @@
     // ------------------------------------------------------------------ the couple: partner card, hugs and kisses,
     // invitations, requests from the partner. Everything updated in place, like the player rows.
     var N = function (s) { return s; };             // marks an English text as a translation key (i18n.js has it)
-    var REQ_LIFE = 90;                              // seconds a request stays open (the companion's limit)
+    var REQ_LIFE = 5;                               // seconds to answer: then the companion accepts it (couple.py)
     var ERRORS = {
         no_partner: N("Your partner isn't online right now."),
         no_pending: N("No house from your partner waiting to be applied."),
@@ -781,7 +781,7 @@
 
             }
             setText(r.text, t(ASKS[q.action] || N('{name} sent you a request'), { name: q.from, what: q.label ? I.tr(q.label) : '' }));
-            setText(r.left, t('{n} seconds left to answer', { n: left }));
+            setText(r.left, t('{n} s to answer, then it is accepted', { n: Math.max(0, left) }));
             setText(r.yes, t('Accept'));
             setText(r.no, t('Decline'));
             setText(r.always, t('Always accept'));

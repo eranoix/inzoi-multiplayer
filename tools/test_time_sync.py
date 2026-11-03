@@ -172,6 +172,31 @@ async def main():
     await comp.keep_speed()
     assert not commands(g, "environment.time_speed") and not commands(g, "environment.resume"), g.sent
 
+    # Following the host's clock with the day (seen: a game a whole day behind, at about the same hour, was taken for
+    # one 17 minutes ahead and set back, staying a day behind for good): the whole difference counts.
+    def follower(hour, minute, day, host_clock):
+        g = StandIn(hour, minute)
+        comp, _ = make(g)
+        comp.cfg["clock_mode"] = "host"
+        comp.my_clock = (hour, minute, 1.0, False, day)
+        friend(comp, "host", host_clock)
+        return g, comp
+    g, comp = follower(18, 2, 1046, [17, 45, 1047])           # a day behind (17 min "ahead" on the dial)
+    await comp.follow_leader_clock()
+    assert commands(g, "environment.time_skip") == [{"minutes": 1440 - 17}] and not commands(g, "environment.set_time")
+    g, comp = follower(18, 2, 1047, [17, 45, 1047])           # ahead on the same day: back to the host's time
+    await comp.follow_leader_clock()
+    assert commands(g, "environment.set_time") == [{"hour": 17, "minute": 45}] and not commands(g, "environment.time_skip")
+    g, comp = follower(10, 0, 1048, [17, 45, 1047])           # a day ahead: no way back across midnight - waits
+    await comp.follow_leader_clock()
+    assert not commands(g, "environment.time_skip") and not commands(g, "environment.set_time")
+    g, comp = follower(17, 44, 1047, [17, 45, 1047])          # within the slack: left alone
+    await comp.follow_leader_clock()
+    assert not g.sent
+    g, comp = follower(9, 0, 1047, [9, 40])                   # a host that doesn't send the day (older program)
+    await comp.follow_leader_clock()
+    assert commands(g, "environment.time_skip") == [{"minutes": 40}]
+
     # A friend whose game isn't running (no fresh state) doesn't count.
     g = StandIn(9, 0, speed=3)
     comp, _ = make(g)

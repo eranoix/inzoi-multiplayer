@@ -29,6 +29,7 @@ os.environ.pop("INZOI_MP_SHARED_WORLD", None)
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "client"), str(ROOT / "server"), str(ROOT / "tools")]
 import companion  # noqa: E402
+import couple  # noqa: E402
 import saves  # noqa: E402
 import world  # noqa: E402
 
@@ -190,6 +191,7 @@ async def test_couple():
     ana.on_report("social", f"{res['id']} ok")
     assert (await ana_routes["/status"]({}))["couple"]["sent"][-1]["state"] == "done"
     assert not (await ben_routes["/status"]({}))["requests"], "answered requests stay listed"
+
 
     # --- learned ids: Ben's Zoi hugs Ana's puppet for real, and Ana's own Zoi dances
     ana.on_report("up", f"{ben.me_id}=77")
@@ -555,6 +557,22 @@ async def test_couple():
     assert saves.list_backups(FOLDER)[0]["reason"] == "before-undo"
     assert (await ana_routes["/world/backups"]({}))["backups"][0]["reason"] == "before-undo"
     print("shared household: ok")
+
+    # --- nobody answers: after couple.ANSWER_WITHIN seconds the request is accepted by itself (away from the keyboard,
+    # the panel closed: the partner isn't held up)
+    keep_within, couple.ANSWER_WITHIN = couple.ANSWER_WITHIN, 0.5
+    ana.world = ben.world = "play"
+    auto = asyncio.create_task(ben.answer_loop())
+    try:
+        res2 = await ana_routes["/partner/action"]({"action": "hug"})
+        assert res2.get("ok"), res2
+        assert await until(lambda: ben.requests)
+        assert await until(lambda: not ben.requests, 5), "an unanswered request wasn't accepted by itself"
+        assert await until(lambda: ana.sent[res2["id"]]["state"] in ("accepted", "started", "done"), 5), ana.sent[res2["id"]]
+    finally:
+        auto.cancel()
+        couple.ANSWER_WITHIN = keep_within
+    print("an unanswered request is accepted by itself after a few seconds: ok")
 
     for t in tasks:
         t.cancel()

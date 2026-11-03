@@ -285,6 +285,7 @@
         '{name} invited you to their home': '{name} te convidou para a casa dele(a)',
         '{name} sent you a request': '{name} te mandou um pedido',
         '{n} seconds left to answer': 'Faltam {n} segundos para responder',
+        '{n} s to answer, then it is accepted': 'Faltam {n} s - se não responder, é aceito',
         'Accept': 'Aceitar',
         'Decline': 'Recusar',
         'You said yes!': 'Você aceitou!',

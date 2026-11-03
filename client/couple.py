@@ -58,7 +58,8 @@ GROUPS = (
 GROUP_ORDER = ("romance", "fun", "friendship", "talk", "business", "conflict")
 FAMILY_LINES = {"movein": "You live together now", "engage": "You're engaged!", "marry": "You're married!",
                 "baby": "A baby is on the way!"}
-REQUEST_TTL = 90                           # seconds a request can be answered
+REQUEST_TTL = 90                           # seconds a request sent stays open on the sender's side
+ANSWER_WITHIN = 5                          # seconds to answer a request here: not answered by then, it's accepted
 MAX_PENDING = 20
 BAG_ID = re.compile(r"^(anim:)?[A-Za-z0-9_]{1,80}$")
 # Unverified guesses for doing it alone (no list of the game's interaction ids is available offline).
@@ -195,6 +196,22 @@ class Couple:
                     log.info("learned the %s interaction: %s", action, bag)
                     self.save_cfg()
                 return
+
+    async def answer_loop(self):
+        """A request nobody answered within ANSWER_WITHIN seconds is accepted (the couple plays together: a popup left
+        alone - away from the keyboard, the panel closed - shouldn't hold the partner up)."""
+        while True:
+            await asyncio.sleep(1)
+            try:
+                now = time.time()
+                for rid, q in list(self.requests.items()):
+                    if now - q["at"] >= ANSWER_WITHIN and not q.get("auto"):
+                        q["auto"] = True
+                        log.info("%s's request wasn't answered in %d s: accepted (%s %s)", q.get("from"),
+                                 ANSWER_WITHIN, q.get("action"), q.get("bag") or "")
+                        asyncio.get_running_loop().create_task(self.couple_respond(rid, True))
+            except Exception as e:                       # noqa: BLE001 - never worth stopping the loop
+                log.debug("answer loop: %s", e)
 
     def prune_requests(self):
         now = time.time()
