@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.53"
+VERSION = "0.9.54"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -2613,11 +2613,13 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         return r.state if r and r.state and time.time() - r.state_at < 10 else None
 
     async def follow_leader_clock(self):
-        """clock_mode "host", not the leader: behind the leader's clock, jump forward to it; ahead of it on the same
-        day (the leader paused), go back to it. Never across midnight backwards (that would be a day earlier): wait."""
+        """clock_mode "host", not the leader: behind the leader's clock (weekday and time), jump forward to it; ahead of
+        it, go back to it exactly (this save's day, rewinding). Once per clock reading."""
         lc = (self.leader_state() or {}).get("clock")
         if not lc:
             return                                       # the leader is paused, away or not in the game
+        if time.time() - self.__dict__.get("_clock_set_at", 0) < 3:
+            return                                       # (just set: my clock is read again first - else set twice)
         mine, theirs = self.my_clock[0] * 60 + self.my_clock[1], lc[0] * 60 + lc[1]
         my_day = self.my_clock[4] if len(self.my_clock) > 4 else None
         their_day = lc[2] if len(lc) > 2 and isinstance(lc[2], (int, float)) else None
@@ -2628,32 +2630,28 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             week = 7 * 1440
             d_week = ((int(their_day) % 7) * 1440 + theirs - (int(my_day) % 7) * 1440 - mine) % week
             total = d_week if d_week < week // 2 else d_week - week
-            if total >= CLOCK_SLACK:
+            if abs(total) < CLOCK_SLACK:
+                return
+            if total > 0:
                 days, rest = divmod(total, 1440)
                 log.info("following the host's time: %s%d minutes forward", f"{days} day(s) and " if days else "", rest)
+                self._clock_set_at = time.time()
                 await self.g(self.game.call, "environment.time_skip", minutes=int(total))
                 return
-            if total > -CLOCK_SLACK:
-                return
-            if int(my_day) % 7 != int(their_day) % 7:    # (a day or more ahead: no way back across midnight - the
-                if self.__dict__.get("_ahead_said") != their_day:   # host's clock comes to it)
-                    self._ahead_said = their_day
-                    log.info("this game is a day or more ahead of the host's: waiting for the host's time")
-                return
-            d = (theirs - mine) % 1440                   # (ahead on the same day: back to the host's time, below)
-        else:
-            d = (theirs - mine) % 1440
+            # Ahead: back to the host's time exactly - on this save's own day count, rewinding (set_time with only an
+            # hour moves FORWARD to the next such hour: it put this game a whole day ahead, seen).
+            day, rest = divmod(int(my_day) * 1440 + mine + total, 1440)
+            log.info("following the host's time: %d minutes back (to %02d:%02d)", -total, rest // 60, rest % 60)
+            self._clock_set_at = time.time()
+            await self.g(self.game.call, "environment.set_time", Day=int(day), Hour=int(rest // 60), Minute=int(rest % 60),
+                         allow_rewind=True)
+            return
+        # (a host that doesn't send its day - an older program: forward only; set_time without a day can't go back)
+        d = (theirs - mine) % 1440
         if CLOCK_SLACK <= d < 720:
             log.info("following the host's time: %d minutes forward", d)
+            self._clock_set_at = time.time()
             await self.g(self.game.call, "environment.time_skip", minutes=d)
-        elif d >= 720 and mine - theirs >= CLOCK_SLACK and not self.__dict__.get("_no_set_time"):
-            log.info("following the host's time: back to %02d:%02d", lc[0], lc[1])
-            try:
-                await self.g(self.game.call, "environment.set_time", hour=int(lc[0]), minute=int(lc[1]))
-            except GameError as e:
-                if "isn't reachable" not in str(e):
-                    self._no_set_time = True             # (this game has no way back: wait for the host instead)
-                    log.info("this game can't turn its clock back (%s): waiting for the host's time", e)
 
     async def follow_leader_speed(self):
         st, clock = self.leader_state(), self.my_clock

@@ -184,12 +184,16 @@ async def main():
     g, comp = follower(18, 2, 1046, [17, 45, 1047])           # a day behind (17 min "ahead" on the dial)
     await comp.follow_leader_clock()
     assert commands(g, "environment.time_skip") == [{"minutes": 1440 - 17}] and not commands(g, "environment.set_time")
-    g, comp = follower(18, 2, 1047, [17, 45, 1047])           # ahead on the same day: back to the host's time
+    # ahead: back to the host's time exactly, on this save's day, rewinding (an hour alone moves FORWARD a day: seen)
+    g, comp = follower(18, 2, 1047, [17, 45, 1047])
     await comp.follow_leader_clock()
-    assert commands(g, "environment.set_time") == [{"hour": 17, "minute": 45}] and not commands(g, "environment.time_skip")
-    g, comp = follower(10, 0, 1048, [17, 45, 1047])           # a day ahead: no way back across midnight - waits
+    assert commands(g, "environment.set_time") == [{"Day": 1047, "Hour": 17, "Minute": 45, "allow_rewind": True}], g.sent
+    assert not commands(g, "environment.time_skip")
+    g, comp = follower(10, 0, 1048, [17, 45, 1047])           # a day ahead: back to the host's day too
     await comp.follow_leader_clock()
-    assert not commands(g, "environment.time_skip") and not commands(g, "environment.set_time")
+    assert commands(g, "environment.set_time") == [{"Day": 1047, "Hour": 17, "Minute": 45, "allow_rewind": True}], g.sent
+    await comp.follow_leader_clock()                          # (asked again before the clock is read: not set twice)
+    assert len(commands(g, "environment.set_time")) == 1
     g, comp = follower(17, 44, 1047, [17, 45, 1047])          # within the slack: left alone
     await comp.follow_leader_clock()
     assert not g.sent
@@ -200,9 +204,9 @@ async def main():
     g, comp = follower(18, 2, 1059, [17, 45, 1018])           # a weekday behind on its own count: forward a day
     await comp.follow_leader_clock()
     assert commands(g, "environment.time_skip") == [{"minutes": 1440 - 17}], g.sent
-    g, comp = follower(18, 2, 1060, [17, 45, 1018])           # ahead on the same weekday: back to the host's time
+    g, comp = follower(18, 2, 1060, [17, 45, 1018])           # ahead on the same weekday: back, on this save's day
     await comp.follow_leader_clock()
-    assert commands(g, "environment.set_time") == [{"hour": 17, "minute": 45}], g.sent
+    assert commands(g, "environment.set_time") == [{"Day": 1060, "Hour": 17, "Minute": 45, "allow_rewind": True}], g.sent
     g, comp = follower(9, 0, 1047, [9, 40])                   # a host that doesn't send the day (older program)
     await comp.follow_leader_clock()
     assert commands(g, "environment.time_skip") == [{"minutes": 40}]
