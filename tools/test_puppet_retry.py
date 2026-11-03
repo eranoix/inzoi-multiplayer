@@ -135,6 +135,15 @@ async def main():
         comp.mail.op = lambda name, **f: ops.append((name, f))
         comp.set_state(r, {"x": 1, "y": 2, "z": 3, "act": act, "anim": "A1", "outfit": "Sleep"})
         assert ("outfit", {"key": "p1", "category": "Sleep"}) in ops, (act, ops)
+    # This save's copy of them (adopted family member) takes their look as their game has it: when it's adopted, and
+    # when their profile changes (a haircut, aging: their own game's look under their skeleton)
+    comp, r = make()
+    r.adopted, r.profile_hash = True, "h1"
+    ops = []
+    comp.mail.op = lambda name, **f: ops.append((name, f))
+    comp.on_report("spawned", "p1 5")
+    assert ("relook", {"key": "p1"}) in ops, ops
+    print("an adopted partner's Zoi takes their current look: ok")
     print("puppet retry tests passed")
 
 

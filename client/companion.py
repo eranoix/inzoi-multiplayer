@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.50"
+VERSION = "0.9.51"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -1072,6 +1072,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         if r.spawned and not first and not r.adopted:    # their copy really changed (new look...): rebuild it
             self.despawn(r.pid)
             r.spawned = False
+        elif r.adopted and r.pid in self.puppet_ids:     # (their family member here takes their look as it is now)
+            self.mail.op("relook", key=r.pid)
         log.info("got %s's Zoi: %s %s (%s)", r.name, profile.get("first_name"), profile.get("last_name"),
                  profile.get("gender"))
 
@@ -1417,6 +1419,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     r.seen_at = time.time()
                     if not r.adopted:                # (a family member keeps the game's own relationship)
                         asyncio.get_running_loop().create_task(self.g(self.bond_puppet, int(eid)))   # (couple.py)
+                    elif r.profile_hash:             # (it's this save's copy of them: their look as it is now)
+                        self.mail.op("relook", key=key)
         elif kind == "despawned":
             key = text.split(" ", 1)[0]
             self.puppet_ids.pop(key, None)

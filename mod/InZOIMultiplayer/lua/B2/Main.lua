@@ -888,6 +888,22 @@ local OPS = {
         if p.pose then stop_direct(char(p.id)) end
         return nil
     end,
+    -- {key}: a Zoi of this save stands for that player (adopted: their family member here): it takes their look as
+    -- their own game has it (hair, face, body, age's look...: their profile from MPBulk), which this save's copy of them
+    -- doesn't follow by itself - a haircut, aging, a new style there showed here as the old look under their skeleton
+    relook = function(op)
+        local p, member = PUPPETS[op.key], S.members[op.key]
+        if not p or not member then return nil end
+        local look = member.AppearanceSetting
+        if type(look) ~= "table" then return "no look in " .. op.key .. "'s profile" end
+        local AC = INZOI.FB2AppearanceComponent
+        local comp = char(p.id):GetComponent(inzoi.EB2ComponentType.Appearance)
+        local setting = comp.AppearanceSetting
+        fill(setting, look, "Look")
+        AC.SetAppearanceSetting(comp, setting)
+        pcall(AC.RefreshAppearance, comp)
+        return "look of " .. op.key .. " applied: " .. build_report()
+    end,
     -- {key, on}: that player's skeleton frames come in (on) or stopped: the puppet is put where they are every tick
     -- instead of walking there (drive)
     skel = function(op)
