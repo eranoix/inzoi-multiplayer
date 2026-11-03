@@ -9,6 +9,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import inzoi_mp_server as mp  # noqa: E402
 
+mp.LINGER = 0.3        # (a dropped player lingers before "left": tools/test_server_linger.py tests that part at full length)
+
 
 class Fake:
     def __init__(self, port, name, key=None, password="", **extra):
@@ -107,9 +109,9 @@ async def run():
         await b.send({"t": "who"})
         assert sorted(p["name"] for p in (await b.expect("who"))["players"]) == ["Ana", "Ben"]   # no left/joined between
 
-        # Leader hand-off when the leader disconnects.
+        # Leader hand-off when the leader disconnects (after the linger).
         a2.w.close()
-        assert (await b.expect("left"))["id"] == wa["id"]
+        assert (await b.expect("left", timeout=3))["id"] == wa["id"]
         assert (await b.expect("leader"))["id"] == wb["id"]
 
         b.w.close()
@@ -447,14 +449,49 @@ async def mods_hosted():
         await srv.wait_closed()
 
 
+def tcp_and_udp_port():
+    """A loopback port number free for both TCP and UDP. Port 0 isn't enough here: the kernel picks a free TCP port and
+    start() then binds UDP on the same number, but Windows (Hyper-V/WinNAT) reserves blocks of UDP ports, so a TCP
+    ephemeral port can fall in one and the UDP bind fails with WSAEACCES (start() then rightly turns LAN discovery
+    off, which this test isn't about). A port the kernel hands out for UDP is outside those blocks; TCP is then tried
+    on it."""
+    import socket
+    for _ in range(50):
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            u.bind(("127.0.0.1", 0))
+            port = u.getsockname()[1]
+            t.bind(("127.0.0.1", port))
+        except OSError:
+            continue
+        finally:
+            u.close()
+            t.close()
+        if port not in (24242, 24243):            # (never the user's own server and app on this machine)
+            return port
+    raise AssertionError("no loopback port free for both TCP and UDP")
+
+
 async def lan_discovery():
     """start() (every way of hosting) also answers b"INZOI-MP?" on UDP, same port; stopping its tasks closes it."""
     import argparse
     import socket
     with tempfile.TemporaryDirectory() as tmp:
-        args = argparse.Namespace(host="127.0.0.1", port=0, password="pw", motd=None, max_players=None, data=tmp,
-                                  hosted=False, name="Casa")
-        srv, tasks = await mp.start(args)
+        for _ in range(5):
+            # The port is let go before start() takes it, so another program could grab it in between (TCP: start()
+            # fails; UDP: LAN discovery is off): then again with another one.
+            args = argparse.Namespace(host="127.0.0.1", port=tcp_and_udp_port(), password="pw", motd=None,
+                                      max_players=None, data=tmp, hosted=False, name="Casa")
+            try:
+                srv, tasks = await mp.start(args)
+            except OSError:
+                continue
+            if srv.mp_server.udp is not None:
+                break
+            await mp.stop(srv, tasks)
+        else:
+            raise AssertionError("start() never got the UDP port for LAN discovery")
         server = srv.mp_server
         assert server.udp is not None
         loop = asyncio.get_running_loop()

@@ -77,11 +77,81 @@ def commands(game, name):
     return [kw for n, kw in game.sent if n == name]
 
 
+def tcp_and_udp_port():
+    """A loopback port number free for both TCP and UDP. Port 0 isn't enough: the kernel picks a free TCP port and
+    start() binds UDP on the same number, but Windows (Hyper-V/WinNAT) reserves blocks of UDP ports (and others of TCP
+    ports), so about 1 start in 4 got WSAEACCES and LAN discovery was off. Each candidate is tried with both. The
+    kernel hands its ports out in sequence, so its picks can sit in a run of reserved blocks for hundreds of tries
+    (63866-64944 for UDP here; server/test_server.py's UDP-first pick has the same trouble with TCP's 57319-57987):
+    every other candidate is a random one from the dynamic range instead."""
+    import random
+    import socket
+    for i in range(400):
+        t = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            t.bind(("127.0.0.1", 0 if i % 2 == 0 else random.randint(49152, 65535)))
+            port = t.getsockname()[1]
+            u.bind(("127.0.0.1", port))
+        except OSError:
+            continue
+        finally:
+            t.close()
+            u.close()
+        if port not in (24242, 24243):            # (never the user's own server and app on this machine)
+            return port
+    raise AssertionError("no loopback port free for both TCP and UDP")
+
+
 async def start_server(name="Casa", password=""):
-    args = argparse.Namespace(host="127.0.0.1", port=0, password=password, motd=None, max_players=None,
-                              data=tempfile.mkdtemp(), hosted=False, name=name)
-    srv, tasks = await mp.start(args)
-    return srv, tasks, srv.mp_server
+    """A relay server on loopback with LAN discovery on (lan() needs it)."""
+    data = tempfile.mkdtemp()
+    for _ in range(5):
+        # The port is let go before start() takes it, so another program could grab it in between (TCP: start()
+        # fails; UDP: LAN discovery is off): then again with another one.
+        args = argparse.Namespace(host="127.0.0.1", port=tcp_and_udp_port(), password=password, motd=None,
+                                  max_players=None, data=data, hosted=False, name=name)
+        try:
+            srv, tasks = await mp.start(args)
+        except OSError:
+            continue
+        if srv.mp_server.udp is not None:
+            return srv, tasks, srv.mp_server
+        await mp.stop(srv, tasks)
+    raise AssertionError("start() never got a port with LAN discovery on")
+
+
+async def ports():
+    """start_server() always hosts with LAN discovery on (port 0 left it off about 1 start in 4 on Windows, and lan()
+    then failed with found == []), never on the user's own ports."""
+    import socket
+    global tcp_and_udp_port
+    for _ in range(20):
+        srv, tasks, server = await start_server()
+        assert server.udp is not None and server.port not in (0, 24242, 24243), server.port
+        await mp.stop(srv, tasks)
+    for _ in range(200):
+        port = tcp_and_udp_port()
+        assert 0 < port and port not in (24242, 24243), port
+
+    # The UDP port is taken between the pick and start() (as a reserved block does): LAN discovery would be off, so
+    # start_server() hosts again on another port.
+    held = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    held.bind(("127.0.0.1", 0))
+    taken, real, picks = held.getsockname()[1], tcp_and_udp_port, []
+
+    def pick():
+        picks.append(taken if not picks else real())
+        return picks[-1]
+    tcp_and_udp_port = pick
+    try:
+        srv, tasks, server = await start_server()
+    finally:
+        tcp_and_udp_port = real
+        held.close()
+    assert len(picks) == 2 and server.port == picks[1] != taken and server.udp is not None, (picks, server.port)
+    await mp.stop(srv, tasks)
+    print("server port tests passed")
 
 
 async def lan():
@@ -280,6 +350,7 @@ async def selftest_and_diag():
 
 
 async def main():
+    await ports()
     await lan()
     await clock()
     await cards()

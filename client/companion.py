@@ -20,11 +20,13 @@ import datetime
 import json
 import logging
 import os
+import random
 import re
 import secrets
 import sys
 import threading
 import time
+import weakref
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -50,10 +52,17 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.38"
+VERSION = "0.9.39"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
+SILENT_FOR = 45               # s without a byte from the server before it counts as gone (it pings every 15 s)
+CONNECT_WITHIN = 20           # s for the connection to the server to be made before trying again
+MAX_LINE = 32 * 1024 * 1024   # bytes one message from the server may take (a welcome carries its whole shared state)
+SEND_STALL = 30               # s the server may take nothing of what this PC sends before the connection counts as dead
+PIECE = 64 * 1024             # bytes: a bigger message goes out in pieces, each once the link took the one before
+SESSION_OK = 5                # s a session must have lasted after its welcome for a drop to be retried at once
+LATEST_ORDER = {"pose:k": 0, "pose:d": 1, "state": 2}     # send_latest: a skeleton keyframe before the delta needing it
 CONFIG_DIR = Path(os.environ.get("APPDATA", Path.home())) / "inzoi-mp"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 SERVER_DATA = CONFIG_DIR / "server"         # a server hosted by this program keeps its data here
@@ -123,6 +132,11 @@ def moved_mp_save(entry: dict, mp: dict, listed: set) -> bool:
     return bool(folder) and mp.get("folder") not in listed and folder > str(mp.get("folder") or "")         and folder != mp.get("copied_from") and same_save(entry, mp_identity(mp))
 
 
+def encode(msg: dict) -> bytes:
+    """One message as the server reads it: a line of JSON."""
+    return (json.dumps(msg, separators=(",", ":")) + "\n").encode()
+
+
 def size_text(n: int) -> str:
     return f"{n / 1048576:.1f} MB" if n < 100 * 1048576 else f"{n / 1073741824:.2f} GB" if n > 1073741824 \
         else f"{n // 1048576} MB"
@@ -150,6 +164,24 @@ def first_run_setup(cfg: dict, ask_server: bool = True):
 _loop_errors = {}
 
 
+class Link:
+    """What this program writes to one connection to the server: the lock held while a message goes out in pieces
+    (nothing may be written in the middle of one), the small messages waiting for it (write_soon), and every byte
+    written so far: minus what still waits in the transport, that's what the system has taken (drain's progress)."""
+    __slots__ = ("lock", "soon", "written")
+
+    def __init__(self):
+        self.lock, self.soon, self.written = asyncio.Lock(), [], 0
+
+
+def drop_connection(fut: asyncio.Future):
+    """Done callback of a connection attempt given up on: a connection it made anyway is closed at once (and an error
+    it ended with is taken, so it isn't reported as never retrieved)."""
+    if fut.cancelled() or fut.exception() is not None:
+        return
+    fut.result()[1].transport.abort()
+
+
 def loop_error(where: str, e: BaseException):
     """Something unexpected in a long-running loop: logged (with the traceback at most once a minute per loop), and
     the loop carries on."""
@@ -159,6 +191,37 @@ def loop_error(where: str, e: BaseException):
         log.warning("%s: unexpected error, carrying on: %r", where, e, exc_info=e)
     else:
         log.debug("%s: %r", where, e)
+
+
+class ServerLines:
+    """The server's messages, one line each, read off the connection. The server counts as gone only once nothing at
+    all came from it for SILENT_FOR s, not when one line takes longer than that: the welcome carries the whole shared
+    state (up to 16 MB: two exact houses are about 8), which over a Tailscale relay at 150 KB/s takes a minute, and a
+    timeout per line would cut it there and download it again on every retry, never joining."""
+
+    def __init__(self, reader: asyncio.StreamReader, cap: int):
+        self.reader, self.cap, self.buf, self.scanned = reader, cap, bytearray(), 0
+
+    async def next(self, silent_for: float) -> bytes:
+        """The next line (with its newline), or b"" once the server closed the connection. A line already here is
+        returned without waiting, so a burst read in one go is handled before anything else runs (take_state)."""
+        while True:
+            i = self.buf.find(b"\n", self.scanned)
+            if i >= 0:
+                line = bytes(self.buf[:i + 1])
+                del self.buf[:i + 1]
+                self.scanned = 0
+                return line
+            self.scanned = len(self.buf)                 # (what's here has no newline: not searched again)
+            if len(self.buf) > self.cap:
+                raise ConnectionError(f"the server sent a message over {self.cap / (1024 * 1024):.3g} MB")
+            try:                                         # (any byte at all restarts the clock)
+                chunk = await asyncio.wait_for(self.reader.read(1 << 16), silent_for)
+            except asyncio.TimeoutError:
+                raise asyncio.TimeoutError(f"nothing from the server for {silent_for:g} s") from None
+            if not chunk:
+                return b""                               # (a last line without its newline was cut off: moot)
+            self.buf += chunk
 
 
 # ------------------------------------------------------------------ support: what the diagnostics zip carries
@@ -381,6 +444,13 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         self.me_id = None            # my player id on the server
         self.writer = None
         self.connected_at = 0.0
+        self.latest_out: dict[str, dict] = {}   # send_latest: the newest message of each latest-wins stream, waiting
+        self.latest_task = None      # the one task sending them...
+        self.latest_for = None       # ...on this connection (writer)
+        self.links = weakref.WeakKeyDictionary()     # connection (writer) -> its Link (what this program writes to it)
+        self.bubbles: dict[int, str | None] = {}  # entity -> the newest chat line to show over it (show_bubble)
+        self.states_in: dict[str, tuple] = {}    # partner id -> (Remote, newest state) not applied yet (take_state)
+        self.bg_tasks = set()        # background(): tasks kept alive until they end
         self.n = 0                   # my position sample counter
         self.my_city = ""
         self.my_entity = None
@@ -467,11 +537,145 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         return self.cfg.get("server") or "", int(self.cfg.get("port") or 24242), self.cfg.get("password", "")
 
     async def send(self, msg: dict):
+        """A message that must arrive (chat, events, shared changes...): written now (a big one in pieces; after one
+        going out in pieces already), then wait until the connection has room. Raises ConnectionError when the
+        connection is lost or stalls meanwhile (it may not have arrived)."""
         if msg.get("t") == "state":
             self.tele.rec("out", st=msg.get("state"))
-        if self.writer:
-            self.writer.write((json.dumps(msg, separators=(",", ":")) + "\n").encode())
-            await self.writer.drain()
+        w = self.writer
+        if not w:
+            return
+        link, data = self.link_of(w), encode(msg)
+        await link.lock.acquire()                        # (nothing else in the middle of it; in the order sent)
+        out = self.write_then_release(w, data, link)
+        if len(data) <= PIECE:
+            await out                                    # (one piece: written at once, nothing waited for)
+        else:   # in pieces: once begun it's finished, even if this caller stops waiting (or the server reads garbage)
+            await asyncio.shield(self.background(out))
+        await self.drain(w)
+
+    async def write_then_release(self, w, data: bytes, link: Link):
+        """One message of send(), its link's lock acquired: written, then the lock released."""
+        try:
+            await self.write_message(w, data)
+        finally:
+            link.lock.release()
+
+    def link_of(self, w) -> Link:
+        link = self.links.get(w)
+        if link is None:
+            link = self.links[w] = Link()
+        return link
+
+    def write_now(self, w, data: bytes):
+        """Hand whole messages to connection w. Only between messages: holding its link's lock, or while nobody holds
+        it (write_soon)."""
+        self.link_of(w).written += len(data)
+        w.write(data)
+
+    def write_soon(self, w, data: bytes):
+        """A small message that mustn't wait for room (a pong from the reader, a bye): written at once, or, while a
+        big message is going out in pieces, right after it, never in its middle (the same one waiting goes once)."""
+        link = self.link_of(w)
+        if not link.lock.locked():
+            self.write_now(w, data)
+        elif data not in link.soon:
+            link.soon.append(data)
+            if len(link.soon) == 1:
+                self.background(self.write_after(w, link))
+
+    async def write_after(self, w, link: Link):
+        async with link.lock:
+            soon, link.soon = link.soon, []
+            if not w.transport.is_closing():
+                for data in soon:
+                    self.write_now(w, data)
+
+    async def write_message(self, w, data: bytes):
+        """Write one message to connection w, holding its link's lock. A big one goes out in pieces, each once the
+        link has room for it: the system never holds megabytes of it out of sight. (Windows takes a whole write at
+        once while its buffer isn't full, and then nothing shows it moving until nearly all of it has left: drain()
+        would take a slow link for a server taking nothing, and what's sent after it would wait unseen behind it.)"""
+        for i in range(0, len(data), PIECE):
+            if i:
+                await self.drain(w)                      # (raises once the connection is gone)
+            elif w.transport.is_closing():
+                raise ConnectionResetError("the connection closed while sending")
+            self.write_now(w, data[i:i + PIECE])
+
+    async def drain(self, w):
+        """Wait until connection w has room again (at once, unless the link is backed up). A server that takes nothing
+        of what this PC sends for SEND_STALL s is gone: the connection is aborted, which wakes every task waiting here
+        and ends the session's reader, so run() reconnects. What counts is that it keeps taking bytes, not how long
+        everything waiting takes: a slow link (a big shared house over a weak uplink can take minutes) keeps its
+        connection. Raises ConnectionError if w closed meanwhile: what was written may never have left."""
+        t, link = w.transport, self.link_of(w)
+        taken, moved = link.written - t.get_write_buffer_size(), time.monotonic()
+        while True:
+            try:
+                await asyncio.wait_for(w.drain(), min(1.0, SEND_STALL / 4))
+                break
+            except asyncio.TimeoutError:
+                if t.is_closing():
+                    break                                # (closed meanwhile: said below)
+            now = link.written - t.get_write_buffer_size()      # (what the system has taken of all that was written)
+            if now > taken:
+                taken, moved = now, time.monotonic()
+            elif time.monotonic() - moved >= SEND_STALL:
+                if not t.is_closing():                   # (once, whoever else was waiting too)
+                    log.warning("the server took nothing of what this PC sends for %g s: connecting again",
+                                SEND_STALL)
+                t.abort()
+                raise ConnectionError("the server stopped taking what this PC sends")
+        if t.is_closing():
+            raise ConnectionResetError("the connection closed while sending")
+
+    def send_latest(self, slot: str, msg: dict) -> bool:
+        """A message of a stream where only the newest counts (my Zoi's state, skeleton frames): it replaces the one of
+        the same slot still waiting, and goes out as soon as the connection has room. On a slow or stuck link the
+        stream thins out instead of piling up (no backlog of old frames, never more than one task). False: not
+        connected."""
+        w = self.writer
+        if not w:
+            return False
+        self.latest_out[slot] = msg
+        task = self.latest_task
+        if task is None or task.done() or self.latest_for is not w:
+            if task and not task.done():
+                task.cancel()                    # (still waiting on a connection that's gone: the new one goes now)
+            self.latest_for = w
+            self.latest_task = asyncio.get_running_loop().create_task(self.send_latest_loop(w))
+        return True
+
+    async def send_latest_loop(self, w):
+        """send_latest's one task for connection w: waits until it has room, then writes the newest of each stream."""
+        try:
+            link = self.link_of(w)
+            while self.latest_out and self.writer is w:
+                await self.drain(w)              # (meanwhile newer messages replace the waiting ones)
+                async with link.lock:            # (after a message going out in pieces, never in its middle)
+                    if self.writer is not w:
+                        break                    # (connected again meanwhile: send_latest starts the new one's task)
+                    batch, self.latest_out = self.latest_out, {}
+                    for slot in sorted(batch, key=lambda k: LATEST_ORDER.get(k, len(LATEST_ORDER))):
+                        msg = batch[slot]
+                        if msg.get("t") == "state":
+                            self.tele.rec("out", st=msg.get("state"))
+                        elif slot.startswith("pose:"):
+                            self.pose_counts["sent"] += 1
+                        await self.write_message(w, encode(msg))
+        except (OSError, ConnectionError):       # the connection is gone (run() connects again): what waited for it
+            if self.writer is w or not self.writer:      # goes with it
+                self.latest_out.clear()
+        except Exception as e:                   # noqa: BLE001 - a stream must never stop the program
+            loop_error("sending the latest state", e)
+
+    def background(self, coro):
+        """Run coro in a task of its own, kept until it ends (the event loop only holds tasks weakly)."""
+        task = asyncio.get_running_loop().create_task(coro)
+        self.bg_tasks.add(task)
+        task.add_done_callback(self.bg_tasks.discard)
+        return task
 
     def puppet_owner(self, entity_id: int) -> str | None:
         for pid, eid in self.puppet_ids.items():
@@ -500,22 +704,30 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 continue
             try:
                 await self.session()
-                backoff = 2
             except (OSError, asyncio.IncompleteReadError, ConnectionError, asyncio.TimeoutError) as e:
                 if not self.wake.is_set():
                     log.warning("server connection lost: %s", e or type(e).__name__)
                     self.notice = f"Can't reach the server ({self.address()[0]}): retrying"
             except Exception as e:                       # noqa: BLE001 - a bad message must never end the program
                 loop_error("server connection", e)       # (hosting: that would close the friend's server too)
+            # (session() always ends with an error.) This one had joined and lasted: the server works and this was a
+            # blip, so the first retry comes at once, well inside the server's LINGER and our grace below (friends see
+            # a silent rejoin, not their Zois leaving), whatever an earlier outage did to the backoff. A server that
+            # drops us right after its welcome keeps the doubling.
+            if self.me_id is not None and time.time() - self.connected_at >= SESSION_OK:
+                backoff = 1
             w, self.writer, self.me_id = self.writer, None, None
-            if w:
-                w.close()
+            self.latest_out.clear()
+            if w and not w.is_closing():                 # (closing: hung up on purpose, servers.hang_up ends it)
+                # dead: what it still holds is stale, and abort() wakes every task waiting in drain() on it at once
+                # (close() would wait to flush it first, leaving them parked there after the reconnect)
+                w.transport.abort()
             if self.wake.is_set():                       # another server: these players aren't on it
                 self.drop_all_remotes()
             elif not self.grace or self.grace.done():    # the same server: their Zois wait a moment for us
                 self.grace = asyncio.create_task(self.drop_after_grace())
-            try:
-                await asyncio.wait_for(self.wake.wait(), backoff)
+            try:                                         # (jitter: two PCs dropped together don't retry in step)
+                await asyncio.wait_for(self.wake.wait(), backoff * random.uniform(0.8, 1.2))
                 backoff = 2                              # another server was picked: go now
             except asyncio.TimeoutError:
                 backoff = min(backoff * 2, 30)
@@ -548,15 +760,18 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
     async def session(self):
         host, port, password = self.address()
         log.info("connecting to %s:%d as %s", host, port, self.cfg["name"])
-        reader, self.writer = await asyncio.wait_for(asyncio.open_connection(host, port, limit=32 * 1024 * 1024), 20)
+        reader, self.writer = await self.open_server(host, port)
         self.connected_at = time.time()
         self.sent_profile = None
         await self.send({"t": "hello", "protocol": PROTOCOL, "key": self.cfg["key"], "name": self.cfg["name"],
                          "password": password, "host": bool(self.hosting and self.play_local), "version": VERSION})
+        lines = ServerLines(reader, MAX_LINE)
         while True:
-            line = await asyncio.wait_for(reader.readline(), 45)     # the server pings every 15 s: silence = gone
+            line = await lines.next(SILENT_FOR)          # it pings every 15 s: silence = gone (a slow big line isn't)
             if not line:
                 raise ConnectionError("server closed the connection")
+            if self.wake.is_set():                   # leaving for another server: what this one still sends is moot
+                raise ConnectionError("another server was picked")
             try:
                 m = json.loads(line)
             except ValueError:
@@ -571,6 +786,33 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             except Exception as e:                   # noqa: BLE001 - one odd message isn't worth the connection
                 loop_error(f"server message {m.get('t')!r}", e)
 
+    async def open_server(self, host: str, port: int):
+        """Connect to the server, giving up when another one is picked meanwhile (run() clears wake before each
+        session, so a set wake here always means "go somewhere else"): never joined to the old server under the new
+        one's address."""
+        conn = asyncio.ensure_future(asyncio.open_connection(host, port, limit=MAX_LINE))
+        woke = asyncio.ensure_future(self.wake.wait())
+        done = set()
+        try:
+            done, _ = await asyncio.wait({conn, woke}, timeout=CONNECT_WITHIN, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            woke.cancel()
+            if conn not in done:
+                # (another server was picked, no answer in time, or we're stopping.) A cancelled task only shows as
+                # cancelled once it has run again, so what's decided here is "not done in time", never conn's state;
+                # and should the handshake still finish, its connection is closed rather than left open.
+                conn.cancel()
+                conn.add_done_callback(drop_connection)
+        if conn not in done:
+            if self.wake.is_set():
+                raise ConnectionError("another server was picked")
+            raise asyncio.TimeoutError(f"no answer in {CONNECT_WITHIN:g} s")
+        reader, writer = conn.result()           # (the handshake's own error, if it failed)
+        if self.wake.is_set():                   # it connected, but another server was picked meanwhile
+            writer.transport.abort()
+            raise ConnectionError("another server was picked")
+        return reader, writer
+
     async def on_message(self, m: dict):
         t = m.get("t")
         if t == "welcome":
@@ -579,29 +821,35 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             self.notice, self.notice_code = "", None
             if self.grace and not self.grace.done():
                 self.grace.cancel()                      # back in time: friends' Zois stay
-            log.info("joined as %s; %d other player(s) online%s", m["id"], len(m["players"]),
+            players = [p for p in m.get("players") or [] if isinstance(p, dict) and p.get("id") is not None]
+            log.info("joined as %s; %d other player(s) online%s", m["id"], len(players),
                      f" - {m['motd']}" if m.get("motd") else "")
-            here = {p.get("id") for p in m["players"]}
+            here = {p["id"] for p in players}
             for r in [r for pid, r in self.remotes.items() if pid not in here]:
                 self.remotes.pop(r.pid, None)            # (left while we were away)
                 self.drop_remote(r)
             updater.mark_healthy()                       # (joined a server: this version works)
             self.check_version("the server", m.get("version") or m.get("server_version"))
-            for p in m["players"]:
-                self.update_remote(p)
-                self.check_version(p.get("name") or "a friend", p.get("version"))
-            self.houses = {h["owner"]: h for h in m.get("houses") or []}
+            self.houses = {h.get("owner"): h for h in m.get("houses") or [] if isinstance(h, dict)}
             self.modset = m.get("modset")
-            self.check_mods()
             self.world_meta = m.get("world_save")
-            self.adopt_server(m.get("server"), m.get("admin"))
-            self.check_world()
-            if "shared" in m:
-                self.on_shared_snapshot(m.get("shared"), m.get("seq") or 0)
+            # Which server this is, then its shared state, before anything about the players: the seen versions belong
+            # to this server (and the save is its own), and share() works only once the snapshot is taken on this
+            # connection. Each step on its own: an odd partner record (a state the server relayed as it was) or a bug
+            # in one check can't leave the rest of the welcome undone, nor this whole session unable to share.
+            self.welcome_step("the server's settings", self.adopt_server, m.get("server"), m.get("admin"))
+            if "shared" in m:                            # (epoch: which shared state the versions belong to)
+                self.welcome_step("the shared state", self.on_shared_snapshot, m.get("shared"), m.get("seq") or 0,
+                                  m.get("epoch"))
+            for p in players:
+                self.welcome_step("a partner in the welcome", self.update_remote, p)
+                self.check_version(p.get("name") or "a friend", p.get("version"))
+            self.welcome_step("the mods check", self.check_mods)
+            self.welcome_step("the shared world check", self.check_world)
         elif t == "shared":
             self.on_shared_msg(m)
         elif t == "shared_all":
-            self.on_shared_snapshot(m.get("shared"), m.get("seq") or 0)
+            self.on_shared_snapshot(m.get("shared"), m.get("seq") or 0, m.get("epoch"))
         elif t == "set_refused":
             self.on_shared_refused(m)
         elif t == "server_info":
@@ -643,9 +891,9 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         elif t == "state":
             r = self.remotes.get(m["id"])
             if r:
-                self.set_state(r, m["state"])
+                self.take_state(r, m["state"])
         elif t == "chat":
-            await self.on_chat(m)
+            await self.on_chat(m)                    # (returns at once: the bubble goes on in the background)
         elif t == "leader":
             self.leader = m.get("id")
         elif t == "house_updated":
@@ -666,8 +914,9 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 self.on_presence(m)
             elif m.get("kind") == "pose":
                 self.on_pose(m)
-        elif t == "ping":
-            await self.send({"t": "pong"})
+        elif t == "ping":                            # (never waiting for room: the reader must keep reading, and the
+            if self.writer:                          # answer is tiny; a server that takes nothing is caught by drain)
+                self.write_soon(self.writer, b'{"t":"pong"}\n')
         elif t == "kicked":
             log.warning("kicked: %s", m.get("reason"))
             if m.get("by_admin"):
@@ -682,6 +931,15 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                         or code in ("wrong_password", "version_mismatch", "bad_key", "banned"):
                     self.connect_block = f"{self.joining or self.address()[0]}: {err}"      # retrying won't help
                 raise ConnectionError(m.get("error"))
+            if m.get("ref") is not None:                 # about one of my requests (a shared set too big...): a share()
+                self.on_shared_refused(m)                # waiting for it gets its answer (shared.py on_shared_error)
+
+    @staticmethod
+    def welcome_step(what: str, step, *args):
+        try:
+            step(*args)
+        except Exception as e:                           # noqa: BLE001 - logged; the rest of the welcome goes on
+            loop_error(f"joining: {what}", e)
 
     # ------------------------------------------------------------------ chat
     def system_line(self, text: str):
@@ -709,10 +967,26 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         log.info("[chat] %s: %s", m.get("name"), m.get("text"))
         who = self.my_entity if mine else self.puppet_ids.get(m.get("id"))
         if who:
-            try:
-                await self.g(self.game.bubble, who, m.get("text", ""))
-            except GameError as e:
-                log.debug("bubble: %s", e)
+            self.show_bubble(who, m.get("text", ""))
+
+    def show_bubble(self, who: int, text: str):
+        """A chat line over a Zoi's head, off the reader's path (the game can take seconds to answer, or hang). One
+        game call at a time per Zoi: lines that come meanwhile wait, and only the newest of them is shown."""
+        running = who in self.bubbles
+        self.bubbles[who] = text
+        if not running:
+            self.background(self.show_bubbles(who))
+
+    async def show_bubbles(self, who: int):
+        try:
+            while self.bubbles.get(who) is not None:
+                text, self.bubbles[who] = self.bubbles[who], None
+                try:
+                    await self.g(self.game.bubble, who, text)
+                except Exception as e:                   # noqa: BLE001 - GameError, a game that stopped answering
+                    log.debug("bubble: %s", e)
+        finally:
+            self.bubbles.pop(who, None)
 
     # ------------------------------------------------------------------ remote players -> puppets
     def update_remote(self, p: dict):
@@ -726,10 +1000,36 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         if p["id"] in self.puppet_ids and p["id"] not in self.despawning:
             r.spawned = True                 # the controller already has their puppet
         self.remotes[p["id"]] = r
+        # (an odd profile or state, relayed by the server as it was sent, isn't worth the rest of this record, nor of
+        # the welcome / joined message it came in: as in apply_states)
         if p.get("profile"):
-            self.set_profile(r, p["profile"])
+            try:
+                self.set_profile(r, p["profile"])
+            except Exception as e:                   # noqa: BLE001
+                loop_error("a partner's Zoi", e)
         if p.get("state"):
-            self.set_state(r, p["state"])
+            self.states_in.pop(p["id"], None)        # (the server's latest: newer than one still waiting)
+            try:
+                self.set_state(r, p["state"])
+            except Exception as e:                   # noqa: BLE001
+                loop_error("a partner's state", e)
+
+    def take_state(self, r: Remote, st: dict):
+        """A partner's state, applied on the event loop's next turn: a burst of them read in one go (a link that was
+        stuck, an older program that sent every one) collapses into the newest, instead of replaying seconds of old
+        movement and actions on their Zoi."""
+        if not self.states_in:
+            asyncio.get_running_loop().call_soon(self.apply_states)
+        self.states_in[r.pid] = (r, st)
+
+    def apply_states(self):
+        pending, self.states_in = self.states_in, {}
+        for pid, (r, st) in pending.items():
+            if self.remotes.get(pid) is r:               # (not if they left meanwhile)
+                try:
+                    self.set_state(r, st)
+                except Exception as e:                   # noqa: BLE001 - one odd state isn't worth the others
+                    loop_error("a partner's state", e)
 
     def set_profile(self, r: Remote, profile: dict):
         h = profile_hash(profile)
@@ -786,6 +1086,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         if r.pid not in self.puppet_ids:
             return                       # puppet not confirmed yet; actions wait for it
         act = st.get("act")
+        if not isinstance(act, dict):    # (another version's state may carry it in another shape: nothing to act out)
+            act = None
         if self.pose_live(r) and not (act and act.get("player") == self.me_id):
             act = None                   # (their skeleton drives their Zoi: only interactions with me are acted out)
             if r.act_sig is None:
@@ -1214,8 +1516,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     self.state_base = {"act": act, "anim": anim, "outfit": outfit, "clock": clock,
                                        "sleep": self.sleeping, **self.extra_state(st)}
                     self.sending_state = True
-                    await self.send({"t": "state", "state": {"n": self.n, **st, "ts": round(time.time(), 3),
-                                                              **self.state_base}})
+                    self.send_latest("state", {"t": "state", "state": {"n": self.n, **st, "ts": round(time.time(), 3),
+                                                                        **self.state_base}})
                     await self.manage_puppets()
             except GameError as e:
                 log.debug("game: %s", e)
@@ -1244,7 +1546,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         self.n += 1
         st = {"n": self.n, **base, **{k: pos[k] for k in ("x", "y", "z", "yaw", "site")},
               "ts": round(pos["at"], 3), **self.state_base}
-        asyncio.get_running_loop().create_task(self.send_quiet({"t": "state", "state": st}))
+        self.send_latest("state", {"t": "state", "state": st})     # (on a slow link only the newest one waits)
 
     async def send_quiet(self, msg: dict):
         try:
@@ -1279,7 +1581,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                         pos = self.fast_pos
                         if pos and self.sending_state and self.last_full_state and self.writer and self.me_id:
                             self.n += 1
-                            await self.send_quiet({"t": "state", "state": {
+                            self.send_latest("state", {"t": "state", "state": {
                                 "n": self.n, **self.last_full_state, **{k: pos[k] for k in ("x", "y", "z", "yaw", "site")},
                                 "ts": round(time.time(), 3), **self.state_base}})
             except GameError:
@@ -2557,7 +2859,10 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 return {"ok": False}
             if not self.writer:
                 return {"error": "not connected to the server"}
-            await self.send({"t": "chat", "text": text})
+            try:
+                await self.send({"t": "chat", "text": text})
+            except (OSError, ConnectionError):           # (the connection dropped meanwhile: run() connects again)
+                return {"error": "not connected to the server"}
             return {"ok": True}
 
         async def join(body):

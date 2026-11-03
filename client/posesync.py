@@ -95,9 +95,11 @@ class PoseSync:
                             continue
                         if not text:
                             continue
-                        # (to everyone, through the server: it keeps the latest frames for whoever joins later)
-                        await self.send({"t": "event", "kind": "pose", "data": {kind: text}})
-                        self.pose_counts["sent"] += 1
+                        # (to everyone, through the server: it keeps the latest frames for whoever joins later). Only
+                        # the newest frame of each kind waits for room on a slow link, never a backlog of old ones; a
+                        # keyframe is only ever replaced by a newer keyframe, and goes out before the delta
+                        # (send_latest; pose_counts["sent"] counts what really went out)
+                        self.send_latest("pose:" + kind, {"t": "event", "kind": "pose", "data": {kind: text}})
                 if time.time() - map_at > MAP_EVERY:
                     map_at = time.time()
                     me = str(self.my_entity or "") if self.world != "out" and self.mp_active() and partners else ""

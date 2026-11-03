@@ -331,6 +331,10 @@ class Couple:
             asyncio.get_running_loop().create_task(self.send_log(frm, rid))
         elif data.get("type") == "log":
             self.save_partner_log(frm, data)
+        elif data.get("type") == "diag_request" and frm in self.remotes:     # (the partner's "test my side")
+            asyncio.get_running_loop().create_task(self.send_diag(frm, rid))
+        elif data.get("type") == "diag":
+            self.save_partner_diag(frm, data)
         elif data.get("type") == "reply":
             s = self.sent.get(rid)
             if not s or s["to_id"] != frm or s["state"] != "waiting":
@@ -455,9 +459,12 @@ class Couple:
             if req.get("state") == "failed":             # (their save said it didn't work: that stays)
                 return {"state": "failed", "message": req.get("message", "")}
             if action == "movein" and res.get("ok") and (self.leader == self.me_id or not self.leader):
-                # the family is the server's truth from now on: every save is brought to it (shared.py)
-                asyncio.get_running_loop().create_task(
-                    self.share_family(await self.g(self.my_home_site), [self.me_id, pid]))
+                # the family is the server's truth from now on: every save is brought to it (shared.py). The home is
+                # looked up in that task: nothing may wait between the check above and the mark below, or their
+                # "it didn't work" arriving meanwhile would be overwritten with "done".
+                async def share(members):
+                    await self.share_family(await self.g(self.my_home_site), members)
+                asyncio.get_running_loop().create_task(share([self.me_id, pid]))
             return self.mark(req, "done" if res.get("ok") else "failed", res.get("error", ""))
         together = action in TARGETED or (action in TOGETHER and pid in self.puppet_ids)
         if together and not initiator:
@@ -574,6 +581,59 @@ class Couple:
                                   "data": telemetry.pack(lines)}})
         log.info("sent %d telemetry lines (%.0f min) to %s", len(lines), minutes,
                  self.remotes[to].name if to in self.remotes else to)
+
+    async def send_diag(self, to: str, rid: str):
+        """The partner's program asked for this one's diagnostics, to test both PCs from one: the self-test, the game,
+        and every sync's state here (what this game holds of the shared state, the objects, the house, the skeletons).
+        Nothing secret goes (no key, no password: not the config)."""
+        try:
+            tests = await asyncio.wait_for(self.self_test(), 30)
+        except Exception as e:                           # noqa: BLE001
+            tests = [{"id": "self_test", "ok": False, "detail": f"couldn't run: {e}"}]
+        try:
+            report = await self.g(self.sync_report)
+        except Exception as e:                           # noqa: BLE001
+            report = {"error": f"couldn't read the sync state: {e}"}
+        status = self.diag_status(tests)
+        status["recent"] = status.get("recent", [])[-200:]
+        await self.send({"t": "event", "kind": "couple", "to": to,
+                         "data": {"type": "diag", "id": rid, "version": self.version, "status": status,
+                                  "sync": report}})
+        log.info("sent diagnostics to %s (asked for)", self.remotes[to].name if to in self.remotes else to)
+
+    def sync_report(self) -> dict:
+        """What each sync holds here right now (read-only): sent with the diagnostics."""
+        shared = {k: {"v": (i or {}).get("v"), "by": (i or {}).get("by_name"), "seen": self.seen(k)}
+                  for k, i in sorted(self.shared.items())}
+        objects = {k: {"t": o.get("t"), "s": o.get("s"), "ch": o.get("ch"), "p": [round(c) for c in o.get("p") or []]}
+                   for k, o in list(self.obj_last.items())
+                   if [s for s in o.get("s") or [] if s != "Normal:Normal"] or o.get("ch")}
+        try:
+            sim = self.game.call("environment.get_simulation")
+        except Exception as e:                           # noqa: BLE001
+            sim = {"error": str(e)}
+        try:
+            home = self.my_home_site()
+        except Exception as e:                           # noqa: BLE001
+            home = f"error: {e}"
+        return {"epoch": self.shared_epoch, "seq": self.shared_seq, "shared": shared,
+                "objects": {"site": self.obj_site, "read": len(self.obj_last), "counts": dict(self.obj_counts),
+                            "pending": list(self.obj_pending), "not_normal": objects},
+                "house": {"home": home, "dirty": self.cfg.get("house_dirty"), "pending_lot": self.cfg.get("pending_lot"),
+                          "lot_hash": self.cfg.get("lot_hash"), "busy": bool(getattr(self, "lot_busy", False))},
+                "poses": {"counts": dict(self.pose_counts), "from": {self.remotes[p].name if p in self.remotes else p:
+                                                                     round(time.time() - t, 1)
+                                                                     for p, t in self.pose_from.items()}},
+                "sim": sim, "world": self.world, "entity": self.my_entity, "fast_pos": self.__dict__.get("fast_pos")}
+
+    def save_partner_diag(self, frm: str, data: dict):
+        from companion import CONFIG_DIR
+        r = self.remotes.get(frm)
+        name = re.sub(r"[^A-Za-z0-9_-]", "_", r.name if r else frm)[:30]
+        path = CONFIG_DIR / f"partner-{name}-diag.json"
+        path.write_text(json.dumps({"version": data.get("version"), "at": time.time(), "status": data.get("status"),
+                                    "sync": data.get("sync")}, indent=1, default=str), "utf-8")
+        log.info("saved %s's diagnostics: %s", name, path)
 
     def save_partner_telemetry(self, frm: str, data: dict):
         import telemetry
@@ -980,6 +1040,14 @@ class Couple:
         async def house_exact_now(body):
             return await self.apply_lot_now()
 
+        async def partner_diag(body):
+            r = self.partner(body.get("key"))
+            if not r:
+                return {"error": "your partner isn't online", "code": "no_partner"}
+            await self.send({"t": "event", "kind": "couple", "to": r.pid,
+                             "data": {"type": "diag_request", "id": secrets.token_hex(6)}})
+            return {"ok": True}
+
         async def partner_telemetry(body):
             r = self.partner(body.get("key"))
             if not r:
@@ -995,6 +1063,6 @@ class Couple:
                 return {"error": "your partner isn't online", "code": "no_partner"}
             return await self.request_house(r)
 
-        return {"/partner/telemetry": partner_telemetry, "/partner/house/exact-now": house_exact_now, "/partner/house": partner_house, "/partner/update": partner_update, "/partner/log": partner_log, "/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
+        return {"/partner/telemetry": partner_telemetry, "/partner/house/exact-now": house_exact_now, "/partner/house": partner_house, "/partner/update": partner_update, "/partner/log": partner_log, "/partner/diag": partner_diag, "/partner/interactions": interactions, "/partner/do": do, "/partner/family": family,
                 "/partner/goto": goto, "/partner/invite": invite, "/partner/action": action,
                 "/partner/respond": respond, "/world/undo": undo, "/world/backups": backups}

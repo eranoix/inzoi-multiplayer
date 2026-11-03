@@ -73,6 +73,17 @@ async def ask(address: str, msg: dict, reply: str, timeout: float = 5) -> tuple[
         w.close()
 
 
+def hang_up(w, grace: float = 2.0):
+    """Leave a server connection on purpose: what's written (a "bye") still goes out to a healthy server, but a stuck
+    one can't keep the connection, nor every task waiting in drain() on it, alive: it's aborted after grace s (which
+    also ends the session's reader, so the program moves on at once instead of waiting for silence)."""
+    try:
+        w.close()
+        asyncio.get_running_loop().call_later(grace, w.transport.abort)
+    except Exception:                                  # noqa: BLE001 - (no event loop: the program is closing)
+        pass
+
+
 def why(e: BaseException) -> str:
     """A connection problem in words a player understands."""
     if isinstance(e, ConnectionRefusedError):
@@ -211,21 +222,23 @@ class Servers:
         self.save_cfg()
         if self.writer:
             self.say_bye()
-            self.writer.close()
+            hang_up(self.writer)
         self.wake.set()
 
     def say_bye(self):
-        """Leaving the server on purpose: say so, so friends see it at once (a dropped connection lingers)."""
+        """Leaving the server on purpose: say so, so friends see it at once (a dropped connection lingers). (Never in
+        the middle of a message going out in pieces: then it would only follow that one, if the connection lasts.)"""
         try:
             if self.writer and self.me_id:
-                self.writer.write(b'{"t":"bye"}\n')
+                self.write_soon(self.writer, b'{"t":"bye"}\n')
         except Exception:                              # noqa: BLE001 - best effort
             pass
 
     def adopt_server(self, summary: dict | None, admin: bool | None):
         """Joined a server (or its settings changed): know who it is, and switch to its multiplayer save."""
-        if not summary:
-            return
+        if not isinstance(summary, dict) or not summary or self.wake.is_set():
+            return                                     # (another server was picked: this one's id isn't filed under
+                                                       # the new address, nor its save swapped in)
         self.server_info = summary
         if admin is not None:
             self.is_admin = bool(admin)
@@ -437,7 +450,7 @@ class Servers:
         self.save_cfg()
         self.connect_block = None
         if self.writer:
-            self.writer.close()
+            hang_up(self.writer)
         self.wake.set()
 
     # ------------------------------------------------------------------ hosting from the page
@@ -556,6 +569,8 @@ class Servers:
             return await asyncio.wait_for(fut, 15)
         except asyncio.TimeoutError:
             return {"ok": False, "error": "the server didn't answer"}
+        except (OSError, ConnectionError):                 # (the connection dropped meanwhile)
+            return {"ok": False, "error": "not connected to a server"}
         finally:
             self.admin_waiters.pop(ref, None)
 
