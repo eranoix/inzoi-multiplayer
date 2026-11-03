@@ -43,7 +43,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "0.9.40"
+VERSION = "0.9.41"
 PROTOCOL = 1
 MAX_LINE = 32 * 1024 * 1024        # house snapshots can be large (only after a successful hello)
 MAX_LINE_BEFORE_HELLO = 64 * 1024  # hello, info, directory messages: small; a stranger can't make us buffer 32 MB

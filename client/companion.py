@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.40"
+VERSION = "0.9.41"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -444,6 +444,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         self.me_id = None            # my player id on the server
         self.writer = None
         self.connected_at = 0.0
+        self.joined_at = 0.0                # when the last welcome came (a session "lasted" from there: run)
         self.latest_out: dict[str, dict] = {}   # send_latest: the newest message of each latest-wins stream, waiting
         self.latest_task = None      # the one task sending them...
         self.latest_for = None       # ...on this connection (writer)
@@ -714,7 +715,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             # blip, so the first retry comes at once, well inside the server's LINGER and our grace below (friends see
             # a silent rejoin, not their Zois leaving), whatever an earlier outage did to the backoff. A server that
             # drops us right after its welcome keeps the doubling.
-            if self.me_id is not None and time.time() - self.connected_at >= SESSION_OK:
+            if self.me_id is not None and time.time() - self.joined_at >= SESSION_OK:
                 backoff = 1
             w, self.writer, self.me_id = self.writer, None, None
             self.latest_out.clear()
@@ -817,6 +818,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         t = m.get("t")
         if t == "welcome":
             self.me_id = m["id"]
+            self.joined_at = time.time()
             self.leader, self.leader_world, self.world_synced = m.get("leader"), m.get("world"), 0.0
             self.notice, self.notice_code = "", None
             if self.grace and not self.grace.done():
@@ -1109,7 +1111,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     else:
                         self.mail.op("act", key=r.pid, **op)
                         self.tele.rec("note", text=f"{r.name}: act {act['bag']} sent")
-        if act and act.get("npc") and st.get("anim") and st["anim"] != r.anim:
+        if isinstance(act, dict) and act.get("npc") and st.get("anim") and st["anim"] != r.anim:   # (not "skip")
             r.anim = st["anim"]              # busy with someone only they have: at least show the motion
             self.mail.op("anim", key=r.pid, anim=st["anim"])
         if st.get("outfit") and st["outfit"] != r.outfit:

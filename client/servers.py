@@ -430,6 +430,9 @@ class Servers:
                     pick = {**info, "address": alt["address"]}
             except (OSError, ValueError, asyncio.TimeoutError, ConnectionError):
                 pass
+        if self.writer and self.me_id:                 # (joined while it looked: that session stays as it is)
+            self.lan_fail_since = None
+            return
         if not pick:
             if self.lan_override:                      # not there either: back to the picked address
                 log.info("the server isn't on your home network either: trying %s again", primary)

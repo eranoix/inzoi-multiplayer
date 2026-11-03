@@ -19,7 +19,7 @@
 local M = {}
 local MOD = "InZOIMultiplayer"
 local LAST, EVERY, t = nil, 0.25, 0
-local POSE_EVERY, KEY_EVERY, STALE, MAP_EVERY = 1 / 15, 1.0, 1.5, 1.0
+local POSE_EVERY, KEY_EVERY, STALE, MAP_EVERY, CHECK_EVERY = 1 / 15, 1.0, 1.5, 1.0, 0.5
 local LEADERS = { "CharacterMesh0", "Head" }
 local HEAD_FOLLOWERS = { Hair = true, FaceHair = true, Necklace = true, Earring = true, Hat = true, Eyewear = true }
 
@@ -163,9 +163,57 @@ local function restore(r)
     end)
 end
 
-local function build_rig(actor)
+local function asset_name(c)
+    local ok, a = pcall(function() return c:GetSkinnedAsset() end)
+    return ok and a and a:GetName() or ""
+end
+
+-- A Zoi given back to the game whole: no poseable mesh left on it (they're only ever this script's: one left by an
+-- earlier run of it - the Lua reloaded, the mod remounted - would stay there frozen in its last pose, a second body),
+-- its clothes following its own body and head again, those shown.
+local function clean_actor(actor)
     local by = meshes(actor)
-    local rig = { actor = actor, leaders = {}, poseables = {}, followers = {}, orig = {}, names = {} }
+    local own = { by[LEADERS[1]], by[LEADERS[2]] }
+    for name, c in pairs(by) do
+        if name ~= LEADERS[1] and name ~= LEADERS[2] and c:GetClass():GetName() ~= "PoseableMeshComponent" then
+            local ok, leader = pcall(function() return c.LeaderPoseComponent end)
+            if ok and leader and leader:GetClass():GetName() == "PoseableMeshComponent" then
+                local li = HEAD_FOLLOWERS[name] and 2 or 1
+                pcall(function() c:SetLeaderPoseComponent(own[li], true, false) end)
+            end
+        end
+    end
+    local n = 0
+    for _, c in pairs(by) do
+        if c:GetClass():GetName() == "PoseableMeshComponent" then
+            pcall(function() c:K2_DestroyComponent(c) end)
+            n = n + 1
+        end
+    end
+    for _, L in pairs(own) do pcall(function() L:SetVisibility(true, false) end) end
+    return n
+end
+
+-- Once per run of this script: what an earlier run left on any Zoi goes (clean_actor).
+local swept = false
+local function sweep()
+    swept = true
+    local own = _G.MP_B1_OWNER
+    if not own then swept = false return end
+    local arr = UE.TArray(UE.AActor)
+    UE.UGameplayStatics.GetAllActorsOfClass(own, own:GetClass(), arr)
+    local n = 0
+    for i = 1, arr:Length() do
+        local a = arr:Get(i)
+        if a:K2_GetComponentsByClass(UE.UPoseableMeshComponent):Length() > 0 then n = n + clean_actor(a) end
+    end
+    if n > 0 then result("pose-swept " .. n .. " poseable mesh(es) left by an earlier run") end
+end
+
+local function build_rig(actor)
+    clean_actor(actor)                                  -- (nothing of an earlier rig stays on it)
+    local by = meshes(actor)
+    local rig = { actor = actor, leaders = {}, poseables = {}, followers = {}, orig = {}, names = {}, assets = {} }
     for li, name in ipairs(LEADERS) do
         local L = by[name]
         if not L then return nil end
@@ -174,7 +222,7 @@ local function build_rig(actor)
         pm:K2_AttachToComponent(L, "", 0, 0, 0, false)
         pm:K2_SetRelativeTransform(UE.FTransform(), false, nil, false)
         for i = 0, L:GetNumMaterials() - 1 do pm:SetMaterial(i, L:GetMaterial(i)) end
-        rig.leaders[li], rig.poseables[li] = L, pm
+        rig.leaders[li], rig.poseables[li], rig.assets[li] = L, pm, asset_name(L)
         local names = {}
         for b = 0, pm:GetNumBones() - 1 do names[b] = pm:GetBoneName(b) end
         rig.names[li] = names
@@ -190,6 +238,31 @@ local function build_rig(actor)
     end
     for _, L in pairs(rig.leaders) do L:SetVisibility(false, false) end
     return rig
+end
+
+-- The game changes a Zoi's clothes by itself too (sleepwear at bedtime, swimwear...): it builds new body and head
+-- meshes (the body without what the clothes cover) and may point clothes back at its own (hidden) body. Looked at
+-- every CHECK_EVERY s: new body or head meshes -> false (the rig is built again on them); anything else following
+-- the game's own meshes follows the rig again, and those stay hidden.
+local function check_rig(rig)
+    local by = meshes(rig.actor)
+    for li, name in ipairs(LEADERS) do
+        local L = by[name]
+        if not L or L ~= rig.leaders[li] or asset_name(L) ~= rig.assets[li] then return false end
+        if L:IsVisible() then L:SetVisibility(false, false) end
+    end
+    for name, c in pairs(by) do
+        if name ~= LEADERS[1] and name ~= LEADERS[2] and c:GetClass():GetName() ~= "PoseableMeshComponent" then
+            local ok, leader = pcall(function() return c.LeaderPoseComponent end)
+            if not ok or (leader ~= rig.poseables[1] and leader ~= rig.poseables[2]) then
+                local li = (ok and leader == rig.leaders[2] or HEAD_FOLLOWERS[name]) and 2 or 1
+                if rig.followers[name] ~= c then rig.orig[c] = ok and leader or nil end
+                c:SetLeaderPoseComponent(rig.poseables[li], true, false)
+                rig.followers[name] = c
+            end
+        end
+    end
+    return true
 end
 
 local function apply(r, vals, changed)
@@ -249,11 +322,16 @@ local function receive(pid, r)
     r.target = { x = h[1] / 10, y = h[2] / 10, z = h[3] / 10, yaw = h[4] / 100 }
     local actor = actor_of(r.e)
     if not actor then return end
+    if r.rig and r.rig.actor == actor and clock - (r.checkAt or 0) >= CHECK_EVERY then
+        r.checkAt = clock
+        local ok, good = pcall(check_rig, r.rig)
+        if not ok or not good then restore(r) end           -- (new clothes: built again just below)
+    end
     if not r.rig or r.rig.actor ~= actor then
         restore(r)
         local ok, rig = pcall(build_rig, actor)
         if not ok or not rig then return end
-        r.rig, r.fresh = rig, true
+        r.rig, r.fresh, r.checkAt = rig, true, clock
     end
     -- this frame = keyframe + its differences (bones not listed are as in the keyframe)
     local vals = r.key.vals
@@ -298,6 +376,7 @@ end
 
 local poseT = 0
 local function pose_tick(dt)
+    if not swept then sweep() end
     poseT = poseT + dt
     if clock - mapAt > MAP_EVERY then
         mapAt = clock

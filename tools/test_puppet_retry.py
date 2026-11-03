@@ -123,6 +123,18 @@ async def main():
     assert "p1" in comp.remotes
     await task
     assert not comp.remotes and "p1" in comp.despawning
+
+    # Their skeleton drives their Zoi and no action of theirs was seen yet ("skip"): a state is still read whole (it
+    # raised on "skip".get and the rest - their new outfit - was lost), and an odd "act" (not an object) is ignored.
+    for act in (None, "Sleep_Bed", {"bag": "Sit", "npc": True}):
+        comp, r = make()
+        r.spawned, r.act_sig = True, None
+        comp.puppet_ids["p1"] = 5
+        comp.pose_live = lambda _r: True
+        ops = []
+        comp.mail.op = lambda name, **f: ops.append((name, f))
+        comp.set_state(r, {"x": 1, "y": 2, "z": 3, "act": act, "anim": "A1", "outfit": "Sleep"})
+        assert ("outfit", {"key": "p1", "category": "Sleep"}) in ops, (act, ops)
     print("puppet retry tests passed")
 
 
