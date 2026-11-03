@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.48"
+VERSION = "0.9.49"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -1086,7 +1086,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         self.tele.rec("in", p=r.name, st=st)
         if not r.spawned:
             return
-        if "n" in st:
+        if "n" in st and not self.pose_live(r):          # (their skeleton's frames carry where they're drawn: posesync)
             self.mail.add_point(r.pid, st["n"], st["x"], st["y"], st["z"], st.get("yaw", 0), st.get("ts"))
         if r.pid not in self.puppet_ids:
             return                       # puppet not confirmed yet; actions wait for it

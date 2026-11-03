@@ -56,6 +56,7 @@ class PoseSync:
             return
         first = time.time() - self.pose_from.get(frm, 0) > LIVE_FOR
         self.pose_from[frm] = time.time()
+        self.skel_point(frm, data.get("d") or data.get("k"))
         self.pose_counts["got"] += 1
         if first:
             r = self.remotes.get(frm)
@@ -65,12 +66,40 @@ class PoseSync:
             if r:
                 self.leave_reenactment(r)
 
+    def skel_point(self, frm: str, text):
+        """Where their Zoi is drawn in their game (the frame's head: x,y,z x10, yaw x100) goes to the controller as the
+        puppet's trail point while their skeleton comes in: the bones are relative to that place - their simulation's
+        position, in the state, can be off it (lying in bed: 77 cm), which left the body beside the bed."""
+        if not isinstance(text, str) or frm not in self.puppet_ids:
+            return
+        parts = text.split("|", 4)
+        head = parts[2] if len(parts) > 3 and parts[2].count(",") == 3 else (parts[1] if len(parts) > 1 else "")
+        try:
+            x, y, z, yaw = (int(v) for v in head.split(","))
+        except ValueError:
+            return
+        n = self.__dict__.setdefault("skel_n", {}).get(frm, 10 ** 7) + 1        # (above any state's count: one trail)
+        self.skel_n[frm] = n
+        self.mail.add_point(frm, n, x / 10, y / 10, z / 10, yaw / 100, time.time())
+
     def leave_reenactment(self, r):
         """Their frames drive their Zoi now: stop what the re-enactment had going on it."""
         if r.pid in self.puppet_ids:
             self.mail.op("act_stop", key=r.pid)
             self.mail.op("pose", key=r.pid, on=False)
         r.act_sig, r.pose_on = None, False
+
+    def tell_skel(self):
+        """The B2 controller puts a puppet where its player is every tick while their skeleton comes in, instead of
+        walking it there ("skel" op): told when that starts or stops, and again for a fresh controller (a reload)."""
+        inst = self.mod.get("instance")
+        sent = self.__dict__.setdefault("skel_sent", {})
+        for r in self.remotes.values():
+            want = bool(self.puppet_ids.get(r.pid) and r.spawned and self.pose_live(r))
+            if sent.get(r.pid) != (want, inst):
+                if r.pid in self.puppet_ids:
+                    self.mail.op("skel", key=r.pid, on=want)
+                sent[r.pid] = (want, inst)
 
     async def pose_loop(self):
         out_dir = install.INSTALL_DIR / "out"
@@ -113,6 +142,7 @@ class PoseSync:
                         if e and r.spawned and not r.hidden and self.pose_live(r):
                             items.append(f"{r.pid}={e}.{r.__dict__.get('outfit_ver', 0)}")
                     text = ";".join(items)
+                    self.tell_skel()
                     if text != self.pose_map_text:
                         in_dir.mkdir(parents=True, exist_ok=True)
                         write_atomic(in_dir / "posemap.cfg", text)

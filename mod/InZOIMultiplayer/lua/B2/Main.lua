@@ -414,6 +414,7 @@ local LEAP_AT, LEAP_EVERY = 250, 1.5
 -- RENDER_DELAY s ago, interpolated between the two trail points around that moment (by the sender's clock), or a short
 -- extrapolation past the newest one. No path orders, so no stop-and-go. Another floor or DIRECT_TP away: placed there.
 local DIRECT, RENDER_DELAY, EXTRAPOLATE, DIRECT_TP, DIRECT_K, DIRECT_MAX = true, -0.25, 0.45, 350, 6.0, 900
+local SKEL_JUMP = 500         -- cm: a puppet whose skeleton comes in is set where they are; this far, a real teleport
 local STANDING_AFTER = 0.35   -- no new point for this long: they're standing (velocity 0, no more prediction)      -- running and this far behind: a small leap to 1 m behind them
 -- Realtime: the player's own position goes out from here ME_EVERY s (read straight from the engine); a puppet aims
 -- where its player will be LATENCY s from now (their speed, from the sender's clock on each point) and walks at their
@@ -571,6 +572,23 @@ local function drive(key, p, dt)
             pcall(clear_all, p.id)
             log_limited(string.format("%s's Zoi started %s on its own: stopped (only what they do is done)", key, bag), 30)
         end
+    end
+    if p.skel and not p.act and not p.hidden and #p.trail > 0 then
+        -- Their skeleton comes in (the companion's "skel"): the pose is theirs, frame by frame, so the puppet doesn't
+        -- walk (a walk lags, gets stuck on furniture, is put back by teleports - the bones then slid around a body in
+        -- another place). Every tick it's set where they are, smoothed over the trail (interp_target), simulation only
+        -- (no teleport effects); only another floor or a big jump is a real teleport.
+        local tgt = interp_target(p) or p.trail[#p.trail]
+        local mc = c:GetMovementComponent()
+        mc.InputVector = UE.FVector(0, 0, 0)
+        local me = c:GetLocation()
+        if dist2(me.X, me.Y, tgt.x, tgt.y) > SKEL_JUMP or math.abs(me.Z - tgt.z) > 150 then
+            teleport(p.id, tgt.x, tgt.y, tgt.z)
+        else
+            c:SetLocationOnlySimul(UE.FVector(tgt.x, tgt.y, tgt.z))
+        end
+        if tgt.yaw then c:SetRotationOnlySimul(UE.FRotator(0, tgt.yaw, 0)) end
+        return
     end
     if #p.trail == 0 or p.hidden or S.clock - p.lastOrderT < MIN_GAP then return end
     local pick = p.trail[#p.trail]
@@ -869,6 +887,20 @@ local OPS = {
         p.pose = op.on and true or nil
         if p.pose then stop_direct(char(p.id)) end
         return nil
+    end,
+    -- {key, on}: that player's skeleton frames come in (on) or stopped: the puppet is put where they are every tick
+    -- instead of walking there (drive)
+    skel = function(op)
+        local p = PUPPETS[op.key]
+        if not p then return nil end
+        local on = op.on and true or nil
+        if on and not p.skel then
+            p.act, p.actQueued, p.pending, p.dest, p.aimFor = nil, nil, nil, nil, nil
+            local c = char(p.id)
+            if c then pcall(clear_all, p.id) end
+        end
+        p.skel = on
+        return string.format("%s: %s", op.key, on and "set where they are (skeleton)" or "walks again")
     end,
     act_stop = function(op)
         local p = PUPPETS[op.key]

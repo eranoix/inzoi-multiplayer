@@ -391,7 +391,8 @@ local function pose_tick(dt)
             if r.rig and clock - r.at > STALE then restore(r) end
         end
     end
-    glide(dt)
+    -- (the actor's place: the B2 controller sets the simulation where they are every tick ("skel") and the game
+    -- draws the actor there; setting it here as well fought that - the body slid and snapped back)
 end
 
 function M.on_begin() end
