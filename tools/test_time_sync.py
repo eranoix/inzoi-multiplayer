@@ -193,6 +193,16 @@ async def main():
     g, comp = follower(17, 44, 1047, [17, 45, 1047])          # within the slack: left alone
     await comp.follow_leader_clock()
     assert not g.sent
+    # Each save counts its own days (seen: 1018 on one PC, 1060 on the other, both Thursday): only the weekday is shared
+    g, comp = follower(9, 39, 1060, [9, 53, 1018])            # same weekday, 14 min behind: forward 14, not "42 days ahead"
+    await comp.follow_leader_clock()
+    assert commands(g, "environment.time_skip") == [{"minutes": 14}], g.sent
+    g, comp = follower(18, 2, 1059, [17, 45, 1018])           # a weekday behind on its own count: forward a day
+    await comp.follow_leader_clock()
+    assert commands(g, "environment.time_skip") == [{"minutes": 1440 - 17}], g.sent
+    g, comp = follower(18, 2, 1060, [17, 45, 1018])           # ahead on the same weekday: back to the host's time
+    await comp.follow_leader_clock()
+    assert commands(g, "environment.set_time") == [{"hour": 17, "minute": 45}], g.sent
     g, comp = follower(9, 0, 1047, [9, 40])                   # a host that doesn't send the day (older program)
     await comp.follow_leader_clock()
     assert commands(g, "environment.time_skip") == [{"minutes": 40}]

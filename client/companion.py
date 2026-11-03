@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.52"
+VERSION = "0.9.53"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -2622,8 +2622,12 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         my_day = self.my_clock[4] if len(self.my_clock) > 4 else None
         their_day = lc[2] if len(lc) > 2 and isinstance(lc[2], (int, float)) else None
         if my_day is not None and their_day is not None:
-            # both days known: the whole difference (a game a day behind is a day behind, not a little ahead)
-            total = (int(their_day) * 1440 + theirs) - (int(my_day) * 1440 + mine)
+            # Both days known: the place in the week counts (a game a day behind is a day behind, not a little ahead).
+            # Each save counts its own days (seen: 1018 here, 1060 there, both Thursday), so only the weekday (day % 7)
+            # is shared: the difference within the week, behind if under half a week.
+            week = 7 * 1440
+            d_week = ((int(their_day) % 7) * 1440 + theirs - (int(my_day) % 7) * 1440 - mine) % week
+            total = d_week if d_week < week // 2 else d_week - week
             if total >= CLOCK_SLACK:
                 days, rest = divmod(total, 1440)
                 log.info("following the host's time: %s%d minutes forward", f"{days} day(s) and " if days else "", rest)
@@ -2631,7 +2635,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 return
             if total > -CLOCK_SLACK:
                 return
-            if int(my_day) != int(their_day):            # (a day or more ahead: no way back across midnight - the
+            if int(my_day) % 7 != int(their_day) % 7:    # (a day or more ahead: no way back across midnight - the
                 if self.__dict__.get("_ahead_said") != their_day:   # host's clock comes to it)
                     self._ahead_said = their_day
                     log.info("this game is a day or more ahead of the host's: waiting for the host's time")
