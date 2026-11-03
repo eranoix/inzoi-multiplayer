@@ -349,9 +349,60 @@ async def selftest_and_diag():
     print("self-test and diagnostics tests passed")
 
 
+async def other_address():
+    """The server tells a joined player the addresses it can be reached at (welcome "addresses", never in its public
+    info); when the picked one stops answering - even while the home network still finds the server at that very
+    address (a VPN or a router breaking the path) - the same server is played on at another one, never another server."""
+    srv, tasks, server = await start_server(name="Casa")
+    other_srv, other_tasks, other = await start_server(name="Outro")
+    try:
+        port, sid = server.port, server.store.settings["id"]
+        r, w = await asyncio.open_connection("127.0.0.1", port)
+        hello = {"t": "hello", "protocol": mp.PROTOCOL, "key": "a" * 24, "name": "Ana"}
+        w.write(json.dumps(hello).encode() + b"\n")
+        await w.drain()
+        welcome = json.loads(await r.readline())
+        w.close()
+        assert isinstance(welcome.get("addresses"), list), welcome.keys()
+        info, _ = await servers.ask(f"127.0.0.1:{port}", {"t": "info"}, "info", timeout=3)
+        assert "addresses" not in info, "a stranger was told the host's addresses"
+
+        dead = f"127.0.0.1:{free_port()}"                       # (the picked address: nothing answers there)
+        real = servers.netinfo.discover
+        servers.netinfo.discover = lambda p, timeout=1.5, targets=None: [
+            {"id": sid, "address": dead, "protocol": mp.PROTOCOL, "name": "Casa"}]    # (found there all the same)
+        try:
+            comp, _ = make({"server": "127.0.0.1", "port": int(dead.split(":")[1]), "server_id": sid})
+            comp.note_addresses({"id": sid}, [dead, f"127.0.0.1:{other.port}", f"127.0.0.1:{port}"])
+            comp.lan_fail_since = time.monotonic() - 20
+            await comp.lan_tick()
+            assert comp.lan_override == ("127.0.0.1", port), comp.lan_override
+            assert comp.cfg["server"] == "127.0.0.1" and int(comp.cfg["port"]) == int(dead.split(":")[1])
+
+            comp, _ = make({"server": "127.0.0.1", "port": int(dead.split(":")[1]), "server_id": sid})
+            comp.note_addresses({"id": sid}, [f"127.0.0.1:{other.port}"])          # (only another server there)
+            comp.lan_fail_since = time.monotonic() - 20
+            await comp.lan_tick()
+            assert comp.lan_override is None, comp.lan_override
+        finally:
+            servers.netinfo.discover = real
+        print("the server's other address (its Tailscale one) is used when the picked one's path breaks: ok")
+    finally:
+        await mp.stop(srv, tasks)
+        await mp.stop(other_srv, other_tasks)
+
+
+def free_port():
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 async def main():
     await ports()
     await lan()
+    await other_address()
     await clock()
     await cards()
     await selftest_and_diag()

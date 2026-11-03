@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.44"
+VERSION = "0.9.45"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -856,6 +856,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             self.on_shared_refused(m)
         elif t == "server_info":
             self.adopt_server(m.get("server"), m.get("admin"))
+            self.note_addresses(m.get("server"), m.get("addresses"))     # (another path to it: servers.py)
         elif t == "admin":
             self.on_admin_answer(m)
         elif t == "world_save":

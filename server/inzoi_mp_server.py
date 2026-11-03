@@ -43,7 +43,7 @@ import sys
 import time
 from pathlib import Path
 
-VERSION = "0.9.44"
+VERSION = "0.9.45"
 PROTOCOL = 1
 MAX_LINE = 32 * 1024 * 1024        # house snapshots can be large (only after a successful hello)
 MAX_LINE_BEFORE_HELLO = 64 * 1024  # hello, info, directory messages: small; a stranger can't make us buffer 32 MB
@@ -167,6 +167,37 @@ def key_hash(key: str) -> str:
 
 def world_summary(meta: dict | None) -> dict | None:
     return meta and {k: meta.get(k) for k in ("version", "name", "by", "time", "size")}
+
+
+def own_addresses(port: int) -> list:
+    """The addresses players on the home network or the tailnet can reach this machine at ("ip:port"): the ones its
+    name resolves to, and the ones it would send from towards the home network and towards Tailscale (on Linux the name
+    often resolves only to 127.0.1.1). Told to players who joined (welcome), never to strangers: a player whose path to
+    one stops working tries another (client/servers.py)."""
+    ips = []
+    try:
+        ips += socket.gethostbyname_ex(socket.gethostname())[2]
+    except OSError:
+        pass
+    for probe in ("100.100.100.100", "192.168.0.1", "10.0.0.1"):     # (no packet is sent: a UDP "connect" picks a route)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((probe, 9))
+                ips.append(s.getsockname()[0])
+        except OSError:
+            pass
+    out = []
+    for ip in ips:
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if a.is_loopback or a.is_link_local or a.is_unspecified:
+            continue
+        if (a.is_private or any(a in n for n in LAN_NETS)) and f"{ip}:{port}" not in out:
+            out.append(f"{ip}:{port}")
+    out.sort(key=lambda x: not x.startswith("100."))                 # (Tailscale first: it goes around a broken LAN path)
+    return out[:8]
 
 
 def split_address(address: str, default_port: int = 24242) -> tuple[str, int]:
@@ -1479,7 +1510,19 @@ class Server:
             "houses": self.houses(), "modset": modset or self.modset(), "world_save": self.store.world_save(),
             "server": self.summary(), "admin": self.is_admin(c),
             "shared": self.shared, "seq": self.seq, "epoch": self.store.shared_epoch,
+            "addresses": self.addresses(),
         }
+
+    def addresses(self) -> list:
+        """own_addresses, read again at most once a minute (a laptop changes networks)."""
+        at, got = getattr(self, "_addresses", (None, []))
+        if at is None or mono() - at > 60:
+            try:
+                got = own_addresses(self.port)
+            except Exception:                            # noqa: BLE001 - never worth a welcome
+                got = []
+            self._addresses = (mono(), got)
+        return got
 
     def send_poses(self, c: Client) -> None:
         """A newcomer gets everyone's latest skeleton frames at once (they're only sent again when they change)."""

@@ -371,6 +371,38 @@ class Servers:
     # and plays there for now (lan_override): the server id it joined last wins, else the only server that answered. The
     # home-network address is remembered as an alternate (cfg["lan_alt"]), never in place of the picked address: the
     # next start tries that one first again.
+    def note_addresses(self, summary: dict | None, addresses) -> None:
+        """The addresses the server told us it can be reached at (welcome), kept per server id: tried when the picked
+        one stops answering (reach_other_address)."""
+        sid = (summary or {}).get("id")
+        if not sid or not isinstance(addresses, list):
+            return
+        good = []
+        for a in addresses[:8]:
+            try:
+                good.append(address_text(*split_address(str(a))))
+            except (ValueError, TypeError):
+                continue
+        book = self.cfg.setdefault("server_addrs", {})
+        if good and book.get(sid) != good:
+            book[sid] = good
+            self.save_cfg()
+
+    async def reach_other_address(self, primary: str) -> dict | None:
+        """The server joined last, at another of its addresses that answers now (asked who it is: the same id)."""
+        sid = self.cfg.get("server_id")
+        cur = address_text(*self.lan_override) if self.lan_override else None
+        for a in (self.cfg.get("server_addrs") or {}).get(sid) or []:
+            if same_server(a, primary) or (cur and same_server(a, cur)):
+                continue
+            try:
+                info, _ = await ask(a, {"t": "info"}, "info", timeout=3)
+            except (OSError, ValueError, asyncio.TimeoutError, ConnectionError):
+                continue
+            if info.get("id") == sid:
+                return {**info, "address": a}
+        return None
+
     async def discover_lan(self) -> list[dict]:
         if self.lan["busy"]:
             return self.lan["list"]
@@ -433,6 +465,15 @@ class Servers:
         if self.writer and self.me_id:                 # (joined while it looked: that session stays as it is)
             self.lan_fail_since = None
             return
+        if primary and (not pick or same_server(pick["address"], primary)):
+            # (nothing else on the home network, or it answers there on the address that can't be reached - a path
+            # broken by a VPN or a router: the same server at another address it told us, its Tailscale one first)
+            other = await self.reach_other_address(primary)
+            if self.writer and self.me_id:
+                self.lan_fail_since = None
+                return
+            if other:
+                pick = other
         if not pick:
             if self.lan_override:                      # not there either: back to the picked address
                 log.info("the server isn't on your home network either: trying %s again", primary)
@@ -446,7 +487,7 @@ class Servers:
         host, port = split_address(pick["address"])
         if self.lan_override == (host, port) or same_server(pick["address"], primary):
             return
-        log.info("can't reach %s: playing on the same server on your home network (%s)", primary, pick["address"])
+        log.info("can't reach %s: playing on the same server at %s for now", primary, pick["address"])
         self.lan_override = (host, port)
         self.cfg.setdefault("lan_alt", {})[primary] = {"address": pick["address"], "id": pick.get("id"),
                                                        "at": time.time()}
