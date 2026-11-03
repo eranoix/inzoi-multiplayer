@@ -12,10 +12,10 @@
 --      out/posed.cfg  "kid|seq|x,y,z,yaw|i,v,v,v,v,v,v,v,i,..." only the bones that differ from keyframe kid
 --    (a frame lost on the way doesn't matter: each one is complete against its keyframe).
 --    Receiving: in/posemap.cfg "pid=entity;..." says which Zoi here is whose; in/posed_<pid>.cfg and
---    in/posek_<pid>.cfg are their frames. That Zoi gets two poseable meshes (body and head: the same meshes and
---    materials), its clothes, hair and accessories follow them, the game's own meshes are hidden, and every frame
---    received is applied to the bones as it is; the actor glides to their place. No new frame for STALE s: the Zoi
---    is given back to the game as it was.
+--    in/posek_<pid>.cfg are their frames. That Zoi gets two poseable meshes (body and head) that are never drawn and
+--    hold the bones received, as received; every mesh of the Zoi that is drawn - its own body and head, hair, clothes,
+--    accessories, and so what's attached to them - follows only those (one reference: the skeleton received). The
+--    actor glides to their place. No new frame for STALE s: the Zoi is given back to the game as it was.
 local M = {}
 local MOD = "InZOIMultiplayer"
 local LAST, EVERY, t = nil, 0.25, 0
@@ -166,42 +166,71 @@ local function asset_name(c)
     return ok and a and a:GetName() or ""
 end
 
+-- One reference only: the skeleton received. Each mirrored Zoi gets two poseable meshes (body and head) that are never
+-- drawn - they only hold the bones received, as received - and every mesh of the Zoi that is drawn follows them: its
+-- own body and head, its hair, beard, clothes and accessories (leader pose). Nothing drawn follows the game's own
+-- animation any more, and the Zoi's own meshes keep what only they have - the face's shape (morph targets: drawn on a
+-- copy of the head without them the scalp came through the hair, "bald" with a tuft at one side) and what's attached at
+-- their sockets (glasses on the head: they move with the head's bones, the received ones).
+local function poseable(c) return c:GetClass():GetName() == "PoseableMeshComponent" end
+
+-- which of the two a mesh follows: the head (and what hangs on it: hair, beard, glasses...) or the body
+local function side(name, leader)
+    if name == LEADERS[1] then return 1 end
+    if name == LEADERS[2] then return 2 end
+    local ln = leader and leader:GetName()
+    if ln == LEADERS[2] then return 2 end
+    if ln == LEADERS[1] then return 1 end
+    return HEAD_FOLLOWERS[name] and 2 or 1
+end
+
 -- A Zoi given back to the game whole: no poseable mesh left on it (they're only ever this script's: one left by an
--- earlier run of it - the Lua reloaded, the mod remounted - would stay there frozen in its last pose, a second body),
--- its clothes following its own body and head again, those shown.
+-- earlier run of it - the Lua reloaded, the mod remounted - would hold the Zoi frozen in its last pose), its body and
+-- head moved by the game again, everything else following those. Body and head first (a mesh following one that itself
+-- follows another doesn't move).
 local function clean_actor(actor)
     local by = meshes(actor)
     local own = { by[LEADERS[1]], by[LEADERS[2]] }
-    for name, c in pairs(by) do
-        if name ~= LEADERS[1] and name ~= LEADERS[2] and c:GetClass():GetName() ~= "PoseableMeshComponent" then
-            local ok, leader = pcall(function() return c.LeaderPoseComponent end)
-            if ok and leader and leader:GetClass():GetName() == "PoseableMeshComponent" then
-                local li = HEAD_FOLLOWERS[name] and 2 or 1
-                pcall(function() c:SetLeaderPoseComponent(own[li], true, false) end)
+    local n = 0
+    for _, c in pairs(by) do if poseable(c) then n = n + 1 end end
+    if n == 0 then return 0 end
+    for pass = 1, 2 do
+        for name, c in pairs(by) do
+            local isLeader = name == LEADERS[1] or name == LEADERS[2]
+            if not poseable(c) and ((pass == 1) == isLeader) then
+                local ok, leader = pcall(function() return c.LeaderPoseComponent end)
+                if ok and leader and poseable(leader) then
+                    pcall(function()
+                        local li = side(name, leader:GetAttachParent())   -- (a rig's head is on the Zoi's own head)
+                        c:SetLeaderPoseComponent(not isLeader and own[li] or nil, true, false)
+                    end)
+                end
             end
         end
     end
-    local n = 0
     for _, c in pairs(by) do
-        if c:GetClass():GetName() == "PoseableMeshComponent" then
-            pcall(function() c:K2_DestroyComponent(c) end)
-            n = n + 1
-        end
+        if poseable(c) then pcall(function() c:K2_DestroyComponent(c) end) end
     end
-    for _, L in pairs(own) do pcall(function() L:SetVisibility(true, false) end) end
+    -- (rigs of 0.9.56 and older hid the Zoi's own body and head: shown again)
+    for _, L in pairs(own) do pcall(function() if not L:IsVisible() then L:SetVisibility(true, false) end end) end
     return n
 end
 
 -- The Zoi given back to the game. Every step on its own: one that fails (a mesh the game just replaced - a new look, new
--- clothes) mustn't leave the rest undone - that left the frozen poseable head on screen with the hair following the
--- game's own hidden head (bald, the hair floating where the game's own pose had it). Then whatever is still left of the
--- rig on the actor goes too (clean_actor).
+-- clothes) mustn't leave the rest undone. Body and head first, then what followed them; then whatever is still left of
+-- the rig on the actor goes too (clean_actor).
 restore = function(r)
     local rig = r.rig
     r.rig = nil
     if not rig then return end
-    for _, c in pairs(rig.followers) do pcall(function() c:SetLeaderPoseComponent(rig.orig[c] or nil, true, false) end) end
-    for _, L in pairs(rig.leaders) do pcall(function() L:SetVisibility(true, false) end) end
+    for pass = 1, 2 do
+        for name, c in pairs(rig.followers) do
+            local isLeader = name == LEADERS[1] or name == LEADERS[2]
+            if (pass == 1) == isLeader then
+                pcall(function() c:SetLeaderPoseComponent(rig.orig[c] or nil, true, false) end)
+            end
+        end
+    end
     for _, pm in pairs(rig.poseables) do pcall(function() pm:K2_DestroyComponent(pm) end) end
     pcall(clean_actor, rig.actor)
 end
@@ -222,6 +251,16 @@ local function sweep()
     if n > 0 then result("pose-swept " .. n .. " poseable mesh(es) left by an earlier run") end
 end
 
+-- a mesh of the Zoi made to follow the rig (its own leader remembered for giving it back)
+local function follow(rig, name, c)
+    local ok, leader = pcall(function() return c.LeaderPoseComponent end)
+    leader = ok and leader or nil
+    if leader == rig.poseables[1] or leader == rig.poseables[2] then return end
+    if rig.followers[name] ~= c then rig.orig[c] = leader end
+    c:SetLeaderPoseComponent(rig.poseables[side(name, leader)], true, false)
+    rig.followers[name] = c
+end
+
 local function build_rig(actor)
     clean_actor(actor)                                  -- (nothing of an earlier rig stays on it)
     local by = meshes(actor)
@@ -233,47 +272,35 @@ local function build_rig(actor)
         pm:SetSkinnedAssetAndUpdate(L:GetSkinnedAsset(), true)
         pm:K2_AttachToComponent(L, "", 0, 0, 0, false)
         pm:K2_SetRelativeTransform(UE.FTransform(), false, nil, false)
-        for i = 0, L:GetNumMaterials() - 1 do pm:SetMaterial(i, L:GetMaterial(i)) end
+        pm:SetVisibility(false, false)                  -- (only the bones received: never drawn itself)
         rig.leaders[li], rig.poseables[li], rig.assets[li] = L, pm, asset_name(L)
         local names = {}
         for b = 0, pm:GetNumBones() - 1 do names[b] = pm:GetBoneName(b) end
         rig.names[li] = names
     end
+    -- what follows the body or the head first (they then stop being anyone's leader), body and head last
     for name, c in pairs(by) do
-        if name ~= LEADERS[1] and name ~= LEADERS[2] and c:GetClass():GetName() ~= "PoseableMeshComponent" then
-            local ok, leader = pcall(function() return c.LeaderPoseComponent end)
-            local li = (ok and leader == rig.leaders[2] or HEAD_FOLLOWERS[name]) and 2 or 1
-            rig.orig[c] = ok and leader or nil
-            c:SetLeaderPoseComponent(rig.poseables[li], true, false)
-            rig.followers[name] = c
-        end
+        if name ~= LEADERS[1] and name ~= LEADERS[2] and not poseable(c) then follow(rig, name, c) end
     end
-    for _, L in pairs(rig.leaders) do L:SetVisibility(false, false) end
+    for li, name in ipairs(LEADERS) do follow(rig, name, rig.leaders[li]) end
     return rig
 end
 
 -- The game changes a Zoi's clothes by itself too (sleepwear at bedtime, swimwear...): it builds new body and head
--- meshes (the body without what the clothes cover) and may point clothes back at its own (hidden) body. Looked at
--- every CHECK_EVERY s: new body or head meshes -> false (the rig is built again on them); anything else following
--- the game's own meshes follows the rig again, and those stay hidden.
+-- meshes (the body without what the clothes cover) and may point clothes back at its own body. Looked at every
+-- CHECK_EVERY s: new body or head meshes -> false (the rig is built again on them); any other mesh not following the
+-- rig follows it again.
 local function check_rig(rig)
     local by = meshes(rig.actor)
     for li, name in ipairs(LEADERS) do
         local L = by[name]
         if not L or L ~= rig.leaders[li] or asset_name(L) ~= rig.assets[li] then return false end
-        if L:IsVisible() then L:SetVisibility(false, false) end
     end
     for name, c in pairs(by) do
-        if name ~= LEADERS[1] and name ~= LEADERS[2] and c:GetClass():GetName() ~= "PoseableMeshComponent" then
-            local ok, leader = pcall(function() return c.LeaderPoseComponent end)
-            if not ok or (leader ~= rig.poseables[1] and leader ~= rig.poseables[2]) then
-                local li = (ok and leader == rig.leaders[2] or HEAD_FOLLOWERS[name]) and 2 or 1
-                if rig.followers[name] ~= c then rig.orig[c] = ok and leader or nil end
-                c:SetLeaderPoseComponent(rig.poseables[li], true, false)
-                rig.followers[name] = c
-            end
-        end
+        if name ~= LEADERS[1] and name ~= LEADERS[2] and not poseable(c) then follow(rig, name, c) end
     end
+    for li, name in ipairs(LEADERS) do follow(rig, name, rig.leaders[li]) end
+    for _, pm in pairs(rig.poseables) do if pm:IsVisible() then pm:SetVisibility(false, false) end end
     return true
 end
 

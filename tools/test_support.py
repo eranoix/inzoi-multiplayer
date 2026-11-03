@@ -231,7 +231,9 @@ async def clock():
     comp, _ = make(game=g)
     friend(comp, "host", {"clock": [10, 0], "speed": 1})
     await comp.sync_world()
-    assert commands(g, "environment.set_time") == [{"hour": 10, "minute": 0}] and not commands(g, "environment.time_skip")
+    # (a host that doesn't send its day: forward only - set_time with only an hour moves a whole day FORWARD; going back
+    # exactly, with the day, is in tools/test_time_sync.py)
+    assert not commands(g, "environment.set_time") and not commands(g, "environment.time_skip"), g.sent
 
     g = StandIn(0, 20)                                                        # host at 23:50: wait, don't go a day back
     comp, _ = make(game=g)
