@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.55"
+VERSION = "0.9.56"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -1271,6 +1271,29 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         return [r.state["clock"] for r in self.remotes.values()
                 if r.state and r.state.get("clock") and time.time() - r.state_at < 10]
 
+    async def keep_young(self):
+        """While playing together, nobody's Zoi ages - mine, and this save's copy of each partner (seen: a Zoi turned
+        elderly and died of old age in one save after a day of clock syncing; one save can't age without the other).
+        Asked once per Zoi per loaded world (loading a save brings aging back); cfg "stop_aging": false turns it off."""
+        if not self.cfg.get("stop_aging", True) or not self.mp_active() or not self.my_entity:
+            return
+        done = self.__dict__.setdefault("_ageless", set())
+        world_key = (self.save_session or {}).get("started") if isinstance(getattr(self, "save_session", None), dict) else None
+        if self.__dict__.get("_ageless_world") != world_key:
+            self._ageless_world, done = world_key, set()
+            self._ageless = done
+        wanted = [self.my_entity] + [self.puppet_ids[r.pid] for r in self.remotes.values()
+                                     if r.adopted and r.pid in self.puppet_ids]
+        for e in wanted:
+            if e in done:
+                continue
+            try:
+                await self.g(self.game.call, "life_and_death.stop_aging", entity_id=int(e), Enable=True)
+                done.add(e)
+                log.info("aging stopped for %s while playing together", "my Zoi" if e == self.my_entity else f"entity {e}")
+            except GameError as e2:
+                log.debug("stopping aging for %s: %s", e, e2)
+
     async def keep_speed(self):
         """Game speed is everyone's: normal for all, except while every player's Zoi is asleep, when everyone's game
         runs fast until somebody wakes. Pausing stays each player's own. Alone on the server, your speed is yours.
@@ -1526,6 +1549,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                         await self.check_home()
                     if tick % 15 == 3 and world == "play":
                         await self.sync_world()
+                    if tick % 10 == 7 and world == "play":
+                        await self.keep_young()
                     self.n += 1
                     # [hour, minute, day]: the day too, so a game a whole day behind isn't taken for one a little
                     # ahead (older programs read only the first two)

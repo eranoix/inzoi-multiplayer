@@ -144,6 +144,27 @@ async def main():
     comp.on_report("spawned", "p1 5")
     assert ("relook", {"key": "p1"}) in ops, ops
     print("an adopted partner's Zoi takes their current look: ok")
+
+    # Nobody ages while playing together: my Zoi and this save's copy of the partner, once per loaded world
+    comp, r = make()
+    r.adopted = True
+    comp.puppet_ids["p1"] = 5
+    comp.my_entity, comp.world = 10, "play"
+    comp.mp_active = lambda: True
+    calls = []
+    comp.game.call = lambda tool, **kw: calls.append((tool, kw)) or {}
+    await comp.keep_young()
+    await comp.keep_young()
+    aged = sorted(kw["entity_id"] for tool, kw in calls if tool == "life_and_death.stop_aging")
+    assert aged == [5, 10] and all(kw["Enable"] is True for _, kw in calls), calls
+    comp.save_session = {"started": 123.0}                    # (another save loaded: aging is back, stopped again)
+    await comp.keep_young()
+    assert len(calls) == 4, calls
+    comp.cfg["stop_aging"] = False
+    comp.save_session = {"started": 456.0}
+    await comp.keep_young()
+    assert len(calls) == 4
+    print("nobody ages while playing together: ok")
     print("puppet retry tests passed")
 
 
