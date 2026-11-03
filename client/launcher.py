@@ -330,6 +330,15 @@ async def follow_game(keep: bool | None = None) -> str:
         await asyncio.sleep(3)
         try:
             up = await asyncio.to_thread(menu.game_window)
+            if not up and seen:
+                # (no window found: only its process gone means inZOI closed - its window can be away or unreadable
+                # for a while, and this program must never close under a running game)
+                running = await asyncio.to_thread(menu.game_running)
+                if running is not False:
+                    if gone and running:
+                        log.info("inZOI's window wasn't found but the game is running: carrying on")
+                    gone = 0
+                    continue
         except Exception as e:                               # noqa: BLE001 - never end the program over this
             log.debug("game window: %s", e)
             continue

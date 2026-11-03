@@ -67,6 +67,9 @@ if os.name == "nt":
     gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
     gdi32.DeleteDC.argtypes = [wintypes.HDC]
     kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
     kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
                                                     ctypes.POINTER(wintypes.DWORD)]
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -143,6 +146,8 @@ def _exe_name(pid: int) -> str:
             kernel32.CloseHandle(h)
         if len(_names) > 2000:
             _names.clear()
+        if not name:
+            return name                          # (not kept: a lookup that failed once is tried again next time)
         _names[pid] = name
     return _names[pid]
 
@@ -151,6 +156,34 @@ def _pid(hwnd) -> int:
     pid = wintypes.DWORD()
     user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     return pid.value
+
+
+class PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+
+def game_running() -> bool | None:
+    """inZOI's process is running (its window may be gone for a moment, or unreadable): from the system's process list,
+    which needs no access to the process. None if the list can't be read."""
+    if os.name != "nt":
+        return None
+    snap = kernel32.CreateToolhelp32Snapshot(0x2, 0)                  # TH32CS_SNAPPROCESS
+    if not snap or snap == ctypes.c_void_p(-1).value:      # (INVALID_HANDLE_VALUE)
+        return None
+    try:
+        e = PROCESSENTRY32W()
+        e.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = kernel32.Process32FirstW(snap, ctypes.byref(e))
+        while ok:
+            if e.szExeFile.lower() == GAME_EXE:
+                return True
+            ok = kernel32.Process32NextW(snap, ctypes.byref(e))
+        return False
+    finally:
+        kernel32.CloseHandle(snap)
 
 
 def game_window():
