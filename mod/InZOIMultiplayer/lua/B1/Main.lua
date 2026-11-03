@@ -170,8 +170,8 @@ end
 -- drawn - they only hold the bones received, as received - and every mesh of the Zoi that is drawn follows them: its
 -- own body and head, its hair, beard, clothes and accessories (leader pose). Nothing drawn follows the game's own
 -- animation any more, and the Zoi's own meshes keep what only they have - the face's shape (morph targets: drawn on a
--- copy of the head without them the scalp came through the hair, "bald" with a tuft at one side) and what's attached at
--- their sockets (glasses on the head: they move with the head's bones, the received ones).
+-- copy of the head without them the scalp came through the hair, "bald" with a tuft at one side). What hangs on the
+-- Zoi's own body or head (glasses at a socket of the head) hangs on the rig's instead, at the same socket.
 local function poseable(c) return c:GetClass():GetName() == "PoseableMeshComponent" end
 
 -- which of the two a mesh follows: the head (and what hangs on it: hair, beard, glasses...) or the body
@@ -182,6 +182,28 @@ local function side(name, leader)
     if ln == LEADERS[2] then return 2 end
     if ln == LEADERS[1] then return 1 end
     return HEAD_FOLLOWERS[name] and 2 or 1
+end
+
+local function socket_of(c)
+    local s = tostring(c:GetAttachSocketName())
+    return s ~= "None" and s or ""
+end
+
+-- What hangs on a mesh that isn't itself one of the Zoi's skinned meshes (glasses at the head's socket, footprints at
+-- the feet, what's held in a hand). A Zoi's own mesh following the rig is drawn right, but what hangs on it isn't moved
+-- when only the bones change: the glasses stayed where the game's own pose had put them (47 cm off the face, then 18).
+local function props_of(m, by)
+    local out = {}
+    local ok, n = pcall(function() return m:GetNumChildrenComponents() end)
+    if not ok or not n then return out end
+    for j = 0, n - 1 do
+        local ch = m:GetChildComponent(j)
+        if ch then
+            local nm = ch:GetName()
+            if not (by[nm] and by[nm] == ch) then out[#out + 1] = ch end
+        end
+    end
+    return out
 end
 
 -- A Zoi given back to the game whole: no poseable mesh left on it (they're only ever this script's: one left by an
@@ -209,7 +231,13 @@ local function clean_actor(actor)
         end
     end
     for _, c in pairs(by) do
-        if poseable(c) then pcall(function() c:K2_DestroyComponent(c) end) end
+        if poseable(c) then
+            pcall(function()                            -- (what hangs on it: back where the poseable itself hangs)
+                local parent = c:GetAttachParent()
+                for _, ch in ipairs(props_of(c, by)) do ch:K2_AttachToComponent(parent, socket_of(ch), 0, 0, 0, false) end
+            end)
+            pcall(function() c:K2_DestroyComponent(c) end)
+        end
     end
     -- (rigs of 0.9.56 and older hid the Zoi's own body and head: shown again)
     for _, L in pairs(own) do pcall(function() if not L:IsVisible() then L:SetVisibility(true, false) end end) end
@@ -223,6 +251,18 @@ restore = function(r)
     local rig = r.rig
     r.rig = nil
     if not rig then return end
+    local by = {}
+    pcall(function() by = meshes(rig.actor) end)
+    for ch, at in pairs(rig.props) do                   -- (what hung on the rig: back on the Zoi's own body/head)
+        pcall(function()
+            local p = ch:GetAttachParent()
+            if p ~= rig.poseables[1] and p ~= rig.poseables[2] then return end   -- (taken off by the game meanwhile)
+            local home = rig.leaders[at.li]
+            if not pcall(function() ch:K2_AttachToComponent(home, at.sock, 0, 0, 0, false) end) then
+                ch:K2_AttachToComponent(by[LEADERS[at.li]], at.sock, 0, 0, 0, false)
+            end
+        end)
+    end
     for pass = 1, 2 do
         for name, c in pairs(rig.followers) do
             local isLeader = name == LEADERS[1] or name == LEADERS[2]
@@ -261,10 +301,23 @@ local function follow(rig, name, c)
     rig.followers[name] = c
 end
 
+-- what hangs on the Zoi's own body or head goes onto the rig's, at the same socket (rig.props: where it came from)
+local function move_props(rig, by)
+    for li = 1, 2 do
+        for _, ch in ipairs(props_of(rig.leaders[li], by)) do
+            local sock = socket_of(ch)
+            if pcall(function() ch:K2_AttachToComponent(rig.poseables[li], sock, 0, 0, 0, false) end) then
+                rig.props[ch] = { li = li, sock = sock }
+            end
+        end
+    end
+end
+
 local function build_rig(actor)
     clean_actor(actor)                                  -- (nothing of an earlier rig stays on it)
     local by = meshes(actor)
-    local rig = { actor = actor, leaders = {}, poseables = {}, followers = {}, orig = {}, names = {}, assets = {} }
+    local rig = { actor = actor, leaders = {}, poseables = {}, followers = {}, orig = {}, names = {}, assets = {},
+                  props = {} }
     for li, name in ipairs(LEADERS) do
         local L = by[name]
         if not L then return nil end
@@ -283,6 +336,7 @@ local function build_rig(actor)
         if name ~= LEADERS[1] and name ~= LEADERS[2] and not poseable(c) then follow(rig, name, c) end
     end
     for li, name in ipairs(LEADERS) do follow(rig, name, rig.leaders[li]) end
+    move_props(rig, meshes(actor))
     return rig
 end
 
@@ -300,6 +354,7 @@ local function check_rig(rig)
         if name ~= LEADERS[1] and name ~= LEADERS[2] and not poseable(c) then follow(rig, name, c) end
     end
     for li, name in ipairs(LEADERS) do follow(rig, name, rig.leaders[li]) end
+    move_props(rig, by)                                 -- (put on since: new glasses, something taken in hand)
     for _, pm in pairs(rig.poseables) do if pm:IsVisible() then pm:SetVisibility(false, false) end end
     return true
 end

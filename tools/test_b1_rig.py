@@ -51,8 +51,20 @@ function Component(name, cls, asset, bones)
     function c:GetSkinnedAsset() return self.asset end
     function c:SetSkinnedAssetAndUpdate(a) self.asset = a; self.bones = a.bones end
     function c:SetLeaderPoseComponent(l) self.LeaderPoseComponent = l end
-    function c:K2_AttachToComponent(p) self.parent = p end
+    function c:K2_AttachToComponent(p, sock)
+        if p == nil then error("attach to nil") end
+        self.parent, self.socket = p, sock
+        return true
+    end
     function c:GetAttachParent() return self.parent end
+    function c:GetAttachSocketName() return (self.socket == nil or self.socket == "") and "None" or self.socket end
+    function c:children()
+        local out = {}
+        for _, x in ipairs(self.actor and self.actor.comps or {}) do if rawequal(x.parent, self) then out[#out + 1] = x end end
+        return out
+    end
+    function c:GetNumChildrenComponents() return #self:children() end
+    function c:GetChildComponent(i) return self:children()[i + 1] end
     function c:K2_SetRelativeTransform() end
     function c:GetNumMaterials() return 1 end
     function c:GetMaterial() return "M" end
@@ -73,7 +85,9 @@ function Actor(entity)
     function a:K2_GetComponentsByClass(cls)
         local out = {}
         for _, c in ipairs(self.comps) do
-            if cls == "USkinnedMeshComponent" or c.cls:GetName() == "PoseableMeshComponent" then out[#out + 1] = c end
+            if (cls == "USkinnedMeshComponent" and c.skinned ~= false) or c.cls:GetName() == "PoseableMeshComponent" then
+                out[#out + 1] = c
+            end
         end
         return { Length = function() return #out end, Get = function(_, i) return out[i] end }
     end
@@ -113,7 +127,9 @@ function Zoi(entity)
     beard.LeaderPoseComponent = head
     local dress = a:add(Component("Garment", "SkeletalMeshComponent", "SK_Dress", BODY))
     dress.LeaderPoseComponent = body
-    head.parent, hair.parent, beard.parent, dress.parent = body, head, head, body
+    local glasses = a:add(Component("Glasses_0", "StaticMeshComponent", nil, nil))   -- (not skinned: at a socket)
+    glasses.skinned, glasses.socket = false, "SOC_M_Glasses"
+    head.parent, hair.parent, beard.parent, dress.parent, glasses.parent = body, head, head, body, head
     ACTORS[#ACTORS + 1] = a
     return a
 end
@@ -185,6 +201,10 @@ def main():
     assert LI(hair, ph) and LI(beard, ph), "hair/beard don't follow the received head"
     assert LI(dress, pb), "the dress doesn't follow the received body"
     print("one reference: every drawn mesh (own body and head too) follows the received skeleton, poseables never drawn: ok")
+    glasses = g.by(zoi, "Glasses_0")
+    assert g.same(glasses.parent, ph) and glasses.socket == "SOC_M_Glasses", "the glasses aren't on the received head"
+    assert g.same(hair.parent, head), "a skinned mesh was moved like a prop"
+    print("what hangs on the Zoi's own head (glasses) hangs on the received head, same socket: ok")
 
     st = ph.set["head"]
     assert st is not None and st.space == 1, "head bone not set in component space"
@@ -193,16 +213,21 @@ def main():
     print("the received bones (place, turn, size) go onto the poseables: ok")
 
     dress.LeaderPoseComponent = body                  # (the game points the dress back at its own body)
+    phone = zoi.add(zoi, g.Component("Phone", "StaticMeshComponent", None, None))   # (and puts a phone in her hand)
+    phone.skinned, phone.socket, phone.parent = False, "hand_r", body
     run_ticks(lua, m, 0.7, feed)
+    assert g.same(phone.parent, pb) and phone.socket == "hand_r", "something taken in hand stayed on the game's body"
     assert LI(dress, pb), "the dress stayed on the game's body"
     assert LI(body, pb)
-    print("clothes the game points back at its own body follow the rig again: ok")
+    print("clothes the game points back at its own body, and what it puts in a hand, follow the rig again: ok")
 
     run_ticks(lua, m, 2.0)                             # (no frames: stale)
     assert len(list(g.poseables(zoi).values())) == 0, "poseables left after restore"
     assert body.LeaderPoseComponent is None and head.LeaderPoseComponent is None, "body/head still follow something"
     assert LI(hair, head) and LI(beard, head) and LI(dress, body)
     assert all(c.visible for c in (body, head, hair, beard, dress))
+    assert g.same(glasses.parent, head) and glasses.socket == "SOC_M_Glasses", "the glasses weren't given back"
+    assert g.same(phone.parent, body) and phone.socket == "hand_r"
     print("no frames for STALE s: the Zoi given back whole (own body and head moved by the game, nothing hidden): ok")
 
     # an old (0.9.56) rig left on a Zoi: drawn poseables, its own body and head hidden; a new run of the script sweeps it
@@ -218,6 +243,7 @@ def main():
     old_h = z2.AddComponentByClass(z2, "x")
     old_h.parent = h2
     g2.by(z2, "Hair").LeaderPoseComponent = old_h
+    g2.by(z2, "Glasses_0").parent = old_h
     g2.by(z2, "Garment").LeaderPoseComponent = old_b
     b2.visible = h2.visible = False
     m2 = lua2.execute(src)
@@ -225,6 +251,8 @@ def main():
     assert len(list(g2.poseables(z2).values())) == 0, "an earlier run's poseables stayed"
     assert LI(g2.by(z2, "Hair"), h2) and LI(g2.by(z2, "Garment"), b2), "an earlier run's followers stayed on its poseables"
     assert b2.visible and h2.visible, "the old rig's hidden body/head stayed hidden"
+    gl = g2.by(z2, "Glasses_0")
+    assert g2.same(gl.parent, h2) and gl.socket == "SOC_M_Glasses", "glasses left on an earlier run's poseable"
     assert "pose-swept 2" in str(g2.CFG["out.b1"]), g2.CFG["out.b1"]
     print("a rig left by an earlier run (old kind too) is cleaned up: ok")
     print("B1 rig tests passed")
