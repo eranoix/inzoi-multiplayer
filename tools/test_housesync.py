@@ -54,8 +54,12 @@
   history (an older program's): the joiner's extras stay in that game only; my change going up while build mode opens
   for an older version: that one isn't put in, my change never undone; an offline build session's exact house survives
   the game being closed before the server is back
+- (regressions) a removal or move made offline, then an older save loaded or the partner's exact house applied at the
+  next start: not undone or doubled once it lands; the first version after a reset doesn't bring back what the partner
+  deleted; back from another server: what changed there goes up; a purchase not read yet survives the partner's exact
+  house at the next start; edits made while an apply builds walls go up; my own version never said as my partner's
 
-    python tools/test_housesync.py [--rollback | --conflicts | --races | --joining]
+    python tools/test_housesync.py [--rollback | --conflicts | --races | --joining | --regressions[=<one>]]
 """
 import asyncio
 import json
@@ -180,6 +184,9 @@ async def settle(*players, timeout=15):
     assert await until(lambda: idle(*players), timeout), "the house sync didn't settle"
 
 
+PLAYERS = iter(range(1, 10 ** 6))                       # (each player its own files, whatever its name)
+
+
 def player(name, port, game):
     comp = companion.Companion({"key": name * 10, "name": name, "server": "127.0.0.1", "port": port, "password": ""})
     comp.mod["state"] = "running"
@@ -189,8 +196,9 @@ def player(name, port, game):
     comp.game.saw_lobby = False                          # (the companion has looked at which save it is: watch_save)
     comp.game.call = game.call
     comp.save_cfg = lambda: None
-    comp.lot_file = TMP / f"{name}-lot.json"
-    comp.preset_file = TMP / f"{name}-preset.json"
+    n = next(PLAYERS)                                    # (two sections' players of the same name - Eve, Finn - never
+    comp.lot_file = TMP / f"{name}-{n}-lot.json"         # share a reading or a home-lot-sync.json: a section starts
+    comp.preset_file = TMP / f"{name}-{n}-preset.json"   # from nothing of another's - its "gone", its base)
     comp.cfg["exact_house"] = False
     return comp
 
@@ -898,6 +906,34 @@ async def main():
     print("a partner's newer exact house waiting for the next start: mine isn't saved over it (said once), it comes in "
           "on reopening, and my next one goes on top of it: ok")
 
+    # an exact house the game won't take (its apply popup never opens): tried in EXACT_TRIES runs of the game, then
+    # left - each try opens build mode and pauses the game -, said once; "apply now" tries again
+    tries, was = [], (lotsync.apply_by_title, lotsync.restart_game)
+
+    def apply_fails(call, site_id, title):
+        tries.append(title)
+        raise lotsync.LotError("the apply popup didn't open")
+    lotsync.apply_by_title = apply_fails
+    ben.cfg["pending_lot"] = {"title": "inZOI Co-op Ana old", "folder": "OLD", "site_id": "S", "hash": "hx",
+                              "from": "Ana", "at": time.time()}
+    since = time.time()
+    for _ in range(housesync.EXACT_TRIES + 2):
+        reopen(ben)
+        ben.world, ben.in_build_mode = "play", False
+        await ben.maybe_apply_pending()
+    assert len(tries) == housesync.EXACT_TRIES, tries
+    said = [c["text"] for c in ben.chat if c["time"] >= since and "apply now" in c["text"]]
+    assert len(said) == 1, said
+    ben.world = "play"
+    lotsync.restart_game = lambda call: True
+    assert (await ben.apply_lot_now())["ok"] and "fails" not in ben.cfg["pending_lot"]
+    reopen(ben)
+    await ben.maybe_apply_pending()
+    assert len(tries) == housesync.EXACT_TRIES + 1
+    ben.cfg.pop("pending_lot")
+    lotsync.apply_by_title, lotsync.restart_game = was
+    print("an exact house the game won't take is tried a bounded number of times, said once, and again on apply now: ok")
+
     # one upload of the exact house at a time: the shared loop finding it unconfirmed while it's on its way (megabytes
     # on a slow link) doesn't send it again, and a newer save of the house made meanwhile goes once that one is
     # answered - two versions, not three; and one the server has already (its word came late) isn't sent again
@@ -952,16 +988,24 @@ async def main():
         return True
     lotsync.apply_by_title = apply_listed
     p = ben.cfg["pending_lot"]
+    for _ in range(40):                                      # (the 2 s loop, at home in play mode: until it's tried,
+        await ben.house_tick()                               # however long the home's own work takes first)
+        if tries:
+            break
+        await asyncio.sleep(0.25)
     for _ in range(3):
-        await ben.house_tick()                               # (the 2 s loop, at home in play mode)
+        await ben.house_tick()                               # (and not again in this run of the game)
     assert tries == [p["title"]] and ben.cfg.get("pending_lot"), tries
     ben.world = "out"                                        # (Ben closes the game and starts it again)
     listed.add(p["title"])                                   # (written before this start: the game lists it)
     ben.world = "play"
     reopen(ben)
-    await ben.house_tick()
+    await ben.house_tick()                                   # (the home's first reading in this load: the live house
+    await settle(ana, ben)                                   # comes in first - what that reading found the server
+    await ben.house_tick()                                   # doesn't know goes up -, then the property)
     assert tries == [p["title"]] * 2 and applied[-1] == p["title"], tries
     assert not ben.cfg.get("pending_lot") and ben.cfg["lot_hash"] == p["hash"]
+    await settle(ana, ben)                                   # (and the live house again, on top of the property)
     print("a partner's exact house kept for the next start: applied when the game starts again: ok")
 
     # Ana's exact house waits on Ben's PC for the next start; Ben builds while the server can't be reached and restarts
@@ -988,8 +1032,11 @@ async def main():
     ben.world = "out"
     ben.world = "play"
     reopen(ben)                                              # (the game started again, still offline)
-    for _ in range(2):
-        await ben.house_tick()
+    for _ in range(40):                                      # (ticks as the program's: the home's again-apply of the
+        await ben.house_tick()                               # start goes first, then the exact house - however long
+        if len(tries) > n_tries:                             # that takes on a busy PC)
+            break
+        await asyncio.sleep(0.25)
     assert len(tries) == n_tries + 1 and not ben.cfg.get("pending_lot") and ben.cfg["lot_hash"] == p["hash"], \
         "Ana's newer exact house was held back"
     assert ben.exact_held(exact_key) == v_ana
@@ -1071,6 +1118,7 @@ async def main():
     await conflicts()
     await races()
     await joining()
+    await regressions()
     print("house sync tests passed")
 
 
@@ -2127,6 +2175,342 @@ async def joining():
             srv.close()
 
 
+REGRESSIONS = ("offline_then_older_save", "offline_then_exact_at_start", "first_version_after_reset",
+               "back_from_another_server", "purchase_then_exact_at_start", "edits_while_walls_built")
+
+
+async def regressions(only: str | None = None):
+    """Found by review, each failing before its fix. Players and servers of their own; only: one of REGRESSIONS.
+    - offline_then_older_save: a removal (and a move) made while the server can't be reached, then an older save loaded
+      before it's back: the removal isn't undone once it lands - not sent back up as bought -, the move isn't doubled;
+      both games and the server the same, and my own change coming back isn't said as my partner's
+    - offline_then_exact_at_start: the same, with the partner's exact house applied at the game's next start instead
+    - first_version_after_reset: the server's shared state starts over and my home goes up whole as its first version:
+      what the partner had deleted, back with an older save, stays only in my game (said once) - never in theirs; and my
+      own first version coming in isn't logged as my partner's house
+    - back_from_another_server: back on a server whose house didn't change meanwhile, after playing on another one: what
+      I changed there is compared and goes up (the one base kept was the other server's)
+    - purchase_then_exact_at_start: bought in play mode, not read before the game closed, the partner's exact house
+      waiting for the next start: the purchase goes up before the property replaces the lot, and comes back after it
+    - edits_while_walls_built: what the player changes in the build mode an apply has open while it builds the walls
+      goes up as theirs, and what they took out isn't put back"""
+    import base64
+    import hashlib
+    import logging
+    import shutil
+    import inzoi_mp_server as mp
+    import lotsync
+    real = (lotsync.save_lot, lotsync.apply_by_title, lotsync.MYSITES)
+    lotsync.MYSITES = TMP / "MySites-regressions"
+    lotsync.MYSITES.mkdir(parents=True, exist_ok=True)
+    games, listed, servers, tasks = {}, set(), [], []
+    home = [obj(1, "Sofa01", 100, 100), obj(2, "Lamp01", 300, 50), obj(3, "Table03", 500, 500)]
+
+    def fake_save(call, site_id, title):                 # (the property: the whole lot as the game holds it)
+        blob = json.dumps(sorted((key(o) for o in games[call].objects), key=json.dumps)).encode()
+        return {"hash": hashlib.sha1(blob).hexdigest()[:8],
+                "files": {"site.dat": base64.b64encode(blob).decode(),
+                          "meta.json": base64.b64encode(b'{"Title":"x"}').decode()}}
+
+    def fake_apply(call, site_id, title):                # (the game lists properties only when it starts: listed)
+        for folder in (f for f in lotsync.MYSITES.iterdir() if f.is_dir() and f.name in listed):
+            if json.loads((folder / "meta.json").read_text("utf-8")).get("Title") == title:
+                lot = json.loads((folder / "site.dat").read_bytes())
+                games[call].objects = [obj(3000 + i, o["table_id"], o["x"], o["y"], o["yaw"], o["floor"], o["z"])
+                                       for i, o in enumerate(lot)]
+                return True
+        raise lotsync.NotListed(title)
+    lotsync.save_lot, lotsync.apply_by_title = fake_save, fake_apply
+
+    async def serve(data=None):
+        data = data or TMP / f"server-regressions-{len(servers)}"
+        server = mp.Server(mp.Store(data))
+        srv = await asyncio.start_server(server.handle, "127.0.0.1", 0, limit=mp.MAX_LINE)
+        servers.append((server, srv))
+        return server, srv, srv.sockets[0].getsockname()[1], data
+
+    def players(names, port):
+        out = []
+        for name in names:
+            g = StandIn([dict(o, location=dict(o["location"])) for o in home])
+            p = player(name, port, g)
+            p.last_full_state = {"site": 1038}
+            games[g.call] = g
+            out.append((p, g))
+        return out
+
+    def connect(*ps):
+        for p in ps:
+            tasks.append(asyncio.create_task(p.session()))
+
+    async def stop(*ps):
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        tasks.clear()
+        for p in ps:
+            p.writer, p.me_id = None, None               # (as run() does after a session)
+
+    async def joined(*ps):
+        assert await until(lambda: all(p.me_id and p.shared_conn is p.writer for p in ps)
+                           and all(q.me_id in p.remotes for p in ps for q in ps if q is not p), 15)
+
+    def layout(g):
+        return sorted((o["table_id"], round(o["location"]["x"]), round(o["location"]["y"])) for o in g.objects)
+
+    def live(p):
+        return sorted((o["table_id"], round(o["x"]), round(o["y"])) for o in p.shared[KEY]["value"]["objects"])
+
+    async def ticks(p, *others, n=3):                    # (the 2 s loop at home, the home read at each one)
+        refresh, housesync.REFRESH_EVERY = housesync.REFRESH_EVERY, 0
+        try:
+            for _ in range(n):
+                await p.house_tick()
+                await settle(p, *others)
+        finally:
+            housesync.REFRESH_EVERY = refresh
+
+    def said(p, since, text):
+        return [c["text"] for c in p.chat if c["time"] >= since and text in c["text"]]
+
+    async def in_step(tag, exact=False):
+        _, _, port, _ = await serve()
+        (ana, ga), (ben, gb) = players((f"Ana{tag}", f"Ben{tag}"), port)
+        ana.cfg["exact_house"] = exact
+        connect(ana, ben)
+        await joined(ana, ben)
+        await build(ana, ga, lambda g: g.objects.append(obj(41, "Shelf05", 700, 100)))
+        assert await until(lambda: "Shelf05" in gb.tables())
+        if exact:
+            assert await until(lambda: (ben.cfg.get("pending_lot") or {}).get("hash")), "Ana's exact house wasn't kept"
+        await settle(ana, ben)
+        await ticks(ben, ana)
+        return ana, ga, ben, gb
+
+    async def game_back(p, g, restarted, objects=None):
+        """The game to the main menu and back (restarted: closed and started again - it lists the properties written
+        before; else another save loaded: objects, its home)."""
+        p.world = "out"
+        await p.house_tick()
+        reopen(p, restarted=restarted)
+        if restarted:
+            listed.update(f.name for f in lotsync.MYSITES.iterdir() if f.is_dir())
+        if objects is not None:
+            g.objects = objects
+        p.world = "play"
+
+    async def offline_change_then(lose, tag):
+        """Ben, while the server can't be reached, takes the sofa out - or moves the table - in build mode; then his lot
+        is replaced before it's back (lose: an older save loaded, or the partner's exact house at the next start)."""
+        problems = []
+        def take_sofa(g):
+            g.objects = [o for o in g.objects if o["table_id"] != "Sofa01"]
+
+        def move_table(g):
+            g.objects = [o for o in g.objects if o["table_id"] != "Table03"] + [obj(903, "Table03", 200, 600)]
+        for kind, change in (("rm", take_sofa), ("mv", move_table)):
+            ana, ga, ben, gb = await in_step(f"{tag}{kind}", exact=lose == "exact")
+            older = [dict(o, location=dict(o["location"])) for o in gb.objects]
+            writer = ben.writer
+            ben.writer = None                            # (the server can't be reached)
+            await build(ben, gb, change)
+            want = layout(gb)
+            assert ben.pending(KEY), "(test: no change waiting)"
+            if lose == "exact":
+                await game_back(ben, gb, restarted=True)
+            else:
+                await game_back(ben, gb, restarted=False, objects=older)
+            await ticks(ben, ana)
+            assert lose != "exact" or not ben.cfg.get("pending_lot"), "(test: the exact house wasn't applied)"
+            since = time.time()
+            ben.writer, ben.house_push_at = writer, 0.0  # (the server's back)
+            for _ in range(3):
+                await ben.push_dirty_house()
+                await settle(ana, ben)
+            await ticks(ben, ana)
+            await ticks(ana, ben)
+            if not live(ana) == layout(ga) == layout(gb) == want:
+                problems.append(f"{kind}: server {live(ana)}, Ana {layout(ga)}, Ben {layout(gb)}, want {want}")
+            if said(ben, since, f"{ana.cfg['name']} changed the house"):
+                problems.append(f"{kind}: my own change said as my partner's: {said(ben, since, 'changed the house')}")
+            await stop(ana, ben)
+        assert not problems, problems
+
+    async def offline_then_older_save():
+        await offline_change_then("older", "RO")
+        print("a removal or move made offline, then an older save loaded before the server is back: not undone or "
+              "doubled once it lands, in both games and on the server; my own change not said as my partner's: ok")
+
+    async def offline_then_exact_at_start():
+        await offline_change_then("exact", "RX")
+        print("a removal or move made offline, then the partner's exact house applied at the next start: done again, "
+              "not sent back up as bought: ok")
+
+    async def first_version_after_reset():
+        server, srv, port, data = await serve()
+        (ana, ga), (ben, gb) = players(("AnaRF", "BenRF"), port)
+        connect(ana, ben)
+        await joined(ana, ben)
+        older = [dict(o, location=dict(o["location"])) for o in ga.objects]     # (Ana's autosave: the lamp in it)
+        await build(ben, gb, lambda g: setattr(g, "objects", [o for o in g.objects if o["table_id"] != "Lamp01"]))
+        assert await until(lambda: "Lamp01" not in ga.tables())
+        await settle(ana, ben)
+        await stop(ana, ben)
+        await server.shutdown()                          # (its shared state starts over: a new epoch)
+        srv.close()
+        shutil.rmtree(data / "shared")
+        _, _, port, _ = await serve(data)
+        ana.cfg["port"] = ben.cfg["port"] = port
+        await game_back(ana, ga, restarted=False, objects=older)     # (Ana loads her older save: the lamp is back)
+        connect(ana)
+        await joined(ana)
+        assert not ana.shared.get(KEY)
+        logs, handler, hl = [], logging.Handler(), logging.getLogger("housesync")
+        handler.emit = lambda r: logs.append(r.getMessage())
+        level = hl.level
+        hl.addHandler(handler)
+        hl.setLevel(logging.INFO)
+        since = time.time()
+        try:
+            await ticks(ana)                             # (her home's first reading: it goes up whole, the first)
+            assert await until(lambda: ana.shared.get(KEY))
+            await settle(ana)
+            await ticks(ana)
+        finally:
+            hl.removeHandler(handler)
+            hl.setLevel(level)
+        problems = [f"my own first version logged as my partner's: {m}" for m in logs if "Your partner's house" in m]
+        if "Lamp01" in [x[0] for x in live(ana)]:
+            problems.append(f"the lamp Ben deleted is in the first version: {live(ana)}")
+        if "Lamp01" not in ga.tables() or [o["table_id"] for o in (ana.hs().get("local_only") or {}).get("objects")
+                                           or []] != ["Lamp01"]:
+            problems.append(f"the lamp isn't kept in Ana's game only: {ana.hs().get('local_only')}")
+        if len(said(ana, since, "kept in your game only")) != 1:
+            problems.append(f"said {len(said(ana, since, 'kept in your game only'))} times")
+        assert not problems, problems
+        connect(ben)
+        await joined(ana, ben)
+        assert await until(lambda: ben.seen(KEY) >= ana.shared[KEY]["v"], 15)
+        await settle(ana, ben)
+        await ticks(ben, ana)
+        await ticks(ana, ben)
+        assert "Lamp01" not in gb.tables() and "Lamp01" not in [x[0] for x in live(ana)], (layout(gb), live(ana))
+        assert layout(gb) == live(ana) == sorted(x for x in layout(ga) if x[0] != "Lamp01"), (layout(ga), layout(gb))
+        assert len(said(ana, since, "kept in your game only")) == 1
+        await stop(ana, ben)
+        print("the first version after the server's shared state started over: what the partner had deleted, back with "
+              "an older save, stays only in that game (said once), never in theirs; not logged as the partner's: ok")
+
+    async def back_from_another_server():
+        _, _, port_a, _ = await serve()
+        _, _, port_b, _ = await serve()
+        (ana, ga), (ben, gb) = players(("AnaRS", "BenRS"), port_a)
+        for p in (ana, ben):                             # (the save each plays, their multiplayer save on A)
+            p.save_session["folder"] = "MySave"
+            p.cfg["mp_save"] = {"folder": "MySave", "name": "my save"}
+        connect(ana, ben)
+        await joined(ana, ben)
+        await build(ana, ga, lambda g: g.objects.append(obj(41, "Shelf05", 700, 100)))
+        assert await until(lambda: "Shelf05" in gb.tables())
+        await settle(ana, ben)
+        v_a = ana.shared[KEY]["v"]
+        tasks.pop().cancel()                             # (Ben goes to server B for a while; Ana stays on A)
+        await asyncio.sleep(0.1)
+        ben.writer, ben.me_id = None, None
+        ben.cfg["port"] = port_b
+        connect(ben)
+        await joined(ben)
+        ben.cfg["mp_save"], ben.save_session["mp"] = {"folder": "MySave", "name": "my save"}, True    # ("use it")
+        await ticks(ben)
+        await build(ben, gb, lambda g: g.objects.append(obj(77, "Bed07", 300, 300)))
+        assert await until(lambda: "Bed07" in [x[0] for x in live(ben)])
+        await settle(ben)
+        tasks.pop().cancel()                             # (back to A, whose house didn't change meanwhile)
+        await asyncio.sleep(0.1)
+        ben.writer, ben.me_id = None, None
+        ben.cfg["port"] = port_a
+        connect(ben)
+        await joined(ana, ben)
+        assert ben.mp_active() and ben.seen(KEY) >= v_a
+        for _ in range(2):
+            await settle(ana, ben)
+            await ticks(ben, ana)
+            await ticks(ana, ben)
+        assert "Bed07" in ga.tables() and "Bed07" in [x[0] for x in live(ana)], (layout(ga), live(ana))
+        assert layout(ga) == layout(gb) == live(ana), (layout(ga), layout(gb), live(ana))
+        await stop(ana, ben)
+        print("back on a server whose house didn't change, after another one: what I changed there is compared and "
+              "goes up: ok")
+
+    async def purchase_then_exact_at_start():
+        ana, ga, ben, gb = await in_step("RP", exact=True)
+        for _ in range(2):
+            await ben.house_tick()                       # (play mode at home: the reading is fresh, not read again)
+            await settle(ana, ben)
+        gb.objects.append(obj(88, "Fridge09", 700, 700))     # (bought in play mode, not read yet)
+        await ben.house_tick()
+        await settle(ana, ben)
+        assert "Fridge09" not in [x[0] for x in live(ana)], "(test: read already)"
+        await game_back(ben, gb, restarted=True)         # (he quits; the game saved; the next start, the same save)
+        for _ in range(3):
+            await ben.house_tick()                       # (the 2 s loop at home: the 5 min reading isn't due)
+            await settle(ana, ben)
+        await ticks(ben, ana)
+        await ticks(ana, ben)
+        assert not ben.cfg.get("pending_lot"), "the partner's exact house wasn't applied"
+        assert "Fridge09" in [x[0] for x in live(ana)] and "Fridge09" in ga.tables() and "Fridge09" in gb.tables(), \
+            (live(ana), layout(ga), layout(gb))
+        assert layout(ga) == layout(gb) == live(ana)
+        await stop(ana, ben)
+        print("bought in play mode, not read before the game closed, the partner's exact house waiting for the next "
+              "start: it goes up first, and comes back after the property: ok")
+
+    async def edits_while_walls_built():
+        ana, ga, ben, gb = await in_step("RW")
+        real_call, done = gb.call, []
+
+        def slow_walls(tool, **kw):                      # (the game takes a moment per wall; Ben acts meanwhile)
+            if tool == "building.construct_wall" and not done:
+                done.append(1)
+                gb.objects = [o for o in gb.objects if o["table_id"] != "Sofa01"] + [obj(99, "Rug05", 250, 250)]
+            return real_call(tool, **kw)
+        ben.game.call = slow_walls
+
+        def wall_and_chair(g):
+            g.walls.append(wall(1012.5, 12.5, 1012.5, 312.5))
+            g.objects.append(obj(42, "Chair02", 520, 470))
+        await build(ana, ga, wall_and_chair)
+        assert await until(lambda: done and "Chair02" in gb.tables(), 15)
+        await settle(ana, ben)
+        ben.game.call = real_call
+        for _ in range(2):
+            await ticks(ben, ana)
+            await ticks(ana, ben)
+        assert not gb.count("building.place_object", object_table_id="Sofa01"), "the sofa Ben took out was put back"
+        assert "Sofa01" not in ga.tables() and "Rug05" in ga.tables(), layout(ga)
+        assert layout(ga) == layout(gb) == live(ana), (layout(ga), layout(gb), live(ana))
+        assert gb.count("building.construct_wall") == 1, "Ben's edits made walls be built again"
+        await stop(ana, ben)
+        print("what the player changes while an apply builds the walls goes up as theirs, nothing of it put back: ok")
+
+    cases = {"offline_then_older_save": offline_then_older_save,
+             "offline_then_exact_at_start": offline_then_exact_at_start,
+             "first_version_after_reset": first_version_after_reset,
+             "back_from_another_server": back_from_another_server,
+             "purchase_then_exact_at_start": purchase_then_exact_at_start,
+             "edits_while_walls_built": edits_while_walls_built}
+    assert set(cases) == set(REGRESSIONS)
+    try:
+        for name in REGRESSIONS:
+            if only in (None, name):
+                await cases[name]()
+    finally:
+        await stop()
+        lotsync.save_lot, lotsync.apply_by_title, lotsync.MYSITES = real
+        for _, srv in servers:
+            srv.close()
+
+
 if __name__ == "__main__":
     if "--rollback" in sys.argv:
         asyncio.run(rollback_and_restart())
@@ -2136,5 +2520,9 @@ if __name__ == "__main__":
         asyncio.run(races())
     elif "--joining" in sys.argv:
         asyncio.run(joining())
+    elif any(a.startswith("--regressions") for a in sys.argv):
+        pick = next(a for a in sys.argv if a.startswith("--regressions")).partition("=")[2] or None
+        assert pick in (None, *REGRESSIONS), f"--regressions=one of {', '.join(REGRESSIONS)}"
+        asyncio.run(regressions(pick))
     else:
         asyncio.run(main())

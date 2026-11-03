@@ -25,6 +25,10 @@
   on it, the partner's state goes along
 - a change made offline survives leaving the world before the server is back: sent at the next first read if the
   save kept it and the server has nothing newer for that object
+- a partner's change, then mine inside its quiet time, twice in a row (within settle_span()): mine reaches the server
+  and the partner's game both times; the to-and-fro guard is only for a settle answering a settle (its value says so)
+- a change made after the program started while the server couldn't be reached (nothing of it known yet) wins when
+  the connection comes, over an older partner change of that object: pending, or kept through leaving the world
 
     python tools/test_objsync.py
 """
@@ -910,11 +914,141 @@ async def kept(server, port):
     proxy.srv.close()
 
 
+class FakeClock:
+    """objsync's clock (it only calls time.time()), moved by hand: quiet times and settle spans without waiting."""
+
+    def __init__(self):
+        self.t = 1_000_000.0
+
+    def time(self):
+        return self.t
+
+
+def newest(server, table):
+    return max(obj_items(server, table).values(), key=lambda i: i["v"])
+
+
+async def settle_again(server, port):
+    """Ben switches the lamp on; Ana's game takes it and she switches it off inside the quiet time: sent once that
+    time is over. Ben switches it on again within settle_span() and Ana off again: the once-a-span guard (there for a
+    game that keeps putting an object back) used to leave it here, Ana's change never sent nor undone - her lamp off,
+    Ben's and the server's on, for good. A settle's value says it's one; only a settle answering it is left."""
+    real, clock = objsync.time, FakeClock()
+    objsync.time = clock
+    try:
+        ana = await PC("AnaR1", Game([(4, "Lamp01", 900, 0, 0, "OnOff:Off", "None")])).connect(port)
+        ben = await PC("BenR1", Game([(9, "Lamp01", 903, -2, 0, "OnOff:Off", "None")])).connect(port)
+
+        async def tick(n=1):
+            for _ in range(n):
+                clock.t += objsync.READ_EVERY
+                for pc in (ana, ben):
+                    pc.retry_objects()
+                    pc.tick()
+                await settle(ana, ben)
+
+        await tick()
+        settled_at = None
+        for round_ in (1, 2):
+            ben.game.of("Lamp01")["s"]["OnOff"] = "On"
+            await tick(2)                                    # (his change goes; Ana's game takes it, a read shows it)
+            assert ana.game.look("Lamp01")[0] == ["OnOff:On"], (round_, ana.game.objs)
+            ana.game.of("Lamp01")["s"]["OnOff"] = "Off"      # (inside the quiet time: not sent yet)
+            await tick()
+            assert ben.game.look("Lamp01")[0] == ["OnOff:On"], "a change inside the quiet time was sent at once"
+            await tick(9)                                    # (the quiet time is over: settled)
+            item = newest(server, "Lamp01")
+            assert ana.game.look("Lamp01")[0] == ben.game.look("Lamp01")[0] == ["OnOff:Off"], \
+                (round_, "the two games stayed apart", ana.game.objs, ben.game.objs, item)
+            assert item["by"] == ana.me_id and item["value"]["s"] == ["OnOff:Off"], (round_, item)
+            if settled_at is None:
+                settled_at = clock.t
+        assert clock.t - settled_at < objsync.settle_span(), "the second round wasn't within the settle span"
+        assert newest(server, "Lamp01")["value"].get("settle") is True       # (what a settle sends says so)
+        n = server.seq
+        await tick(30)                                       # (nobody touches it: nothing goes to and fro)
+        assert server.seq == n and ana.game.look("Lamp01")[0] == ben.game.look("Lamp01")[0] == ["OnOff:Off"]
+        print("a partner's change, then mine inside its quiet time, twice within the settle span: mine reaches the "
+              "server and the partner's game both times: ok")
+        for p in (ana, ben):
+            await p.drop()
+    finally:
+        objsync.time = real
+
+
+async def before_joining(port, name):
+    """Ben switched the TV and the lamp on long ago (Ana's game took it); Ana's program then starts again (the same
+    player and save) while the server can't be reached: nothing of it is known in this run. -> (Ana's new PC, Ben)"""
+    lot = [(2, "Tv01", 500, 0, 50, "OnOff:Off", "None"), (4, "Lamp01", 900, 0, 0, "OnOff:Off", "None")]
+    ana = await PC("Ana" + name, Game(lot)).connect(port)
+    ben = await PC("Ben" + name, Game(moved(lot))).connect(port)
+    ana.tick(), ben.tick()
+    ben.game.of("Tv01")["s"] = {"OnOff": "On"}
+    ben.game.of("Lamp01")["s"] = {"OnOff": "On"}
+    ben.tick()
+    await settle(ana, ben)
+    ana.tick()
+    assert ana.game.look("Tv01")[0] == ana.game.look("Lamp01")[0] == ["OnOff:On"], ana.game.objs
+    await ana.drop()
+    again = PC("Ana" + name, ana.game)
+    again.cfg = dict(ana.cfg)
+    again.tick()                                             # (the first read: the starting point)
+    return again, ben
+
+
+async def blind_start(server, port):
+    """A change made before the server was ever reached in this run used to go with base 0 (as if the server had
+    nothing): the server refused it for Ben's old change and Ana's TV was put back on. It wins when the connection
+    comes."""
+    again, ben = await before_joining(port, "R2")
+    again.game.of("Tv01")["s"] = {"OnOff": "Off"}
+    again.tick()
+    assert len(again.obj_pending) == 1, again.obj_pending
+    await again.connect(port)
+    again.retry_objects()
+    await settle(again, ben)
+    again.tick(), ben.tick()
+    await settle(again, ben)
+    tv = newest(server, "Tv01")
+    assert tv["by"] == again.me_id and tv["value"]["s"] == ["OnOff:Off"], ("the server kept Ben's old change", tv)
+    assert again.game.look("Tv01")[0] == ben.game.look("Tv01")[0] == ["OnOff:Off"], (again.game.objs, ben.game.objs)
+    assert not again.obj_pending
+    print("a change made before the server was ever reached in this run wins when the connection comes: ok")
+    for p in (again, ben):
+        await p.drop()
+
+
+async def blind_kept(server, port):
+    """The same, and the world is left (and loaded again) before the connection comes: the kept change used to be
+    dropped at the next first read (its scope had no epoch yet), Ben's old one put on the lamp. It wins too."""
+    third, ben = await before_joining(port, "R3")
+    third.game.of("Lamp01")["s"] = {"OnOff": "Off"}
+    third.tick()
+    third.world = "out"
+    third.objsync_reset()
+    assert list(third.obj_kept) and not third.obj_pending
+    await third.connect(port)
+    third.world, third.mod["instance"] = "play", "i2"
+    third.tick()                                             # (the first read of the reloaded world)
+    third.retry_objects()
+    await settle(third, ben)
+    third.tick(), ben.tick()
+    await settle(third, ben)
+    lamp = newest(server, "Lamp01")
+    assert lamp["by"] == third.me_id and lamp["value"]["s"] == ["OnOff:Off"], ("the kept change was dropped", lamp)
+    assert third.game.look("Lamp01")[0] == ben.game.look("Lamp01")[0] == ["OnOff:Off"], (third.game.objs,
+                                                                                          ben.game.objs)
+    assert not third.obj_pending and not third.obj_kept
+    print("... and one kept through leaving the world before the connection came wins too: ok")
+    for p in (third, ben):
+        await p.drop()
+
+
 async def main():
     logging.basicConfig(level=logging.WARNING)
     for n, case in enumerate((basics, reload, lambda s, p: crossing(s, p, "ana"), lambda s, p: crossing(s, p, "ben"),
                               lost, aliases, lambda s, p: near(s, p, False), lambda s, p: near(s, p, True), quiet,
-                              placed_again, moves, kept)):
+                              placed_again, moves, kept, settle_again, blind_start, blind_kept)):
         server = mp.Server(mp.Store(TMP / f"server{n}"))         # (each case on its own server: a clean lot)
         srv = await asyncio.start_server(server.handle, "127.0.0.1", 0, limit=mp.MAX_LINE)
         await case(server, srv.sockets[0].getsockname()[1])

@@ -22,7 +22,9 @@ reaction to the state (which must not go back to the partner), and that can't be
 that moment is over, the object is compared with the server's state once (settle_objects), so the two PCs don't stay
 apart: a change made here after the partner's state took is sent (the last change wins); anything else - the game
 didn't take the state, the save put an old one back after a reload - is put back to the server's state. A game that
-keeps putting an object back is settled once and then left, so the PCs can't flip it to and fro.
+keeps putting an object back is settled once and then left, so the PCs can't flip it to and fro: what a settle sends
+says so ("settle": true in the value), and a settle answering it is the one left. A change made here after the
+partner's own change took is always sent, however soon after the last settle.
 
 An object is compared with its own last read (the game's entity id), not with whatever stood at that spot: the house
 sync's remove + place (the partner turned or moved something) and the exact house rebuilding the lot put new objects in
@@ -32,7 +34,8 @@ moved here (the same entity at another spot) takes its state along: when the ser
 that, it's sent for the new spot (the partner's game places it anew, in its default states), and the server's keys for
 where it was are removed once that's confirmed. A change of mine still unconfirmed when the world is left (or
 multiplayer paused) isn't forgotten: at the next first read it goes again if the game still has the object so and the
-server got nothing newer for it meanwhile.
+server got nothing newer for it meanwhile. A change made before anything of the server was known in this run (the
+program started while it couldn't be reached) wins when the connection comes: it goes on the server's version then.
 """
 import asyncio
 import hashlib
@@ -397,7 +400,9 @@ class ObjSync:
         - otherwise (the game didn't take it; or it was this game being brought to the server's states - the first
           read, a snapshot... - when the save's own old states don't count): the server's state is put on it again.
         Once an object at most every settle_span(): a game that keeps putting an object back is left after that,
-        instead of the two PCs turning it to and fro."""
+        instead of the two PCs turning it to and fro (what the partner's settle sent, answered here). A change made
+        here after a partner's own change took ("genuine": not sent by a settle) is sent whenever: left, the two PCs
+        would stay apart for good."""
         now, span = time.time(), settle_span()
         self.obj_settled = {k: t for k, t in self.obj_settled.items() if now - t < span}
         prefix, groups = f"obj:{site}:", None
@@ -417,23 +422,26 @@ class ObjSync:
             want = item.get("value") or {}
             if holds(o, sig(want)) or self.superseded(key) or self.seen(key) < v:
                 continue                # (as the server has it; or a newer state not put on it yet: reconcile_objects)
-            if hk in self.obj_settled:
+            if hk in self.obj_settled and not (a[7] == "genuine" and landed):
+                # (a settle answering a settle, or a state the game won't keep: the to and fro stops here. A partner's
+                # own change that took, changed here after, is always a change of mine: never left apart)
                 log.info("%s keeps going back to %s here after the server's state is put on it: left as it is",
                          o["t"], sig(o) or "-")
                 continue
             self.obj_settled[hk] = now
             if a[7] and landed:
                 log.info("%s changed here right after the partner's state was put on it: sent now", o["t"])
-                self.push_object(site, hk, want, o)
+                self.push_object(site, hk, want, o, settle=True)
             elif self.objects_live(site):
                 log.info("%s isn't in the server's state after it was put on it (%s): put on it again", o["t"],
                          sig(o) or "-")
                 self.apply_object(key, item, hk)
 
     # ---------------------------------------------------------------- sending
-    def push_object(self, site: int, key: str, before: dict, o: dict, moved=()):
+    def push_object(self, site: int, key: str, before: dict, o: dict, moved=(), settle: bool = False):
         """Send the object's states as my change (moved: the server's keys for where it stood before it moved here,
-        removed once this is confirmed)."""
+        removed once this is confirmed; settle: sent by settle_objects, which the value says - "settle": true - so the
+        partner's settle doesn't answer it in turn more than once: sig() and 0.9.37 companions ignore it)."""
         k = f"obj:{site}:{key}"
         log.info("%s here changed: %s -> %s", o["t"], sig(before) or "-", sig(o) or "-")
         self.obj_counts["sent"] += 1
@@ -441,7 +449,8 @@ class ObjSync:
         old = self.obj_pending.get(k)
         connected = bool(self.writer and self.me_id)
         p = self.obj_pending[k] = {
-            "o": value_of(o), "sig": sig(o), "tries": 0, "next": 0.0, "busy": False,
+            "o": dict(value_of(o), settle=True) if settle else value_of(o), "sig": sig(o), "tries": 0, "next": 0.0,
+            "busy": False,
             # the version this change was made on (an older unconfirmed change of mine never made it: its base stays)
             "base": old["base"] if old else version(self.shared.get(k)),
             # the first send simply wins (the server orders it); a resend, or a change made while the server couldn't
@@ -449,7 +458,11 @@ class ObjSync:
             "use_base": not connected or bool(old and old["use_base"]),
             # the newest version I'd seen, of that server's state, when it was made (revive_kept: newer ones count)
             "seq": int(getattr(self, "shared_seq", 0) or 0), "scope": self.obj_scope(),
-            "moved": list(moved) + [m for m in (old or {}).get("moved") or [] if m not in moved]}
+            "moved": list(moved) + [m for m in (old or {}).get("moved") or [] if m not in moved],
+            # made before anything of the server was known in this run (no snapshot yet: the program started while it
+            # couldn't be reached): base, seq and scope above mean nothing; the first snapshot gives them
+            # (on_objects_snapshot) and this change wins, as one made live would
+            "blind": getattr(self, "shared_conn", None) is None}
         if connected:
             p["busy"] = True
             self.shared_task(self.send_object(k, p))
@@ -559,13 +572,19 @@ class ObjSync:
             if hk is not None and mine in self.obj_pending and not self.superseded(mine):
                 del self.obj_pending[mine]
         # The newest version of the key, mine included: if a partner's older one was put on the object after I sent
-        # mine, this puts mine back (nothing happens when the object is like that already).
-        self.apply_object(key, item, live=True)
+        # mine, this puts mine back (nothing happens when the object is like that already). live: whether it's another
+        # PC's settle (settle_objects answers that at most once a span) or a player's own change
+        self.apply_object(key, item, live="settle" if (item.get("value") or {}).get("settle") else "genuine")
 
     def on_objects_snapshot(self):
         """The whole shared state came (joining, reconnecting): the lot's objects are brought to it at once (the newest
-        item of each object, not every item in turn), and my unconfirmed changes go again on the version they saw."""
-        for p in self.obj_pending.values():
+        item of each object, not every item in turn), and my unconfirmed changes go again on the version they saw.
+        One made before anything of the server was known in this run ("blind") goes on the server's current version:
+        it wins, as a change made live would (when it was made against what the server had can't be known)."""
+        for k, p in list(self.obj_pending.items()) + list(self.obj_kept.items()):
+            if p.get("blind"):
+                p.update(base=version(self.shared.get(k)), seq=int(getattr(self, "shared_seq", 0) or 0),
+                         scope=self.obj_scope(), blind=False)
             p["use_base"] = True
         if self.obj_site is not None:
             self.reconcile_objects(self.obj_site, full=True)
