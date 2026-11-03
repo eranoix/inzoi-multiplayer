@@ -366,6 +366,11 @@ async def other_address():
         assert isinstance(welcome.get("addresses"), list), welcome.keys()
         info, _ = await servers.ask(f"127.0.0.1:{port}", {"t": "info"}, "info", timeout=3)
         assert "addresses" not in info, "a stranger was told the host's addresses"
+        # the companion keeps them from its welcome (as it really arrives: through on_message)
+        comp, _ = make({"server": "127.0.0.1", "port": port})
+        await comp.on_message(dict(welcome, addresses=[f"127.0.0.1:{port}", "100.64.0.7:24242"]))
+        assert comp.cfg.get("server_addrs", {}).get(sid) == [f"127.0.0.1:{port}", "100.64.0.7"], \
+            comp.cfg.get("server_addrs")                         # (the default port isn't written: address_text)
 
         dead = f"127.0.0.1:{free_port()}"                       # (the picked address: nothing answers there)
         real = servers.netinfo.discover

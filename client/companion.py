@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.45"
+VERSION = "0.9.46"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -840,6 +840,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             # connection. Each step on its own: an odd partner record (a state the server relayed as it was) or a bug
             # in one check can't leave the rest of the welcome undone, nor this whole session unable to share.
             self.welcome_step("the server's settings", self.adopt_server, m.get("server"), m.get("admin"))
+            self.welcome_step("the server's addresses", self.note_addresses, m.get("server"), m.get("addresses"))
             if "shared" in m:                            # (epoch: which shared state the versions belong to)
                 self.welcome_step("the shared state", self.on_shared_snapshot, m.get("shared"), m.get("seq") or 0,
                                   m.get("epoch"))
