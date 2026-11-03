@@ -7,6 +7,7 @@ restarts the game) gets the whole state in the server's welcome and brings their
 
     house:<lot>:live   the couple's home as the game's commands read it (objects, walls, storey heights)
     house:<lot>:exact  the same home as the game's own saved property (paint, floors, roofs, customization: lotsync.py)
+    obj:<lot>:<key>    one object's states there (on/off, the TV's channel...: objsync.py)
     family             {"together": true, "head": <player id>, "home_site": <lot>, "members": [ids]}
 
 Each value carries who set it; a PC never re-applies its own change, and remembers the last version it applied of each
@@ -87,6 +88,8 @@ class SharedState:
                 self.on_shared_house_exact(key, item, snapshot)
             elif key == "family":
                 self.on_shared_family(item, snapshot)
+            elif key.startswith("obj:"):
+                self.on_shared_object(key, item, snapshot)
         except Exception as e:                           # noqa: BLE001
             log.warning("applying shared %s: %s", key, e)
 

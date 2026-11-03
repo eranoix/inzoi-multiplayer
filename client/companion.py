@@ -36,6 +36,7 @@ import install  # noqa: E402
 import telemetry  # noqa: E402
 import posesync  # noqa: E402
 import shared  # noqa: E402
+import objsync  # noqa: E402
 import mods  # noqa: E402
 import saves  # noqa: E402
 import servers  # noqa: E402
@@ -49,7 +50,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.37"
+VERSION = "0.9.38"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -363,7 +364,7 @@ class Remote:
         self.outfit = None
 
 
-class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.SharedState, servers.Servers):
+class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.SharedState, objsync.ObjSync, servers.Servers):
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.version = VERSION
@@ -430,6 +431,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         self.house_init()                   # couple features: requests, backups, undo (couple.py)
         self.tele = telemetry.Telemetry()   # everything sent, received and shown, for tools/telemetry_report.py
         self.pose_init()                    # skeleton mirroring (posesync.py + lua/B1/Main.lua)
+        self.objsync_init()                 # the home's object states (objsync.py)
         self.shared_init()                  # the server's shared state: the truth for everyone (shared.py)
         self.forget_shared_world()
 
@@ -486,7 +488,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                              "(or close it first).") from None
         self.tasks = [asyncio.create_task(self.keep_running(loop)) for loop in (
             self.game_loop, self.act_loop, self.mailbox_loop, self.mods_loop, self.update_loop, self.menu_loop, self.directory_loop,
-            self.ingame_loop, self.lan_loop, self.pose_loop, self.shared_loop)]
+            self.ingame_loop, self.lan_loop, self.pose_loop, self.shared_loop, self.objsync_loop)]
         backoff = 2
         while True:
             self.wake.clear()
@@ -1050,7 +1052,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
 
     def on_report(self, kind: str, text: str):
         self.mod["beat"] = time.time()       # any report means the controller is there (on_begin runs even paused)
-        if kind not in ("me", "beat", "status"):
+        if kind not in ("me", "beat", "status", "states"):
             self.tele.rec("lua", kind=kind, text=str(text)[:500])
         if kind == "restart":
             self.mod["instance"] = text
@@ -1120,6 +1122,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             self.on_social_report(text)
         elif kind == "me":
             self.on_my_position(text)
+        elif kind == "states":
+            self.on_states_report(text)
         elif kind == "log":
             log.info("[game] %s", text)
 

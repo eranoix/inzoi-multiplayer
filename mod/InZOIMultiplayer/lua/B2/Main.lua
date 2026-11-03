@@ -787,6 +787,68 @@ local OPS = {
         p.actQueued = { bag = op.bag, target = target, t = 0, at = op.x and { x = op.x, y = op.y } or nil }
         return string.format("%s does %s%s", op.key, op.bag, target and (" on " .. target) or "")
     end,
+    -- Object states of a lot (on/off, open/closed, dirty..., the TV channel), for the companion's objsync.py: one line a
+    -- game object "entity|table|x|y|z|group:state,group:state|channel" (the Slot groups, who sits where, are left out:
+    -- the skeletons show that), reported as "states" with the lot first.
+    read_states = function(op)
+        local m = em()
+        local site = m:FindSite(eid(op.site))
+        if not site then return nil end
+        local SC, T = INZOI.FB2StateComponent, inzoi.EB2ComponentType
+        local objs, lines = site:GetObjects(), { tostring(op.site) }
+        for i = 1, objs:Num() do
+            local id = objs:Get(i)
+            local o = m:FindGameObject(id)
+            local ok, sc = pcall(function() return o and o:GetComponent(T.State) end)
+            if ok and sc then
+                local parts = {}
+                pcall(function()
+                    local keys = sc.States:Keys()
+                    for k = 1, keys:Num() do
+                        local st = sc.States:Find(keys:Get(k))
+                        local g = st and tostring(st.StateGroupId) or ""
+                        if st and g ~= "" and not g:match("^Slot") then parts[#parts + 1] = g .. ":" .. tostring(st.StateId) end
+                    end
+                end)
+                table.sort(parts)
+                local l = o:GetLocation()
+                lines[#lines + 1] = string.format("%d|%s|%.0f|%.0f|%.0f|%s|%s", id.Value, tostring(o:GetObjectTableId()),
+                    l.X, l.Y, l.Z, table.concat(parts, ","), tostring(SC.GetCurrentChannelId(sc)))
+            end
+        end
+        report("states", table.concat(lines, ";"))
+        return nil
+    end,
+    -- {site, table, x, y, z, states = {"group:state", ...}, channel}: that object here (same kind, within a metre) is put in
+    -- those states (the game's own state change: lights, screens and sounds follow) and on that channel.
+    set_states = function(op)
+        local m = em()
+        local site = m:FindSite(eid(op.site))
+        if not site then return nil end
+        local SC, T = INZOI.FB2StateComponent, inzoi.EB2ComponentType
+        local objs, best, bestD = site:GetObjects(), nil, 100
+        for i = 1, objs:Num() do
+            local o = m:FindGameObject(objs:Get(i))
+            if o and tostring(o:GetObjectTableId()) == op.table then
+                local l = o:GetLocation()
+                local d = math.sqrt((l.X - op.x) ^ 2 + (l.Y - op.y) ^ 2 + (l.Z - op.z) ^ 2)
+                if d < bestD then best, bestD = o, d end
+            end
+        end
+        if not best then return string.format("no %s here to set (%s)", op.table, table.concat(op.states or {}, ",")) end
+        local sc = best:GetComponent(T.State)
+        local want = op.states or {}
+        if #want == 0 then want = { "Normal:Normal" } end
+        for _, s in ipairs(want) do
+            local g, st = s:match("^([^:]+):(.+)$")
+            if g then pcall(SC.ChangeState, sc, g, st, INZOI.FB1EntityId()) end
+        end
+        if op.channel and op.channel ~= "" and tostring(SC.GetCurrentChannelId(sc)) ~= op.channel then
+            pcall(SC.ChangeChannel, sc, op.channel, INZOI.FB1EntityId())
+        end
+        return string.format("%s set to %s%s", op.table, table.concat(want, ","),
+            op.channel and op.channel ~= "" and op.channel ~= "None" and (" ch " .. op.channel) or "")
+    end,
     -- Their action has started and the puppet is still on its way: put it exactly where and how they are (their
     -- action is queued again right after, so it starts on the spot instead of after a walk).
     snap = function(op)

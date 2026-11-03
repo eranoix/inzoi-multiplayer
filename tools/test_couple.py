@@ -566,6 +566,7 @@ def test_backup_before_load():
                                 "mp_save": {"folder": "20260202-101010", "name": "x"}})
     make_save(b"before-load", "20260202-101010")
     comp.game.call = lambda tool, **kw: {}
+    comp.game.saves = lambda **kw: [{"folder": "20260202-101010", "file": "20260202-101010_AutoSave_1"}]
 
     async def go():
         await comp.load_mp_save()

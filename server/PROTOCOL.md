@@ -147,7 +147,7 @@ The server keeps keyed values, each with a version (a server-wide sequence), who
   key (`item: null`). With `base` (the version the change was made on) a change on an older version gets
   `{"t":"set_refused","key","ref","current":item}` instead. Keys: `[a-z0-9_.:-]{1,96}`; values up to 4 MB of JSON.
 - The welcome carries `"shared": {key: item}` and `"seq"`; `{"t":"shared_get"}` → `{"t":"shared_all","shared","seq"}`.
-- Keys used by the companion (client/shared.py): `house:<lot>:live`, `house:<lot>:exact`, `family`.
+- Keys used by the companion (client/shared.py): `house:<lot>:live`, `house:<lot>:exact`, `family`, `obj:<lot>:<object key>` (one object's states: client/objsync.py).
 
 ## Storage
 
