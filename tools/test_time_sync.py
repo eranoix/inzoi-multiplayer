@@ -153,6 +153,25 @@ async def main():
     await comp.keep_speed()                                   # (switched off: pausing is each one's own)
     assert not commands(g, "environment.time_speed")
 
+    # Following the host's clock ("host" mode): a game that loaded its save paused runs again while the host's runs
+    # (it stayed paused for good, the mod with it: seen in the real game), also out of the game's own pause; a host
+    # whose time stopped (build mode, paused: no clock in its state) stops mine too - left alone.
+    g = StandIn(9, 0, speed=0, paused=True)
+    g.call = (lambda orig: lambda name, **kw: {"is_paused": True} if name == "environment.get_simulation"
+              else orig(name, **kw))(g.call)
+    comp, _ = make(g)
+    comp.cfg["clock_mode"] = "host"
+    friend(comp, "host", [9, 0])
+    comp.remotes["host"].state["speed"] = 1.0
+    await comp.keep_speed()
+    assert commands(g, "environment.time_speed") == [{"speed": 1}] and commands(g, "environment.resume"), g.sent
+    g = StandIn(9, 0, speed=0, paused=True)
+    comp, _ = make(g)
+    comp.cfg["clock_mode"] = "host"
+    friend(comp, "host", None)                                # (the host's own time is stopped)
+    await comp.keep_speed()
+    assert not commands(g, "environment.time_speed") and not commands(g, "environment.resume"), g.sent
+
     # A friend whose game isn't running (no fresh state) doesn't count.
     g = StandIn(9, 0, speed=3)
     comp, _ = make(g)

@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.46"
+VERSION = "0.9.47"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -1272,11 +1272,13 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         """Game speed is everyone's: normal for all, except while every player's Zoi is asleep, when everyone's game
         runs fast until somebody wakes. Pausing stays each player's own. Alone on the server, your speed is yours.
         clock_mode "host": the others take the leader's speed instead (follow_leader_speed)."""
-        if self.clock_mode() == "host" and self.leader and self.leader != self.me_id:
-            return await self.follow_leader_speed()
+        following = self.clock_mode() == "host" and self.leader and self.leader != self.me_id
         others = [r for r in self.remotes.values() if r.state and time.time() - r.state_at < 10]
         clock = self.my_clock
-        if others and clock and clock[3] and self.cfg.get("never_pause", True)                 and not self.__dict__.get("in_build_mode"):
+        # (following the host: only while the host's own time runs - their clock in their state; a host in build mode
+        # or paused stops everyone's - follow_leader_clock. A game that loads its save paused stayed so for good.)
+        runs = not following or bool((self.leader_state() or {}).get("clock"))
+        if others and clock and clock[3] and runs and self.cfg.get("never_pause", True)                 and not self.__dict__.get("in_build_mode"):
             # coop-casal: time never stops while the partner is on (a pause on one side breaks the sync for both);
             # build mode pauses the game by itself and is left alone
             if time.time() - self.__dict__.get("_unpaused_at", 0) > 5:
@@ -1286,7 +1288,11 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     self.system_line("Time keeps running while your partner is online")
                 log.info("the game was paused: time runs again (your partner is online)")
                 await self.g(self.game.call, "environment.time_speed", speed=1)
+                if (await self.g(self.game.call, "environment.get_simulation") or {}).get("is_paused"):
+                    await self.g(self.game.call, "environment.resume")   # (a pause of its own, not its speed)
             return
+        if following:
+            return await self.follow_leader_speed()
         if not others or not clock or clock[3]:              # nobody to keep in step with / I'm paused
             return
         asleep = self.sleeping and all(r.state.get("sleep") for r in others)
