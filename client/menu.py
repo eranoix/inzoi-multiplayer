@@ -200,6 +200,44 @@ def game_window():
     return max(found)[1] if found else None
 
 
+_cursor_win = [None, 0.0]           # (the game's window, when it was looked for)
+
+
+def _unreal_window():
+    """inZOI's window by its class and title (game_window can miss it: it reads the owning process's name)."""
+    found = []
+
+    def each(hwnd, _):
+        buf, cls = ctypes.create_unicode_buffer(256), ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(hwnd, buf, 256)
+        user32.GetClassNameW(hwnd, cls, 256)
+        if user32.IsWindowVisible(hwnd) and cls.value == "UnrealWindow" and "inZOI" in buf.value:
+            found.append(hwnd)
+        return True
+    user32.EnumWindows(WNDENUMPROC(each), 0)
+    return found[0] if found else None
+
+
+def cursor_in_game():
+    """Where the cursor is in the game's window: [x, y, width, height] of its client area (the same units both), or
+    None (no game window, not on Windows). The panel compares it with its own rect: the game sends the panel no mouse
+    events once the cursor is off it, so a 'mouseleave' never comes and it couldn't tell it was left (0.9.77)."""
+    if os.name != "nt":
+        return None
+    hwnd, at = _cursor_win
+    if not hwnd or time.time() - at > 10 or not user32.IsWindow(hwnd):
+        hwnd = game_window() or _unreal_window()
+        _cursor_win[0], _cursor_win[1] = hwnd, time.time()
+    if not hwnd:
+        return None
+    p, r = POINT(0, 0), wintypes.RECT()
+    if not user32.GetCursorPos(ctypes.byref(p)) or not user32.ScreenToClient(hwnd, ctypes.byref(p)):
+        return None
+    user32.GetClientRect(hwnd, ctypes.byref(r))
+    front = user32.GetForegroundWindow() == hwnd
+    return [p.x, p.y, r.right, r.bottom, front]
+
+
 def client_rect(hwnd) -> tuple[int, int, int, int]:
     """Where the game draws, on the screen: (left, top, width, height)."""
     r, p = wintypes.RECT(), POINT(0, 0)

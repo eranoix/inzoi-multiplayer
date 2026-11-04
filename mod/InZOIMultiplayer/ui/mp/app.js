@@ -60,10 +60,26 @@
     root.addEventListener('mouseenter', enter);
     root.addEventListener('mousemove', enter);
     root.addEventListener('mouseleave', function () { hovered = false; leftAt = Date.now(); });
+    // The game sends this view no mouse events once the cursor is off the panel, so 'mouseleave' may never come: while
+    // it's open the companion is asked where the cursor is in the game's window (/cursor, every 300 ms) and that's
+    // compared with the panel's rect (0.9.77). (A field typed in no longer keeps it open: the cursor's off it then.)
+    function cursorOver(c) {
+        if (!c || c.length < 4 || !c[2] || !window.innerWidth) { return null; }
+        if (c[4] === false) { return false; }                 // (another window in front of the game)
+        var k = window.innerWidth / c[2], x = c[0] * k, y = c[1] * k, r = root.getBoundingClientRect();
+        return x >= r.left - 4 && x <= r.right + 4 && y >= r.top - 4 && y <= r.bottom + 4;
+    }
+    setInterval(function () {
+        if (root._minimized || modalWas) { return; }
+        post('/cursor', {}, function (res) {
+            var over = cursorOver(res && res.cursor);
+            if (over === false && hovered) { hovered = false; leftAt = Date.now(); }
+            else if (over === true && !hovered) { hovered = true; hoverAt = Date.now(); }
+        }, 800);
+    }, 300);
     function busy() {
-        var a = document.activeElement;
-        return !!modalWas || !!document.querySelector('.req') || root._dragging ||
-            (a && a !== document.body && root.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
+        // (a drag whose mouseup never came - released off the panel - holds it for 3 s at most)
+        return !!modalWas || !!document.querySelector('.req') || (root._dragging && Date.now() - (root._dragAt || 0) < 3000);
     }
     setInterval(function () {
         if (!root._applyMinimize) { return; }

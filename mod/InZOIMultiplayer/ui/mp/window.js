@@ -345,11 +345,11 @@
         handle.addEventListener('mousedown', function(e) {
             if (e.target.id === 'minimize-btn' || e.target.id === 'close-btn' || e.target.id === 'servers-btn') return;
             if (e.target.closest && e.target.closest('button')) return;
-            dragging = true; root._wasDragged = false; root._dragging = true;
+            dragging = true; root._wasDragged = false; root._dragging = true; root._dragAt = Date.now();
             ox = e.clientX - root.offsetLeft; oy = e.clientY - root.offsetTop;
         });
         document.addEventListener('mousemove', function(e) {
-            if (dragging) { root._wasDragged = true; root.style.left = (e.clientX - ox) + 'px'; root.style.top = (e.clientY - oy) + 'px'; }
+            if (dragging) { root._dragAt = Date.now(); root._wasDragged = true; root.style.left = (e.clientX - ox) + 'px'; root.style.top = (e.clientY - oy) + 'px'; }
         });
         document.addEventListener('mouseup', function() {
             root._dragging = false;
