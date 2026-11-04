@@ -52,6 +52,32 @@
     });
     var userOpened = false;
     $('title-bar').addEventListener('click', function () { userOpened = true; });
+    // Open while the mouse is on it, a capsule again a moment after it leaves (the player's choice, 0.9.71) - but never
+    // while a question waits for an answer, something is being typed or chosen, or the panel is being dragged.
+    var hovered = false, hoverAt = 0, leftAt = 0;
+    root.addEventListener('mouseover', function () {
+        if (!hovered) { hovered = true; hoverAt = Date.now(); }
+    });
+    root.addEventListener('mouseout', function (e) {
+        var to = e.relatedTarget;
+        if (to && root.contains(to)) { return; }               // (from one of its parts to another: still on it)
+        hovered = false; leftAt = Date.now();
+    });
+    function busy() {
+        var a = document.activeElement;
+        return !!modalWas || !!document.querySelector('.req') || root._dragging ||
+            (a && a !== document.body && root.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName));
+    }
+    setInterval(function () {
+        if (!root._applyMinimize) { return; }
+        var now = Date.now();
+        if (hovered && root._minimized && now - hoverAt > 120) {
+            userOpened = true;
+            root._applyMinimize(false);
+        } else if (!hovered && !root._minimized && now - leftAt > 700 && !busy()) {
+            root._applyMinimize(true);
+        }
+    }, 100);
     setTimeout(function () {
         if (!root._minimized && root._applyMinimize && !document.querySelector('.req')) { root._applyMinimize(true); }
     }, 900);

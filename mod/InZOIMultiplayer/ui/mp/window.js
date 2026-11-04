@@ -336,13 +336,14 @@
         handle.addEventListener('mousedown', function(e) {
             if (e.target.id === 'minimize-btn' || e.target.id === 'close-btn' || e.target.id === 'servers-btn') return;
             if (e.target.closest && e.target.closest('button')) return;
-            dragging = true; root._wasDragged = false;
+            dragging = true; root._wasDragged = false; root._dragging = true;
             ox = e.clientX - root.offsetLeft; oy = e.clientY - root.offsetTop;
         });
         document.addEventListener('mousemove', function(e) {
             if (dragging) { root._wasDragged = true; root.style.left = (e.clientX - ox) + 'px'; root.style.top = (e.clientY - oy) + 'px'; }
         });
         document.addEventListener('mouseup', function() {
+            root._dragging = false;
             if (dragging) {
                 dragging = false;
                 if (root._wasDragged && typeof root._saveWindowState === 'function') root._saveWindowState();
