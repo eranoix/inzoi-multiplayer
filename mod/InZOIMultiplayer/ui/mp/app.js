@@ -78,8 +78,11 @@
     root.addEventListener('mousemove', enter);
     root.addEventListener('mouseleave', function () { hovered = false; leftAt = Date.now(); });
     // The game sends this view no mouse events once the cursor is off the panel, so 'mouseleave' may never come: while
-    // it's open the companion is asked where the cursor is in the game's window (/cursor, every 300 ms) and that's
-    // compared with the panel's rect (0.9.77). (A field typed in no longer keeps it open: the cursor's off it then.)
+    // it's open the companion is asked where the cursor is in the game's window (/cursor, every CURSOR_EVERY ms - it
+    // answers in a few ms - one question at a time) and that's compared with the panel's rect (0.9.77). It collapses
+    // LEAVE_MS after the cursor left (1 s in all before 0.9.84: too slow, the players said).
+    // (A field typed in no longer keeps it open: the cursor's off it then.)
+    var CURSOR_EVERY = 100, LEAVE_MS = 150, cursorAsked = 0;
     function cursorOver(c) {
         if (!c || c.length < 4 || !c[2] || !window.innerWidth) { return null; }
         if (c[4] === false) { return false; }                 // (another window in front of the game)
@@ -92,13 +95,16 @@
     $('minimize-btn').addEventListener('click', function () { manualClosed = true; hovered = false; });
     setInterval(function () {
         if ((root._minimized && !manualClosed) || modalWas) { return; }
+        if (Date.now() - cursorAsked < 1000) { return; }          // (the last answer hasn't come yet)
+        cursorAsked = Date.now();
         post('/cursor', {}, function (res) {
+            cursorAsked = 0;
             var over = cursorOver(res && res.cursor);
             if (over === false) { manualClosed = false; }
             if (over === false && hovered) { hovered = false; leftAt = Date.now(); }
             else if (over === true && !hovered && !manualClosed) { hovered = true; hoverAt = Date.now(); }
         }, 800);
-    }, 300);
+    }, CURSOR_EVERY);
     function holdOpen() {      // (not "busy": that's poll()'s flag - the name clash made every collapse check throw)
         // (a drag whose mouseup never came - released off the panel - holds it for 3 s at most)
         return !!modalWas || !!document.querySelector('.req') || (root._dragging && Date.now() - (root._dragAt || 0) < 3000);
@@ -109,10 +115,10 @@
         if (hovered && root._minimized && now - hoverAt > 120 && !manualClosed) {
             userOpened = true;
             root._applyMinimize(false);
-        } else if (!hovered && !root._minimized && now - leftAt > 700 && !holdOpen()) {
+        } else if (!hovered && !root._minimized && now - leftAt > LEAVE_MS && !holdOpen()) {
             root._applyMinimize(true);                       // (it tells the game the cursor's off it: window.js)
         }
-    }, 100);
+    }, 50);
     setTimeout(function () {
         if (!root._minimized && root._applyMinimize && !document.querySelector('.req')) { root._applyMinimize(true); }
     }, 900);
