@@ -75,6 +75,10 @@ function Component(name, cls, asset, bones)
     function c:SetMaterial() end
     function c:GetNumBones() return #self.bones end
     function c:GetBoneName(b) return self.bones[b + 1] end
+    function c:GetParentBone(n)                       -- (a chain: each bone's parent is the one before it)
+        for k, nm in ipairs(self.bones) do if nm == n then return self.bones[k - 1] or "None" end end
+        return "None"
+    end
     function c:SetBoneTransformByName(n, tr, space) self.set[n] = { tr = tr, space = space } end
     c.reads, c.wave = 0, 0
     function c:GetSocketTransform(n, space)
@@ -269,6 +273,23 @@ def face_frame_tests():
     send("A", [])
     assert ph.set["head"].tr.Translation.X == 6.0, "an A frame without the face bone left it moved"
     print("receiving: the face stays as the last A frame had it through B frames, A frames put it back: ok")
+
+    # a bone held where it was (listed again, the same values): not set again; one that moves is
+    sets = {"n": 0}
+    real_set = ph.SetBoneTransformByName
+    def count_set(self, n, tr, space):
+        sets["n"] += 1
+        real_set(self, n, tr, space)
+    ph.SetBoneTransformByName = count_set
+    pb.SetBoneTransformByName = count_set
+    send("A", [hb, 1])
+    sets["n"] = 0
+    send("A", [hb, 1])
+    send("A", [hb, 1])
+    assert sets["n"] == 0, f"{sets['n']} bones set again with nothing changed"
+    send("A", [hb])                                    # (bone 1 back to the keyframe: it and its child, spine)
+    assert sets["n"] == 2 and pb.set["pelvis"].tr.Translation.X == 1.0, sets
+    print("receiving: a bone that didn't move since the last frame isn't set again; a moved one's children are: ok")
 
     # a partner not drawn here (far away: no actor): their frames aren't even read
     loads = {"n": 0}

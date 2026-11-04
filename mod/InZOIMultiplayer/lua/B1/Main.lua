@@ -343,7 +343,7 @@ local function build_rig(actor)
     clean_actor(actor)                                  -- (nothing of an earlier rig stays on it)
     local by = meshes(actor)
     local rig = { actor = actor, leaders = {}, poseables = {}, followers = {}, orig = {}, names = {}, assets = {},
-                  props = {} }
+                  props = {}, parents = {} }
     for li, name in ipairs(LEADERS) do
         local L = by[name]
         if not L then return nil end
@@ -353,9 +353,13 @@ local function build_rig(actor)
         pm:K2_SetRelativeTransform(UE.FTransform(), false, nil, false)
         pm:SetVisibility(false, false)                  -- (only the bones received: never drawn itself)
         rig.leaders[li], rig.poseables[li], rig.assets[li] = L, pm, asset_name(L)
-        local names = {}
-        for b = 0, pm:GetNumBones() - 1 do names[b] = pm:GetBoneName(b) end
-        rig.names[li] = names
+        local names, at, parents = {}, {}, {}
+        for b = 0, pm:GetNumBones() - 1 do names[b] = pm:GetBoneName(b); at[tostring(names[b])] = b end
+        for b = 0, pm:GetNumBones() - 1 do                           -- (each bone's parent: apply)
+            local ok, pn = pcall(pm.GetParentBone, pm, names[b])
+            parents[b] = ok and pn and at[tostring(pn)] or nil
+        end
+        rig.names[li], rig.parents[li] = names, parents
     end
     -- what follows the body or the head first (they then stop being anyone's leader), body and head last
     for name, c in pairs(by) do
@@ -391,13 +395,19 @@ local function apply(r, vals, changed)
     local base = 0
     for li = 1, 2 do
         local n = li == 1 and r.key.n1 or r.key.n2
-        local pm, names = rig.poseables[li], rig.names[li]
+        local pm, names, parents = rig.poseables[li], rig.names[li], rig.parents[li] or {}
         if pm:GetNumBones() == n then
             -- EBoneSpaces.ComponentSpace (= 1 in Unreal). By number: the game's mod check refuses that enum by name
             -- ("not in ue_global_table.json") and then won't load the mod when the game starts.
             local space = 1
+            -- The poseable keeps each bone relative to its parent: a bone not set again goes along when its parent
+            -- moves - a planted foot slid with the shin, a hand with the arm. So a bone is set again when it changed
+            -- or its parent was (parents come first, by number).
+            local did = {}
             for b = 0, n - 1 do
-                if not changed or changed[base + b] then
+                local up = parents[b]
+                if not changed or changed[base + b] or (up and did[up]) then
+                    did[b] = true
                     local o, so = (base + b) * 7, (base + b) * 3
                     local size = sc and UE.FVector(sc[so + 1] / 1000, sc[so + 2] / 1000, sc[so + 3] / 1000) or UE.FVector(1, 1, 1)
                     pm:SetBoneTransformByName(names[b], UE.FTransform(
@@ -477,22 +487,35 @@ local function receive(pid, r)
         cur = {}
         for i = 1, #vals do cur[i] = vals[i] end
         r.cur, r.fresh, changed, r.lastDiff = cur, false, nil, {}
-    else
+    end
+    -- Only a bone whose place or turn is other than last frame's is set again (0.9.67): a bone held away from the
+    -- keyframe is listed in every frame - the face's 890, mostly still, were all set again 40 times a second, ~5 ms
+    -- of each frame on Chey's laptop.
+    local listed = {}
+    for i = 1, #diff - 7, 8 do listed[diff[i]] = i end
+    if changed then
         for b in pairs(r.lastDiff or {}) do                         -- (moved last time, not now: as in the keyframe)
-            if part == "A" or b < n1 then
-                local o = b * 7
-                for j = 1, 7 do cur[o + j] = vals[o + j] end
-                changed[b] = true
-            else
-                now[b] = true                                       -- (a face bone: kept until the next A frame)
+            if not listed[b] then
+                if part == "A" or b < n1 then
+                    local o = b * 7
+                    for j = 1, 7 do
+                        if cur[o + j] ~= vals[o + j] then cur[o + j] = vals[o + j]; changed[b] = true end
+                    end
+                else
+                    now[b] = true                                   -- (a face bone: kept until the next A frame)
+                end
             end
         end
     end
-    for i = 1, #diff - 7, 8 do
-        local b = diff[i]
+    for b, i in pairs(listed) do
         local o = b * 7
-        for j = 1, 7 do cur[o + j] = diff[i + j] end
-        if changed then changed[b] = true end
+        for j = 1, 7 do
+            local v = diff[i + j]
+            if cur[o + j] ~= v then
+                cur[o + j] = v
+                if changed then changed[b] = true end
+            end
+        end
         now[b] = true
     end
     r.lastDiff = now
