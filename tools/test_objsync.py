@@ -1091,6 +1091,12 @@ async def main():
         await case(server, srv.sockets[0].getsockname()[1])
         srv.close()
     assert objsync.parse_states("x")[0] is None and objsync.parse_states("5;bad")[1] == {}
+    # what an object's insides make it (a fridge of spoiled food: Spoiled) is that game's own: not read for sharing, and
+    # an older program's value carrying it isn't put on the partner's (Chey's fridge made Arthur's smell, 2026-11-04)
+    _, objs = objsync.parse_states("1038;7|Fridge01_v03|1|2|3|Spoiled:Spoiled,Door:Open|None")
+    assert list(objs.values())[0]["s"] == ["Door:Open"], objs
+    assert objsync.shared_states(["Spoiled:Spoiled", "OnOff:On", "SlotOccupy:Occupy"]) == ["OnOff:On"]
+    print("a spoiled fridge (what's in it) isn't mirrored to the partner's: ok")
     print("all object-state tests passed")
 
 

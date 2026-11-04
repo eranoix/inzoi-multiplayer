@@ -39,6 +39,7 @@ program started while it couldn't be reached) wins when the connection comes - i
 unless the server's state of that object was set after it (the server's "at", against when it was made here: the last
 change wins, as live).
 """
+import re
 import asyncio
 import hashlib
 import logging
@@ -78,11 +79,21 @@ def parse_states(text: str):
             x, y, z = float(f[2]), float(f[3]), float(f[4])
         except ValueError:
             continue
-        states = sorted(s for s in f[5].split(",") if s and not s.startswith("Slot"))
+        states = sorted(s for s in f[5].split(",") if s and not OWN_STATES.search(s))
         ch = f[6] if f[6] and f[6] != "None" else ""
         # (e: the game's entity id - which object this is, never sent: value_of)
         objs[obj_key(f[1], x, y, z)] = {"t": f[1], "p": [x, y, z], "s": states, "ch": ch, "e": f[0]}
     return site, objs
+
+
+# States that are this game's own, never mirrored: the seats being used (Slot...), and what an object's own insides make
+# it - a fridge or a dish gone off (Spoiled), from the food in it in that game. (Chey's fridge, full of spoiled cakes,
+# made Arthur's smell too, 2026-11-04.)
+OWN_STATES = re.compile(r"^Slot|^Spoiled:|:Spoiled$", re.I)
+
+
+def shared_states(states) -> list:
+    return [s for s in states or [] if s and not OWN_STATES.search(str(s))]
 
 
 def value_of(o: dict) -> dict:
@@ -713,6 +724,7 @@ class ObjSync:
         such object here (yet). live: a partner's change as it came (settle_objects: a change made here after it is
         sent, not undone)."""
         o, v = item.get("value") or {}, version(item)
+        o = dict(o, s=shared_states(o.get("s")))         # (an older program's value may carry them)
         try:
             x, y, z = (float(c) for c in o["p"])
             table = str(o["t"])
