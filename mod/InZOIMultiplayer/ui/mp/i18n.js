@@ -431,6 +431,7 @@
         [/^Can't reach the server \((.*)\): retrying$/, 'Não deu para alcançar o servidor ($1): tentando de novo'],
         [/^Server: (.*)$/, 'Servidor: $T1'],
         [/^(.*) wants to hug you$/, '$1 quer te abraçar'],
+        [/^(.*) is playing their own Zoi: you play yours$/, '$1 está jogando com a própria Zoi: você joga com a sua'],
         [/^(.*) wants to kiss you$/, '$1 quer te beijar'],
         [/^(.*) wants to dance with you$/, '$1 quer dançar com você'],
         [/^(.*) wants to high-five you$/, '$1 quer um "toca aqui"'],

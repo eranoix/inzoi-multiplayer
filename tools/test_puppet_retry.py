@@ -292,6 +292,21 @@ async def main():
     task.cancel()
     assert answered and answered[0][1] is False, answered
     print("needs first: hungry, the chat with the partner's Zoi is stopped and their request declined: ok")
+
+    # Picking the partner's Zoi from the family portraits while they're online (they play it): back to mine at once;
+    # offline, it can be played here.
+    comp, r = make()
+    comp.puppet_ids["p1"] = 25674
+    calls = []
+    comp.game.call = lambda tool, **kw: calls.append((tool, kw)) or {}
+    assert await comp.own_zoi(24534) == 24534                      # (mine: remembered)
+    r.state_at = time.time()
+    assert await comp.own_zoi(25674) == 24534, "kept playing the online partner's Zoi"
+    assert ("entity.possess", {"entity_id": 24534}) in calls, calls
+    calls.clear()
+    r.state_at = time.time() - 60                                  # (they're offline)
+    assert await comp.own_zoi(25674) == 25674 and not calls
+    print("an online partner's Zoi can't be played here: back to mine; offline it can: ok")
     print("puppet retry tests passed")
 
 

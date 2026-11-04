@@ -53,7 +53,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.79"
+VERSION = "0.9.80"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
@@ -1617,7 +1617,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 if tick % 25 == 7 and active and self.writer and not self.world_busy:
                     asyncio.get_running_loop().create_task(self.maybe_upload_world())   # after the game saved
                 if time.time() - last_me > 1:
-                    self.my_entity, last_me = await self.g(self.game.possessed), time.time()
+                    self.my_entity, last_me = await self.own_zoi(await self.g(self.game.possessed)), time.time()
                 fast = self.fast_pos
                 if fast and time.time() - fast["at"] < 1 and tick % 10 and self.last_full_state:
                     st = {**self.last_full_state, **{k: fast[k] for k in ("x", "y", "z", "yaw", "site")}}
@@ -1783,6 +1783,32 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     await self.g(self.game.call, "interaction.cancel", entity_id=self.my_entity)
                 except GameError:
                     pass
+
+    async def own_zoi(self, possessed):
+        """The Zoi I play: the one possessed, unless that's an online partner's Zoi (in my family: picked from the
+        portraits) - they play it in their own game, so play goes straight back to mine (the players' choice,
+        2026-11-04). With them offline, their Zoi can be played here like any family member."""
+        try:
+            possessed = int(possessed)
+        except (TypeError, ValueError):
+            return possessed
+        whose = {int(e): pid for pid, e in self.puppet_ids.items() if e}
+        pid = whose.get(possessed)
+        r = self.remotes.get(pid) if pid else None
+        mine = self.__dict__.get("my_own")
+        if not r or not mine or mine == possessed or time.time() - (r.state_at or 0) > 15:
+            if not r:
+                self.my_own = possessed
+            return possessed
+        if time.time() - self.__dict__.get("_unpossess_at", 0) > 2:
+            self._unpossess_at = time.time()
+            log.info("%s plays their own Zoi: back to mine", r.name)
+            self.system_line(f"{r.name} is playing their own Zoi: you play yours")
+            try:
+                await self.g(self.game.call, "entity.possess", entity_id=int(mine))
+            except GameError as e:
+                log.debug("back to my Zoi: %s", e)
+        return mine
 
     def check_spot(self):
         """My Zoi lying or sitting where my partner's Zoi is, in their game, on the same object (a side of the bed, a seat
