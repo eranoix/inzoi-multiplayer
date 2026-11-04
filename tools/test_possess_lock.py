@@ -1,5 +1,8 @@
 """An online partner's Zoi can't be played here - the game's own possession rule and the family portraits, run for
 real (lupa) against a fake game:
+- B2 free will (lua/B2/Main.lua freeze, lua/B2/Systems/B2AutonomyOptionManager.lua): only the partner's Zoi loses its
+  will; the game's "follow the global autonomy" is never turned off (Chey's own Zoi lost its will and died), and is
+  turned back on where an older version left it off
 - B2 (lua/B2/Systems/FB2ControllerSystem.lua, the override of FB2ControllerSystem::TryChangePossessEntityId): a switch
   to a Zoi in the mailbox's MPLock.lua is refused (false, reported), any other goes to the game's own function; an old
   MPLock (the companion closed), an empty or missing one, lock nothing
@@ -11,6 +14,7 @@ real (lupa) against a fake game:
 
     python tools/test_possess_lock.py
 """
+import re
 import sys
 import time
 from pathlib import Path
@@ -23,6 +27,8 @@ except ImportError:
 
 MOD = Path(__file__).resolve().parents[1] / "mod" / "InZOIMultiplayer" / "lua"
 RULE = MOD / "B2" / "Systems" / "FB2ControllerSystem.lua"
+WILL = MOD / "B2" / "Systems" / "B2AutonomyOptionManager.lua"
+B2 = MOD / "B2" / "Main.lua"
 B1 = MOD / "B1" / "Main.lua"
 
 
@@ -229,7 +235,67 @@ def b1_portraits():
     print(f"B1: a save loaded - the new HUD found again and its portrait locked ({missing} searches meanwhile): ok")
 
 
+FAKE_AUTONOMY = """
+    T = { AutonomyEnable = 1, FreezeStat = 3, FollowSchedule = 10, Other = 5 }
+    inzoi = { EB1AutonomyOptionType = T }
+    INZOI = { FB1EntityId = function() return {} end }
+    CALLS, FOLLOW = {}, false
+    AM = { IsFollowGlobalAutonomyEnabled = function(self) return FOLLOW end,
+           SetFollowGlobalAutonomy = function(self, v) CALLS[#CALLS + 1] = "follow=" .. tostring(v); FOLLOW = v end,
+           SetIndividualToggleOption = function(self, id, t, v)
+               CALLS[#CALLS + 1] = id.Value .. ":" .. t .. "=" .. tostring(v) end,
+           ResolveToggleOption = function(self, c, t) return "game" end }
+    inzoi.getB2Manager = function(name) return AM end
+    function zoi(n) return { GetEntityId = function() return { Value = n } end } end
+"""
+
+
+def b2_free_will():
+    """The partner's Zoi has no will of its own here - that Zoi only: the game's "follow the global autonomy" is never
+    turned off (that took every Zoi's free will: Chey's own Zoi died of hunger, then of sleep), and a save it was turned
+    off in gets it back."""
+    src = B2.read_text("utf-8")
+    assert "SetFollowGlobalAutonomy(false)" not in src, "B2/Main.lua still turns the global free will off"
+    m = re.search(r"^local function eid\(n\)\n.*?^end\n", src, re.M | re.S)
+    block = re.search(r"^local FROZEN = \{\}\n.*?^local function own_will_back\(\)\n.*?^end\n", src, re.M | re.S)
+    assert m and block, "freeze()/own_will_back() not found in B2/Main.lua"
+    lua = LuaRuntime()
+    lua.execute(FAKE_AUTONOMY)
+    g = lua.globals()
+    lua.execute(m.group(0) + block.group(0) + "\nFREEZE, WILL_BACK, FROZEN_T = freeze, own_will_back, FROZEN")
+    g.FREEZE(25674)
+    assert g.MP_FROZEN[25674] is True and g.FROZEN_T[25674] is True
+    calls = list(g.CALLS.values())
+    assert calls == ["25674:1=false", "25674:10=false", "25674:3=true"], calls
+    g.FREEZE(25674, False)
+    assert g.MP_FROZEN[25674] is None
+    assert list(g.CALLS.values())[3:] == ["25674:1=true", "25674:10=true", "25674:3=false"], list(g.CALLS.values())
+    lua.execute("CALLS = {}; FOLLOW = false")
+    assert g.WILL_BACK() is True and g.FOLLOW is True and list(g.CALLS.values()) == ["follow=true"]
+    lua.execute("CALLS = {}")
+    assert g.WILL_BACK() is False and len(g.CALLS) == 0
+    print("B2: only the partner's Zoi loses its will (its own toggles); the global switch is never turned off, and "
+          "turned back on in a save an older version left it off: ok")
+
+    lua = LuaRuntime()
+    lua.execute(FAKE_AUTONOMY)
+    g = lua.globals()
+    rule = lua.execute(WILL.read_text("utf-8"))
+
+    def resolve(n, t):
+        return rule.Override_ResolveToggleOption(g.AM, g.zoi(n), g.T[t])
+
+    assert resolve(24534, "AutonomyEnable") == "game", "the game's answer replaced with nobody frozen"
+    lua.execute("MP_FROZEN = { [25674] = true }")
+    assert resolve(25674, "AutonomyEnable") is False and resolve(25674, "FollowSchedule") is False
+    assert resolve(25674, "FreezeStat") is True and resolve(25674, "Other") == "game"
+    for t in ("AutonomyEnable", "FollowSchedule", "FreezeStat"):
+        assert resolve(24534, t) == "game", f"the player's own Zoi's {t} wasn't the game's"
+    print("B2: the game's free-will rule answers for the partner's Zoi only; every other Zoi gets the game's: ok")
+
+
 def main():
+    b2_free_will()
     b2_rule()
     b1_portraits()
     print("possess lock tests passed")

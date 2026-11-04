@@ -183,15 +183,34 @@ local function cancel_walk(c)
     IC.TryCancelInteraction(ic, IC.GetCurrentInteractionQueueId(ic), IC_CANCEL_CLEAR(), "mp_redirect")
 end
 
+-- A partner's Zoi here (a copy, or their member of my family) has no will of its own while they play it: no free will,
+-- no wandering off to work or school, needs that don't decay. Only that Zoi: the game asks
+-- FB2AutonomyOptionManager::ResolveToggleOption for each Zoi, and Systems/B2AutonomyOptionManager.lua answers for the
+-- ones in MP_FROZEN (the rule is in place once a save is loaded). Its own toggles are set too (kept in the save).
+-- Never the game's "follow the global autonomy" switch: until 0.9.85 it was turned off here, and then EVERY Zoi went by
+-- its own toggle - the player's own Zoi too, whose toggle can be off without anyone seeing it (the HUD has none for
+-- the Zoi being played): it stopped looking after itself, and Chey's Zoi died twice (hunger, then sleep).
+local FROZEN = {}
+_G.MP_FROZEN = FROZEN
 local function freeze(id, on)
     local am = inzoi.getB2Manager("FB2AutonomyOptionManager")
     local T = inzoi.EB1AutonomyOptionType
     local frozen = on ~= false
-    -- (with "follow the global autonomy" on, the game ignores each Zoi's own setting: the puppet had a will of its own)
-    if frozen then pcall(function() am:SetFollowGlobalAutonomy(false) end) end
-    am:SetIndividualToggleOption(eid(id), T.AutonomyEnable, not frozen) -- no free will
-    am:SetIndividualToggleOption(eid(id), T.FollowSchedule, not frozen) -- no wandering off to work/school
-    am:SetIndividualToggleOption(eid(id), T.FreezeStat, frozen)         -- needs don't decay: never hungry or tired
+    FROZEN[id] = frozen or nil
+    am:SetIndividualToggleOption(eid(id), T.AutonomyEnable, not frozen)
+    am:SetIndividualToggleOption(eid(id), T.FollowSchedule, not frozen)
+    am:SetIndividualToggleOption(eid(id), T.FreezeStat, frozen)
+end
+
+-- What versions before 0.9.85 did to a save: "follow the global autonomy" off. Back on (the game's default; nothing in
+-- the game's own play turns it off), so every Zoi - the player's own first - has its free will again.
+local function own_will_back()
+    local am = inzoi.getB2Manager("FB2AutonomyOptionManager")
+    if not am:IsFollowGlobalAutonomyEnabled() then
+        am:SetFollowGlobalAutonomy(true)
+        return true
+    end
+    return false
 end
 
 -- The engine's own teleport: no "cheat applied" notice on screen (movement.teleport shows one every time).
@@ -384,6 +403,7 @@ local function despawn_puppet(op)
     else
         cli(string.format("zoi.destroy entity_id=%d", p.id))
     end
+    FROZEN[p.id] = nil
     PUPPETS[op.key] = nil
     report("despawned", op.key)
     return (p.adopted and "released " or "despawned ") .. op.key
@@ -774,6 +794,7 @@ local function rediscover()
             local members = hh:GetHouseholdMembers()
             if key and members:Num() > 0 and not PUPPETS[key] and members:Get(1).Value ~= S.me then   -- not the one being played
                 PUPPETS[key] = { id = members:Get(1).Value, trail = {}, lastOrderT = -10, hidden = false }
+                FROZEN[members:Get(1).Value] = true      -- (a copy found after a reload: still without a will)
                 found = found + 1
             end
         end)
@@ -1282,7 +1303,10 @@ function M.on_begin(self)
     -- (Systems/FB2ControllerSystem.lua - the game's possession rule - reports through here when it refuses a switch to
     -- an online partner's Zoi)
     _G.MP_REPORT = report
+    _G.MP_FROZEN = FROZEN
     find_me()
+    local okW, back = pcall(own_will_back)
+    if okW and back then log("autonomy: every Zoi follows the game's free will setting again (an older version had turned it off)") end
     local box = load(CMD)
     S.seq = box and box.seq or nil          -- whatever is already in the mailbox was meant for a previous session
     local ok, n = pcall(rediscover)
@@ -1349,6 +1373,7 @@ function M.on_tick(self, dt)
             p.errT = p.errs == 1 and S.clock or p.errT
             if p.errs >= DRIVE_ERRS and S.clock - p.errT >= DRIVE_ERR_SPAN then
                 PUPPETS[key] = nil
+                FROZEN[p.id] = nil
                 if p.adopted then
                     pcall(freeze, p.id, false)
                 else

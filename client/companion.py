@@ -53,13 +53,17 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.84"
+VERSION = "0.9.85"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
 GAME_MIN_PER_S = 0.49         # game minutes a real second at speed 1 (measured on both PCs: 24 in 49.4 s, 20 in 40.9 s)
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
-NEEDS = ("Hunger", "Sleep", "Bladder", "Energy")
+NEEDS = ("Hunger", "Sleep", "Toilet", "Energy")   # (the game's stat names: the bladder is "Toilet")
+NEED_CRITICAL = -75.0              # a need under this: the player is told, again every NEED_WARN_EVERY s (needs_guard)
+NEED_WARN_EVERY = 90.0
+URGENT = {"Hunger": "Your Zoi urgently needs food", "Sleep": "Your Zoi urgently needs sleep",
+          "Toilet": "Your Zoi urgently needs the bathroom", "Energy": "Your Zoi urgently needs rest"}
 NEED_LOW = -40.0                   # a need under this: my Zoi's own needs first (needs_guard)
 SPOT_SAME = 60.0                   # cm: two Zois this close on the same object are on one spot (check_spot)
 SPOT_SETTLE = 2.0                  # s after my action began before its spot counts (still walking there)
@@ -1770,7 +1774,14 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             stats = (await self.g(self.game.call, "stat.get_all", entity_id=self.my_entity) or {}).get("stats") or {}
         except GameError:
             return
-        low = [k for k in NEEDS if isinstance(stats.get(k), dict) and float(stats[k].get("value") or 0) < NEED_LOW]
+        val = {k: float(stats[k].get("value") or 0) for k in NEEDS if isinstance(stats.get(k), dict)}
+        low = [k for k in NEEDS if k in val and val[k] < NEED_LOW]
+        crit = sorted((k for k in val if val[k] < NEED_CRITICAL), key=val.get)
+        if crit and time.time() - self.__dict__.get("needs_warned_at", 0) > NEED_WARN_EVERY:
+            # (said in the panel, where the player looks: a Zoi dying of hunger or sleep must never go unnoticed)
+            self.needs_warned_at = time.time()
+            log.warning("my Zoi's needs are critical: %s", ", ".join(f"{k} {val[k]:.0f}" for k in crit))
+            self.system_line(URGENT[crit[0]])
         if low != self.__dict__.get("needs_low"):
             if low:
                 log.info("my Zoi needs %s: chats with my partner's Zoi wait", "/".join(low))

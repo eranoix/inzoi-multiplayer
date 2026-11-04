@@ -271,7 +271,7 @@ async def main():
     comp.my_entity, comp.puppet_ids["p1"], comp.cur_target = 24534, 25674, 25674
     comp.cur_act = {"bag": "Co_Business_R07", "player": "p1"}
     calls = []
-    stats = {"Hunger": {"value": -70}, "Sleep": {"value": 20}, "Bladder": {"value": 0}, "Energy": {"value": 10}}
+    stats = {"Hunger": {"value": -70}, "Sleep": {"value": 20}, "Toilet": {"value": 0}, "Energy": {"value": 10}}
     comp.game.call = lambda tool, **kw: calls.append((tool, kw)) or ({"stats": stats} if tool == "stat.get_all" else {})
     await comp.needs_guard()
     assert comp.needs_low == ["Hunger"] and ("interaction.cancel", {"entity_id": 24534}) in calls, calls
@@ -292,6 +292,24 @@ async def main():
     task.cancel()
     assert answered and answered[0][1] is False, answered
     print("needs first: hungry, the chat with the partner's Zoi is stopped and their request declined: ok")
+
+    # A need near the end (Chey's Zoi died of sleep, 2026-11-04): said in the panel - the worst one, not every 3 s; the
+    # bladder is the game's "Toilet".
+    comp, r = make()
+    comp.my_entity = 24534
+    stats = {"Hunger": {"value": -80}, "Sleep": {"value": -95}, "Toilet": {"value": -50}, "Energy": {"value": 10}}
+    comp.game.call = lambda tool, **kw: {"stats": stats} if tool == "stat.get_all" else {}
+    await comp.needs_guard()
+    lines = [c["text"] for c in comp.chat if c.get("system")]
+    assert lines == ["Your Zoi urgently needs sleep"], lines
+    assert "Toilet" in comp.needs_low, comp.needs_low
+    await comp.needs_guard()
+    assert len([c for c in comp.chat if c.get("system")]) == 1, "warned again at once"
+    comp.needs_warned_at -= companion.NEED_WARN_EVERY + 1
+    stats["Sleep"]["value"] = 50
+    await comp.needs_guard()
+    assert comp.chat[-1]["text"] == "Your Zoi urgently needs food", comp.chat[-1]
+    print("a need near the end: the worst one said in the panel, again a while later; the bladder read: ok")
 
     # Picking the partner's Zoi from the family portraits while they're online (they play it): back to mine at once;
     # offline, it can be played here.
