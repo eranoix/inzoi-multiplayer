@@ -41,10 +41,14 @@
         scale += (e.deltaY < 0 ? 0.05 : -0.05);
         applyScale();
     });
-    setInterval(function () {
+    function syncClass() {
         var cls = modalWas ? 'modal' : (root._minimized ? 'min' : '');
         if (root.className !== cls) { root.className = cls; if (lastStatus) { renderTitle(lastStatus); } }
-    }, 150);
+    }
+    setInterval(syncClass, 150);
+    // (window.js calls this the moment the panel opens or closes: with only the 150 ms interval, the open card was
+    // drawn for a moment with the capsule's auto width - stretched across the screen, then right)
+    root._onMinimize = syncClass;
     [2500, 5000].forEach(function (ms) {
         setTimeout(function () {
             if (!userOpened && !root._minimized && root._applyMinimize && !document.querySelector('.req')) { root._applyMinimize(true); }
@@ -77,7 +81,7 @@
             else if (over === true && !hovered) { hovered = true; hoverAt = Date.now(); }
         }, 800);
     }, 300);
-    function busy() {
+    function holdOpen() {      // (not "busy": that's poll()'s flag - the name clash made every collapse check throw)
         // (a drag whose mouseup never came - released off the panel - holds it for 3 s at most)
         return !!modalWas || !!document.querySelector('.req') || (root._dragging && Date.now() - (root._dragAt || 0) < 3000);
     }
@@ -87,7 +91,7 @@
         if (hovered && root._minimized && now - hoverAt > 120) {
             userOpened = true;
             root._applyMinimize(false);
-        } else if (!hovered && !root._minimized && now - leftAt > 700 && !busy()) {
+        } else if (!hovered && !root._minimized && now - leftAt > 700 && !holdOpen()) {
             root._applyMinimize(true);                       // (it tells the game the cursor's off it: window.js)
         }
     }, 100);

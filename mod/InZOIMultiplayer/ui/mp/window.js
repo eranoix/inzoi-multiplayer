@@ -298,6 +298,7 @@
         var titleBar = document.getElementById('title-bar');
         function applyMinimize(bMin) {
             root._minimized = !!bMin;
+            if (typeof root._onMinimize === 'function') { try { root._onMinimize(!!bMin); } catch (e) {} }
             if (bMin) {
                 // Shrunk to the capsule, the cursor is usually left outside it - and the game then sends this view no
                 // more mouse events, so the 'mouseleave' that tells it the cursor left never comes: it kept thinking the
