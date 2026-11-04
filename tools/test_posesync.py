@@ -64,6 +64,19 @@ def main():
     net = p.pose_net("p2")
     assert 7 <= net["frames_s"] <= 9 and 30 <= net["frame_ms"] <= 200 and net["send_s"] in (2, 60), net
     print("network line: frames a second, the newest frame's age, my send rate: ok")
+
+    # the frame's head goes to the controller as their Zoi's trail point - with the time stamp (0.9.70) too
+    points = []
+
+    class Mail:
+        def add_point(self, *a):
+            points.append(a)
+    p.mail, p.puppet_ids = Mail(), {"p3": 99}
+    p.skel_point("p3", "12|34|1000,2000,300,9000,123456|A|2,1,0,0,0,0,0,10000")
+    p.skel_point("p3", "12|34|1000,2000,300,9000|A|")             # (an older sender)
+    p.skel_point("p3", "12|1000,2000,300,9000,123456|3|4|1,2,3")   # (a keyframe)
+    assert [pt[2:6] for pt in points] == [(100.0, 200.0, 30.0, 90.0)] * 3, points
+    print("the frame's place reaches the controller, with or without the time stamp: ok")
     print("posesync tests passed")
 
 

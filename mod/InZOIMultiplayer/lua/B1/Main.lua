@@ -56,6 +56,9 @@ end
 
 -- ------------------------------------------------------------------ skeleton mirroring
 local clock = 0
+-- This PC's real time in ms (the engine's, read every tick in on_tick): the game hands on_tick no frame time (dt was
+-- always the 0.03 fallback - every timer here ran 1.8x fast at 60 fps), and the frames' time stamps need real time.
+local realMs = 0
 local actors, actorsAt = {}, -10
 
 local function actor_of(entity)
@@ -154,7 +157,10 @@ local function send_pose()
         send.faceAt = clock
     end
     local l, r = actor:K2_GetActorLocation(), actor:K2_GetActorRotation()
-    local head = string.format("%d,%d,%d,%d", round(l.X * 10), round(l.Y * 10), round(l.Z * 10), round(r.Yaw * 100))
+    -- (5th: when it was read, this PC's real ms - the receiver plays the frames back on that timeline, interpolating;
+    -- an older receiver reads the first 4)
+    local head = string.format("%d,%d,%d,%d,%d", round(l.X * 10), round(l.Y * 10), round(l.Z * 10), round(r.Yaw * 100),
+        math.floor(realMs))
     send.seq = send.seq + 1
     if keyframe then
         send.kid = send.kid % 100000 + 1
@@ -191,6 +197,7 @@ local function split_ints(s)
 end
 
 local restore              -- (defined below clean_actor, which it uses)
+local queue_frame, play_next   -- (the playback, defined above receive)
 
 -- One reference only: the skeleton received. Each mirrored Zoi gets two poseable meshes (body and head) that are never
 -- drawn - they only hold the bones received, as received - and every mesh of the Zoi that is drawn follows them: its
@@ -438,6 +445,110 @@ local function read_map()
     end
 end
 
+-- Playback (0.9.70) - snapshot interpolation, as Source (Valve), Overwatch and Unreal show other players: their Zoi is
+-- drawn a little in the past, on the timeline of their frames' time stamps, every one of this game's frames
+-- interpolated between the two frames received around that moment (place and turn of each bone, the actor's place and
+-- facing). Frames come unevenly (their game's frame rate, the file hops, the network): shown as they came, the Zoi
+-- jerked - two frames in one of ours, then none for two; drawn this way it moves at this game's frame rate.
+-- How far in the past (playback delay) follows how unevenly they come: their usual frame gap + the spread of the
+-- lateness seen over the last frames (Gaffer on Games' jitter buffer), 15 to 150 ms, eased so time never jumps.
+local OFFSETS, Q_MAX = 60, 8
+
+local function copy7(cur, b)
+    local o = b * 7
+    return { cur[o + 1], cur[o + 2], cur[o + 3], cur[o + 4], cur[o + 5], cur[o + 6], cur[o + 7] }
+end
+
+local function timing(r, t)
+    if r.lastT and (t < r.lastT - 1000 or t - r.lastT > 5000) then r.offs, r.delay, r.gap, r.q = nil, nil, nil, nil end
+    local gap = r.lastT and t - r.lastT
+    r.lastT = t
+    if gap and gap > 0 and gap < 500 then r.gap = r.gap and r.gap + (gap - r.gap) * 0.1 or gap end
+    local offs = r.offs or {}
+    r.offs, r.oi = offs, ((r.oi or 0) % OFFSETS) + 1
+    offs[r.oi] = realMs - t                                  -- (their clock to mine + how late this one came)
+    local sorted = {}
+    for i = 1, #offs do sorted[i] = offs[i] end
+    table.sort(sorted)
+    r.omin = sorted[1]
+    local spread = sorted[math.max(1, math.ceil(#sorted * 0.9))] - sorted[1]
+    local want = math.max(15, math.min(150, (r.gap or 33) + spread + 4))
+    r.delay = r.delay and r.delay + (want - r.delay) * 0.05 or want
+end
+
+-- A received frame (cur: all its bones, changed: those other than the frame before; nil = start over) goes into the
+-- queue: the first one in full (r.base, what's shown), the next ones as their changes only.
+queue_frame = function(r, spot, cur, changed)
+    timing(r, spot.t)
+    if not changed or not r.q or not r.base then
+        r.base, r.show, r.q, r.pend = {}, {}, { spot }, {}
+        for i = 1, #cur do r.base[i], r.show[i] = cur[i], cur[i] end
+        apply(r, r.show, nil)
+        r.target, r.exact = spot, true
+        return
+    end
+    local d = {}
+    for b in pairs(changed) do d[b] = copy7(cur, b) end
+    spot.d = d
+    local q = r.q
+    q[#q + 1] = spot
+    while #q > Q_MAX do play_next(r) end
+end
+
+-- The oldest frame done with: the next one's changes go into r.base (what it is, exactly), and those bones are set
+-- to it unless the new interval moves them again (pend).
+play_next = function(r)
+    local q = r.q
+    local nxt = q[2]
+    for b, v in pairs(nxt.d) do
+        local o = b * 7
+        for j = 1, 7 do r.base[o + j] = v[j] end
+        r.pend[b] = true
+    end
+    nxt.d = nil
+    table.remove(q, 1)
+end
+
+local function render(r)
+    local q = r.q
+    if not q or not r.rig or not r.omin then return end
+    local at = realMs - r.omin - r.delay                      -- (the moment drawn, on their timeline)
+    while #q >= 2 and q[2].t <= at do play_next(r) end
+    local a, b2 = q[1], q[2]
+    local base, show, set = r.base, r.show, {}
+    for b in pairs(r.pend) do
+        local o = b * 7
+        for j = 1, 7 do show[o + j] = base[o + j] end
+        set[b] = true
+    end
+    r.pend = {}
+    local spot = a
+    if b2 and b2.t > a.t then
+        local k = math.max(0, math.min(1, (at - a.t) / (b2.t - a.t)))
+        for b, v in pairs(b2.d) do
+            local o = b * 7
+            show[o + 1] = base[o + 1] + (v[1] - base[o + 1]) * k
+            show[o + 2] = base[o + 2] + (v[2] - base[o + 2]) * k
+            show[o + 3] = base[o + 3] + (v[3] - base[o + 3]) * k
+            -- (the turn: the shorter way - q and -q are the same turn - then made a unit again, x10000)
+            local x0, y0, z0, w0 = base[o + 4], base[o + 5], base[o + 6], base[o + 7]
+            local x1, y1, z1, w1 = v[4], v[5], v[6], v[7]
+            if x0 * x1 + y0 * y1 + z0 * z1 + w0 * w1 < 0 then x1, y1, z1, w1 = -x1, -y1, -z1, -w1 end
+            local x, y, z, w = x0 + (x1 - x0) * k, y0 + (y1 - y0) * k, z0 + (z1 - z0) * k, w0 + (w1 - w0) * k
+            local n = math.sqrt(x * x + y * y + z * z + w * w)
+            if n > 0 then n = 10000 / n end
+            show[o + 4], show[o + 5], show[o + 6], show[o + 7] = x * n, y * n, z * n, w * n
+            set[b] = true
+            r.pend[b] = true                                  -- (exact once the interval is over)
+        end
+        local turn = ((b2.yaw - a.yaw + 540) % 360) - 180
+        spot = { x = a.x + (b2.x - a.x) * k, y = a.y + (b2.y - a.y) * k, z = a.z + (b2.z - a.z) * k,
+                 yaw = a.yaw + turn * k }
+    end
+    if next(set) then apply(r, show, set) end
+    r.target, r.exact = spot, true
+end
+
 local function receive(pid, r)
     if not r.rig and not actor_of(r.e) then return end  -- (not drawn here - far away: their frames aren't even read)
     local d = cfg_load("in", "posed_" .. pid)
@@ -461,11 +572,12 @@ local function receive(pid, r)
             for i = 1, nb * 3 do scales[i] = all[nb * 7 + i] end
         end
         r.kid, r.key = kid, { vals = vals, scales = scales, n1 = tonumber(n1), n2 = tonumber(n2) }
-        r.fresh = true
+        r.newkey = true                 -- (a new keyframe, every second: the same Zoi going on - not started over)
     end
     r.seq, r.at = seq, clock
     local h = split_ints(head)
-    r.target = { x = h[1] / 10, y = h[2] / 10, z = h[3] / 10, yaw = h[4] / 100 }
+    local spot = { x = h[1] / 10, y = h[2] / 10, z = h[3] / 10, yaw = h[4] / 100, t = h[5] }
+    if not spot.t then r.target, r.exact = spot, false end          -- (an older sender: shown as it comes, glided)
     local actor = actor_of(r.e)
     if not actor then return end
     if r.rig and r.rig.actor == actor and clock - (r.checkAt or 0) >= CHECK_EVERY then
@@ -485,10 +597,15 @@ local function receive(pid, r)
     local diff = split_ints(rest)
     local cur, changed = r.cur, {}
     local now = {}
-    if r.fresh or not cur then                                       -- (all bones from the keyframe)
+    -- (a new keyframe: this frame is built on it from scratch, then compared with the last frame below - before
+    -- 0.9.70 the Zoi was set again whole every second, and the playback would have started over: a hitch a second)
+    local prev = (r.newkey and not r.fresh and cur and #cur == #vals) and cur or nil
+    r.newkey = false
+    if r.fresh or not cur or prev then                               -- (all bones from the keyframe)
         cur = {}
         for i = 1, #vals do cur[i] = vals[i] end
-        r.cur, r.fresh, changed, r.lastDiff = cur, false, nil, {}
+        r.cur, r.fresh, r.lastDiff = cur, false, {}
+        changed = prev and {} or nil
     end
     -- Only a bone whose place or turn is other than last frame's is set again (0.9.67): a bone held away from the
     -- keyframe is listed in every frame - the face's 890, mostly still, were all set again 40 times a second, ~5 ms
@@ -521,7 +638,20 @@ local function receive(pid, r)
         now[b] = true
     end
     r.lastDiff = now
-    apply(r, cur, changed)
+    if prev then                                                     -- (what differs from the last frame, all of it)
+        changed = {}
+        for b = 0, math.floor(#cur / 7) - 1 do
+            local o = b * 7
+            for j = 1, 7 do
+                if cur[o + j] ~= prev[o + j] then changed[b] = true; break end
+            end
+        end
+    end
+    if not spot.t then
+        apply(r, cur, changed)
+        return
+    end
+    queue_frame(r, spot, cur, changed)
 end
 
 -- The drawn actor goes where they're drawn, smoothly (place and facing); far off (a jump, another floor), at once.
@@ -534,6 +664,7 @@ local function glide(dt)
                 local a = rig.actor
                 local l, yaw = a:K2_GetActorLocation(), a:K2_GetActorRotation().Yaw
                 local k, kr = math.min(1, dt * 12), math.min(1, dt * 14)
+                if r.exact then k, kr = 1, 1 end                   -- (played back: exactly where it was then)
                 local nx, ny, nz = l.X + (tg.x - l.X) * k, l.Y + (tg.y - l.Y) * k, l.Z + (tg.z - l.Z) * k
                 local turn = ((tg.yaw - yaw + 540) % 360) - 180
                 local nyaw = yaw + turn * kr
@@ -576,16 +707,30 @@ local function pose_tick(dt)
         for pid, r in pairs(remotes) do
             local ok, err = pcall(receive, pid, r)
             if not ok then result("pose-error " .. tostring(err)) end
-            if r.rig and clock - r.at > STALE then restore(r) end
+            if r.rig and clock - r.at > STALE then restore(r); r.q = nil end
         end
+    end
+    for _, r in pairs(remotes) do
+        local ok, err = pcall(render, r)                   -- (every frame of this game: the playback)
+        if not ok then result("play-error " .. tostring(err)) end
     end
     glide(dt)    -- (the drawn actor: B2 sets only the simulation where they are ("skel"), which doesn't move it)
 end
 
 function M.on_begin() end
 
+local lastReal = nil
 function M.on_tick(dt)
     dt = tonumber(dt) or 0.03
+    local own = _G.MP_B1_OWNER
+    if own then
+        local ok, now = pcall(UE.UGameplayStatics.GetRealTimeSeconds, own)
+        if ok and type(now) == "number" then
+            if lastReal and now > lastReal and now - lastReal < 0.5 then dt = now - lastReal end
+            lastReal = now
+            realMs = now * 1000
+        end
+    end
     clock = clock + dt
     if _G.MP_TICK then                                  -- (per-frame work installed by a command)
         local ok, err = pcall(_G.MP_TICK, dt)

@@ -155,9 +155,11 @@ class PoseSync:
         if not isinstance(text, str) or frm not in self.puppet_ids:
             return
         parts = text.split("|", 4)
-        head = parts[2] if len(parts) > 3 and parts[2].count(",") == 3 else (parts[1] if len(parts) > 1 else "")
+        # (a frame "kid|seq|head|..." or a keyframe "kid|head|..."; the head x,y,z,yaw - and since 0.9.70 the time it
+        # was read, which the B1 script plays the frames back on)
+        head = parts[2] if len(parts) > 3 and parts[2].count(",") in (3, 4) else (parts[1] if len(parts) > 1 else "")
         try:
-            x, y, z, yaw = (int(v) for v in head.split(","))
+            x, y, z, yaw = (int(v) for v in head.split(",")[:4])
         except ValueError:
             return
         n = self.__dict__.setdefault("skel_n", {}).get(frm, 10 ** 7) + 1        # (above any state's count: one trail)

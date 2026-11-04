@@ -117,6 +117,7 @@ function Actor(entity)
 end
 
 ACTORS = {}
+REALTIME = 0                                       -- (the engine's real time: run_ticks moves it on)
 UE = {
     USkinnedMeshComponent = "USkinnedMeshComponent", UPoseableMeshComponent = "UPoseableMeshComponent",
     AActor = "AActor",
@@ -124,7 +125,8 @@ UE = {
         function t:Length() return #self.items end
         function t:Get(i) return self.items[i] end
         return t end,
-    UGameplayStatics = { GetAllActorsOfClass = function(_, _, arr) for _, a in ipairs(ACTORS) do arr.items[#arr.items + 1] = a end end },
+    UGameplayStatics = { GetAllActorsOfClass = function(_, _, arr) for _, a in ipairs(ACTORS) do arr.items[#arr.items + 1] = a end end,
+                         GetRealTimeSeconds = function() return REALTIME end },
     FVector = function(x, y, z) return { X = x, Y = y, Z = z } end,
     FRotator = function(p, y, r) return { Pitch = p, Yaw = y, Roll = r } end,
     FQuat = function(x, y, z, w) return { X = x, Y = y, Z = z, W = w } end,
@@ -178,10 +180,120 @@ LI = None
 
 
 def run_ticks(lua, main, seconds, feed=None, dt=0.05):
+    g = lua.globals()
     for _ in range(int(seconds / dt)):
         if feed:
             feed()
-        main.on_tick(dt)
+        g.REALTIME = g.REALTIME + dt
+        main.on_tick(None)                            # (the game hands on_tick no frame time: real time is read)
+
+
+def playback_tests():
+    """Frames with their sender's time stamps are played back: drawn a little in the past, every frame of this game
+    interpolated between the two frames around that moment - smooth at this game's frame rate however unevenly they
+    come (Valve's / Gaffer's snapshot interpolation)."""
+    import random
+    rnd = random.Random(7)
+    lua = LuaRuntime()
+    lua.execute(FAKE_GAME)
+    g = lua.globals()
+    zoi = g.Zoi(25674)
+    g.MP_B1_OWNER = g.Zoi(24534)
+    cfg = g.CFG
+    m = lua.execute(MAIN.read_text("utf-8"))
+    cfg["in.posemap"] = "pd699142e=25674.1;"
+    k, _ = frame(1, 0, 3, 4)
+    cfg["in.posek_pd699142e"] = k
+
+    def run(frames_per_s, late_ms, seconds=3.0, fps=60):
+        """Their game sends frames_per_s (spine 10 cm further, the actor 1 cm, each); each reaches us late_ms() late;
+        we draw at fps. -> the spine's place drawn each frame of ours, the actor's x."""
+        start = g.REALTIME
+        sent = [(start + i / frames_per_s, i) for i in range(1, int(seconds * frames_per_s) + 1)]
+        arrive = sorted((t + late_ms() / 1000, t, i) for t, i in sent)
+        drawn, xs, j = [], [], 0
+        for _ in range(int(seconds * fps)):
+            g.REALTIME = g.REALTIME + 1 / fps
+            while j < len(arrive) and arrive[j][0] <= g.REALTIME:          # (the file holds only the newest one)
+                _, t, i = arrive[j]
+                cfg["in.posed_pd699142e"] = f"1|{i}|{1000 + i * 10},200,300,9000,{int(t * 1000)}|A|2,{i * 100},0,0,0,0,0,10000"
+                j += 1
+            m.on_tick(None)
+            pb = g.poseable_on(zoi, "CharacterMesh0")
+            if pb and pb.set["spine"]:
+                drawn.append(pb.set["spine"].tr.Translation.X)
+                xs.append(zoi.loc.X)
+        return drawn, xs
+
+    # their game at 30 frames a second, ours at 60: a new place every one of our frames, never back, no jumps
+    drawn, xs = run(30, lambda: 3)
+    steps = [b - a for a, b in zip(drawn[30:], drawn[31:])]
+    assert all(s >= -1e-6 for s in steps), "moved back"
+    assert sum(1 for s in steps if s > 1e-6) >= len(steps) * 0.9, f"stood still on many frames: {steps[:20]}"
+    assert max(steps) < 2.5 * (sum(steps) / len(steps)), f"a jump: max {max(steps):.2f} vs mean {sum(steps) / len(steps):.2f}"
+    assert len({round(v, 3) for v in drawn[30:]}) > len(drawn[30:]) * 0.9, "only the frames received, not between"
+    xsteps = [b - a for a, b in zip(xs[30:], xs[31:])]
+    assert all(s >= -1e-6 for s in xsteps) and max(xsteps) < 2.5 * (sum(xsteps) / len(xsteps)), "the actor jerked"
+    print(f"their 30 frames a second drawn at our 60: smooth (step {sum(steps) / len(steps):.2f} cm, max {max(steps):.2f}): ok")
+
+    # frames reaching us unevenly (0-40 ms late, a burst now and then): still smooth - the delay grows to the spread
+    drawn, xs = run(40, lambda: rnd.choice([0, 2, 5, 10, 25, 40]), seconds=4.0)
+    steps = [b - a for a, b in zip(drawn[90:], drawn[91:])]
+    mean = sum(steps) / len(steps)
+    assert all(s >= -1e-6 for s in steps), "moved back"
+    assert max(steps) < 3 * mean, f"a jerk: max {max(steps):.2f} vs mean {mean:.2f}"
+    still = sum(1 for s in steps if s <= 1e-6)
+    assert still <= len(steps) * 0.1, f"stood still {still} of {len(steps)} frames"
+    print(f"frames coming 0-40 ms late: still smooth (max step {max(steps) / mean:.1f}x the mean, {still} still): ok")
+
+    # a new keyframe every second (kid 2, 3...: the same bones, on another reference): no hitch, nothing set whole
+    real_frame = frame
+    kid = {"n": 1}
+
+    def new_keys():
+        kid["n"] += 1
+        k2, _ = real_frame(kid["n"], 0, 3, 4)
+        cfg["in.posek_pd699142e"] = k2
+    sets = {"n": 0}
+    pb0 = g.poseable_on(zoi, "CharacterMesh0")
+    real_set = pb0.SetBoneTransformByName
+
+    def count_set(self, n, tr, space):
+        if n == "root":                                # (never moves: set again only if set whole)
+            sets["n"] += 1
+        real_set(self, n, tr, space)
+    pb0.SetBoneTransformByName = count_set
+
+    def run_keyed(seconds):
+        start = g.REALTIME
+        sent = [(start + i / 30, i) for i in range(1, int(seconds * 30) + 1)]
+        drawn, j = [], 0
+        for _ in range(int(seconds * 60)):
+            g.REALTIME = g.REALTIME + 1 / 60
+            while j < len(sent) and sent[j][0] + 0.003 <= g.REALTIME:
+                t, i = sent[j]
+                if i % 30 == 0:
+                    new_keys()
+                cfg["in.posed_pd699142e"] = f"{kid['n']}|{1000 + i}|{1000 + i * 10},200,300,9000,{int(t * 1000)}|A|2,{i * 100},0,0,0,0,0,10000"
+                j += 1
+            m.on_tick(None)
+            drawn.append(pb0.set["spine"].tr.Translation.X)
+        return drawn
+    drawn = run_keyed(3.0)
+    steps = [b - a for a, b in zip(drawn[30:], drawn[31:])]
+    mean = sum(steps) / len(steps)
+    assert all(s >= -1e-6 for s in steps) and max(steps) < 2.5 * mean, f"a hitch at a new keyframe: {max(steps):.2f} vs {mean:.2f}"
+    assert sets["n"] == 0, f"set whole at new keyframes: the still root set {sets['n']} times"
+    print(f"a new keyframe every second: no hitch (max step {max(steps) / mean:.1f}x the mean), not set whole: ok")
+
+    # their frames stop: it stays as the last one (no running on), then is given back after STALE
+    last = drawn[-1]
+    for _ in range(30):
+        g.REALTIME = g.REALTIME + 1 / 60
+        m.on_tick(None)
+    pb = g.poseable_on(zoi, "CharacterMesh0")
+    assert pb and abs(pb.set["spine"].tr.Translation.X - last) < 15, "ran on past their last frame"
+    print("their frames stop: it holds the last one: ok")
 
 
 def sender_tests():
@@ -400,6 +512,7 @@ def main():
     print("a rig left by an earlier run (old kind too) is cleaned up: ok")
     sender_tests()
     face_frame_tests()
+    playback_tests()
     print("B1 rig tests passed")
 
 
