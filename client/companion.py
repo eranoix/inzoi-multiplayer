@@ -53,7 +53,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.85"
+VERSION = "0.9.87"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
@@ -69,6 +69,8 @@ SPOT_SAME = 60.0                   # cm: two Zois this close on the same object 
 SPOT_SETTLE = 2.0                  # s after my action began before its spot counts (still walking there)
 SPOT_AGAIN = 20.0                  # s between two moves of my Zoi to another spot
 STUCK_WALK = 6.0                   # s a partner's Zoi may stand in WalkToContext before it's freed (unstick_puppets)
+AGING_SLOWER = 200                 # every phase of life lasts this many times the game's own (the players' choice:
+                                   # 10x on 2026-11-03, 200x on 2026-11-04)
 ONLINE_FOR = 15.0                  # s since their last state: a partner still playing (partner_online)
 LOCK_EVERY = 5.0                   # s: the lock files are rewritten this often while a Zoi is locked (tell_lock)
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -1334,7 +1336,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
     async def keep_young(self):
         """How the Zois age while this program runs, checked once per loaded world (loading a save, or the game, can
         bring the game's own aging back). The players' choice (2026-11-03): adults, aging slowly.
-        - cfg "aging_slower" (default 10): every phase of life lasts that many times longer - the game's Aging table
+        - cfg "aging_slower" (default AGING_SLOWER): every phase of life lasts that many times longer - the game's Aging table
           (timeToNextAge of each growth step) patched while the game runs (slow_aging); 1 = the game's own pace.
         - cfg "stop_aging" (default false): true = nobody ages while playing together - my Zoi and this save's copy of
           each partner (0.9.56: a Zoi turned elderly and died of old age in one save after a day of clock syncing);
@@ -1374,9 +1376,9 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         patched (the game still running from an earlier start of this program) isn't multiplied again, and a changed
         factor is applied from the game's own value. -> True when every step is as wanted."""
         try:
-            factor = max(1, int(self.cfg.get("aging_slower", 10)))
+            factor = max(1, int(self.cfg.get("aging_slower", AGING_SLOWER)))
         except (TypeError, ValueError):
-            factor = 10
+            factor = AGING_SLOWER
         base = self.cfg.setdefault("aging_base", {})
         applied = self.cfg.get("aging_factor")
         ok, changed = True, False
@@ -2047,6 +2049,15 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             lobby, self.game.saw_lobby = getattr(self.game, "saw_lobby", True), False
             prev, gs = self.save_session, getattr(self.game, "last_state", {}) or {}
             where = (gs.get("possessed_entity_id"), gs.get("level_name"))
+            if not where[0] or where[0] == -1:
+                # (the game's state not read yet - right after this program started: asked now, or a restart with the
+                # game still in the same world passes for a new one and "Is this your multiplayer save?" waits for an
+                # answer nobody expects - 0.9.86's update, 2026-11-04)
+                try:
+                    st = await self.g(self.game.call, "game.get_state") or {}
+                    where = (st.get("possessed_entity_id"), st.get("level_name"))
+                except GameError:
+                    pass
             game_id = await self.g(servers.netinfo.process_id, "inZOI-Win64-Shipping.exe") if where[0] else None
             last = self.cfg.get("last_world") or {}
             if not folder and not prev.get("started") and game_id and last.get("id") == [game_id, *where] \
@@ -2060,6 +2071,9 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 if last["mp"] is False:
                     self.show_paused()
                 return
+            if not folder and not prev.get("started") and last.get("id"):
+                log.info("not the world this program saw before it restarted (%s; now %s): which save is it?",
+                         last.get("id"), [game_id, *where])
             if not folder and not lobby and prev.get("started") and prev.get("where") == where and where[0]:
                 # a loading screen without the main menu (moving to another lot, "go to my partner"): same save
                 log.info("back in the world after a loading screen: still the same save")

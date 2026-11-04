@@ -58,7 +58,8 @@ class StandIn:
     def call(self, name, **kw):
         self.calls.append((name, kw))
         if name == "game.get_state":
-            return {"phase": self.phase, "is_lobby": self.phase == "lobby", "loading": False}
+            return {"phase": self.phase, "is_lobby": self.phase == "lobby", "loading": False,
+                    **(getattr(self, "live", None) or {})}
         if name == "game.goto_lobby":
             self.write(self.loaded)                                # it saves first
             self.phase = "lobby"
@@ -193,6 +194,14 @@ async def main():
         await again.watch_save(entered=True)
         await again.watch_save(entered=False)
         assert again.mp_active() and again.save_box is None, again.save_box
+        # (the game's state not read yet when this program has just started: asked, and still the same world)
+        game.last_state, game.live = {}, {"possessed_entity_id": 7, "level_name": "RedCity_Map"}
+        fresh = companion.Companion(comp.cfg)
+        fresh.game = game
+        await fresh.watch_save(entered=True)
+        await fresh.watch_save(entered=False)
+        assert fresh.mp_active() and fresh.save_box is None, "a restart asked about the save it was already in"
+        game.last_state, game.live = {"possessed_entity_id": 7, "level_name": "RedCity_Map"}, None
         # ...but a new game process (the game restarted) is asked about again.
         companion.servers.netinfo.process_id = lambda name: 5555
         third = companion.Companion(comp.cfg)

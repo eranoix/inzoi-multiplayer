@@ -157,7 +157,7 @@ async def main():
     assert ("relook", {"key": "p1"}) in ops, ops
     print("an adopted partner's Zoi takes their current look: ok")
 
-    # Aging (the players' choice: adults, aging slowly): every phase lasts cfg "aging_slower" (10) times the game's own,
+    # Aging (the players' choice: adults, aging slowly): every phase lasts cfg "aging_slower" (200) times the game's own,
     # patched into the game's Aging table once per loaded world; my Zoi and this save's copy of the partner age
     # (a stop left by 0.9.56 lifted); cfg "stop_aging": true stops it while playing together, as 0.9.56 did.
     comp, r = make()
@@ -181,22 +181,22 @@ async def main():
     companion.save_config = lambda c: None
     await comp.keep_young()
     await comp.keep_young()
-    assert set(table.values()) == {14400}, table
-    assert comp.cfg["aging_base"]["Adult"] == 1440 and comp.cfg["aging_factor"] == 10
+    assert set(table.values()) == {288000}, table
+    assert comp.cfg["aging_base"]["Adult"] == 1440 and comp.cfg["aging_factor"] == 200
     ages = [kw for tool, kw in calls if tool == "life_and_death.stop_aging"]
     assert sorted(kw["entity_id"] for kw in ages) == [5, 10] and all(kw["Enable"] is False for kw in ages), ages
     assert len([c for c in calls if c[0] == "data.patch"]) == 9, "patched more than once in one loaded world"
-    print("every phase of life lasts 10x longer, both Zois age (a 0.9.56 stop lifted): ok")
+    print("every phase of life lasts 200x longer, both Zois age (a 0.9.56 stop lifted): ok")
 
     calls.clear()                                             # (the program restarts, the game still patched)
     comp.save_session = {"started": 123.0}
     await comp.keep_young()
-    assert set(table.values()) == {14400} and not [c for c in calls if c[0] == "data.patch"], "patched again on top"
+    assert set(table.values()) == {288000} and not [c for c in calls if c[0] == "data.patch"], "patched again on top"
     assert not [c for c in calls if c[0] == "life_and_death.stop_aging"], "stop_aging again (a cheat notice on screen)"
     table.update({s: 1440 for s in table})                    # (the game started again: its own values back)
     comp.save_session = {"started": 124.0}
     await comp.keep_young()
-    assert set(table.values()) == {14400}, table
+    assert set(table.values()) == {288000}, table
     comp.cfg["aging_slower"] = 5                              # (another pace chosen: from the game's own value)
     comp.save_session = {"started": 125.0}
     await comp.keep_young()
