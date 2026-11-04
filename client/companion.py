@@ -53,7 +53,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.78"
+VERSION = "0.9.79"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
@@ -3254,6 +3254,10 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         async def update_now(_):
             return await self.update_now()
 
+        async def ui_report(body):
+            log.info("panel report: %s", json.dumps(body)[:4000])
+            return {"ok": True}
+
         async def world_answer(body):
             self.world_action(str(body.get("key", "")), str(body.get("action", "")))
             return {"ok": True, "box": self.world_box}
@@ -3263,7 +3267,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             import menu                                  # (Windows only: the cursor in the game's window)
             return {"cursor": await asyncio.to_thread(menu.cursor_in_game)}
 
-        return {"/status": status, "/cursor": cursor, "/chat": chat, "/join": join, "/settings": settings,
+        return {"/status": status, "/cursor": cursor, "/ui_report": ui_report, "/chat": chat, "/join": join, "/settings": settings,
                 "/houses": house_list, "/share": share, "/add_house": add_house, "/mods": mods_answer,
                 "/save": save_answer, "/update": update_answer, "/update/now": update_now, "/world": world_answer, **self.server_routes(),
                 **self.couple_routes(), **self.support_routes()}

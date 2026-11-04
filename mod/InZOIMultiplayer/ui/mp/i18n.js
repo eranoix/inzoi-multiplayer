@@ -19,6 +19,7 @@
         'Servers': 'Servidores',
         'Servers: join one, host your own, admin console': 'Servidores: entrar, hospedar, console de admin',
         'Minimize': 'Minimizar',
+        'Collapse': 'Recolher',
         'Close': 'Fechar',
         'People': 'Pessoas',
         'Houses': 'Casas',

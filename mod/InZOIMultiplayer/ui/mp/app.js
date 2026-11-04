@@ -49,6 +49,19 @@
     // (window.js calls this the moment the panel opens or closes: with only the 150 ms interval, the open card was
     // drawn for a moment with the capsule's auto width - stretched across the screen, then right)
     root._onMinimize = syncClass;
+    // (once: what the title bar really holds and what the game's SDK offers - the game puts a hide button on the
+    // panel that isn't ours; the companion logs this)
+    setTimeout(function () {
+        var kids = [];
+        for (var i = 0; i < document.body.children.length; i++) {
+            var n = document.body.children[i];
+            kids.push(n.tagName + '#' + (n.id || '') + '.' + (n.className || ''));
+        }
+        var sdk = [];
+        try { for (var k in (window.inzoi && inzoi.view) || {}) { sdk.push(k); } } catch (e) {}
+        post('/ui_report', { title: ($('title-bar') || {}).outerHTML ? $('title-bar').outerHTML.slice(0, 2500) : '',
+                             body: kids.join(' '), sdk: sdk.join(',') }, null, 3000);
+    }, 4000);
     [2500, 5000].forEach(function (ms) {
         setTimeout(function () {
             if (!userOpened && !root._minimized && root._applyMinimize && !document.querySelector('.req')) { root._applyMinimize(true); }
@@ -73,12 +86,17 @@
         var k = window.innerWidth / c[2], x = c[0] * k, y = c[1] * k, r = root.getBoundingClientRect();
         return x >= r.left - 4 && x <= r.right + 4 && y >= r.top - 4 && y <= r.bottom + 4;
     }
+    // Collapsed with its button: it doesn't open again under the cursor that clicked it - only once the cursor has left
+    // the capsule and come back.
+    var manualClosed = false;
+    $('minimize-btn').addEventListener('click', function () { manualClosed = true; hovered = false; });
     setInterval(function () {
-        if (root._minimized || modalWas) { return; }
+        if ((root._minimized && !manualClosed) || modalWas) { return; }
         post('/cursor', {}, function (res) {
             var over = cursorOver(res && res.cursor);
+            if (over === false) { manualClosed = false; }
             if (over === false && hovered) { hovered = false; leftAt = Date.now(); }
-            else if (over === true && !hovered) { hovered = true; hoverAt = Date.now(); }
+            else if (over === true && !hovered && !manualClosed) { hovered = true; hoverAt = Date.now(); }
         }, 800);
     }, 300);
     function holdOpen() {      // (not "busy": that's poll()'s flag - the name clash made every collapse check throw)
@@ -88,7 +106,7 @@
     setInterval(function () {
         if (!root._applyMinimize) { return; }
         var now = Date.now();
-        if (hovered && root._minimized && now - hoverAt > 120) {
+        if (hovered && root._minimized && now - hoverAt > 120 && !manualClosed) {
             userOpened = true;
             root._applyMinimize(false);
         } else if (!hovered && !root._minimized && now - leftAt > 700 && !holdOpen()) {
