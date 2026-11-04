@@ -4,7 +4,8 @@ the in-game half is read_dirt / set_dirt in lua/B2/Main.lua; colours go through 
     dirt:<lot>          the home's dust and wear: {"o": {key: [table, x, y, z, dust (1/1000), wear grade]}}
     look:<lot>:<key>    one object's colours and materials: {"t": table, "p": [x, y, z], "m": {part: {field: value}}}
 
-(key: the object's kind and place - objsync.obj_key: the same object in both saves; places are the world's.)
+(key: the object's kind and place to 10 cm - detail_key: the same object in both saves, which the house sync keeps
+in the same places; objsync's 50 cm took two pieces of lawn 45 cm apart for one, and only one was ever synced.)
 
 The server's values are the truth: each PC brings its game to them - at the first read of the lot in a world (a save
 loaded, the program or the game started again) whoever set them, and later whenever a partner's change comes.
@@ -20,11 +21,11 @@ as default is reset). The first time a lot's looks are shared, the host's home i
 look is put on an object here, the game's own rendering of it (a field it fills in) isn't taken for a change.
 """
 import asyncio
+import hashlib
 import logging
 import time
 
 from housesync import TRANSIENT
-from objsync import obj_key
 from shared import version
 
 log = logging.getLogger("detailsync")
@@ -43,6 +44,11 @@ SET_PARAM = {"color": "Color", "roughness": "Roughness", "metallic": "Metallic",
              "material_group": "material_group", "material_index": "material_index"}
 
 
+def detail_key(table: str, x: float, y: float, z: float) -> str:
+    raw = f"{table}|{round(x / 10)}|{round(y / 10)}|{round(z / 10)}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
 def parse_dirt(text: str):
     """The controller's "dirt" report: "<lot>;entity|table|x|y|z|dust|grade;..." -> (lot, {key: obj})."""
     parts = str(text or "").split(";")
@@ -59,7 +65,7 @@ def parse_dirt(text: str):
             x, y, z, d, w = float(f[2]), float(f[3]), float(f[4]), int(f[5]), int(f[6])
         except ValueError:
             continue
-        objs[obj_key(f[1], x, y, z)] = {"t": f[1], "p": [round(x), round(y), round(z)], "d": d, "w": w, "e": f[0]}
+        objs[detail_key(f[1], x, y, z)] = {"t": f[1], "p": [round(x), round(y), round(z)], "d": d, "w": w, "e": f[0]}
     return site, objs
 
 
@@ -70,28 +76,40 @@ def dirt_differs(a, b) -> bool:
     return a[1] >= 0 and b[1] >= 0 and a[1] != b[1]
 
 
-def hex_color(c) -> str | None:
+def color_of(c) -> list | None:
+    """A colour as the game reads it: linear [r, g, b, a], 4 decimals (8 bits lose the dark tones' precision)."""
     if not isinstance(c, dict):
         return None
     try:
-        rgba = [max(0, min(255, round(float(c.get(k, 1.0 if k == "a" else 0.0)) * 255))) for k in "rgba"]
+        return [round(float(c.get(k, 1.0 if k == "a" else 0.0)), 4) for k in "rgba"]
     except (TypeError, ValueError):
         return None
-    return "#" + "".join(f"{v:02X}" for v in (rgba if rgba[3] < 255 else rgba[:3]))
+
+
+def srgb_hex(rgba) -> str:
+    """A colour as the game reads it (linear) -> as build.set_material takes it (sRGB hex): put as read, a brown
+    #5E3C2D came out #1D0B07."""
+    def conv(v: float) -> int:
+        v = max(0.0, min(1.0, float(v)))
+        v = 12.92 * v if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055
+        return max(0, min(255, round(v * 255)))
+    rgb = [conv(v) for v in rgba[:3]]
+    a = max(0, min(255, round(float(rgba[3]) * 255))) if len(rgba) > 3 else 255
+    return "#" + "".join(f"{v:02X}" for v in rgb) + (f"{a:02X}" if a < 255 else "")
 
 
 def normalize_look(info) -> dict:
     """build.get_customize_info -> {part: {field: value}}: only customised parts, only fields that can be put back
-    (colours as hex, numbers rounded) - the same look reads the same in both games."""
+    (colours linear, numbers rounded) - the same look reads the same in both games."""
     out = {}
     for p in (info or {}).get("parts") or []:
         if not isinstance(p, dict) or "index" not in p:
             continue
         fields = {}
         for k in COLOR_FIELDS:
-            h = hex_color(p.get(k))
-            if h:
-                fields[k] = h
+            c = color_of(p.get(k))
+            if c:
+                fields[k] = c
         for k in NUMBER_FIELDS:
             if isinstance(p.get(k), (int, float)):
                 fields[k] = round(float(p[k]), 3)
@@ -197,7 +215,8 @@ class DetailSync:
         if fix:
             self.put_dirt(site, fix)
         if send:
-            value = {"o": dict(srv)}
+            # (the host's: only what's in the home now - keys from an older program or of objects gone are dropped)
+            value = {"o": {k: v for k, v in srv.items() if not host or k in self.dirt_last}}
             for k, v in send.items():
                 o = self.dirt_last[k]
                 value["o"][k] = [o["t"], *o["p"], int(v[0]), int(v[1])]
@@ -268,6 +287,11 @@ class DetailSync:
             if m != base:                                # (changed here)
                 self.look_base[k] = self.look_srv[k] = m
                 self.shared_task(self.share(key, self.look_value(objs[k], m), base=version(item)))
+        if host:                                         # (keys of objects not in the home: dropped)
+            prefix = f"look:{site}:"
+            for key in [k for k in self.shared if k.startswith(prefix) and k[len(prefix):] not in objs]:
+                if key not in self.shared_inflight:
+                    self.shared_task(self.share(key, None))
         if put:
             await asyncio.to_thread(self.put_looks, put)
 
@@ -284,7 +308,8 @@ class DetailSync:
                 for part, fields in sorted(want.items(), key=lambda kv: int(kv[0])):
                     if have.get(part) == fields:
                         continue
-                    args = {SET_PARAM[f]: v for f, v in fields.items() if f in SET_PARAM}
+                    args = {SET_PARAM[f]: (srgb_hex(v) if f in COLOR_FIELDS else v)
+                            for f, v in fields.items() if f in SET_PARAM}
                     self.game.call("build.set_material", entity_id=e, part_index=int(part), **args)
                 self.look_put[k] = time.time()
             except Exception as ex:                      # noqa: BLE001

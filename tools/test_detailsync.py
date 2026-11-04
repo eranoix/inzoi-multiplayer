@@ -15,7 +15,7 @@ os.environ["APPDATA"] = tempfile.mkdtemp()                 # (never the real con
 os.environ["INZOI_MP_DOCUMENTS"] = tempfile.mkdtemp()      # (never the real game's Mods folder)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "client"))
 import detailsync  # noqa: E402
-from objsync import obj_key  # noqa: E402
+from detailsync import detail_key as obj_key  # noqa: E402
 
 
 class Mail:
@@ -142,8 +142,8 @@ async def look_tests():
         {"index": 0, "parts_row_key": "RiceCooker01", "color": {"r": 0.0, "g": 0.5, "b": 1.0, "a": 1.0}},
         {"index": 1, "parts_row_key": "RiceCooker01"},
         {"index": 2, "parts_row_key": "X", "emissive_multi": 0.5512, "material_group": 0, "material_index": 2}]}) == {
-        "0": {"color": "#0080FF"}, "2": {"emissive_multi": 0.551, "material_group": 0, "material_index": 2}}
-    print("colours read the same in both games (hex, rounded, only what can be put back): ok")
+        "0": {"color": [0.0, 0.5, 1.0, 1.0]}, "2": {"emissive_multi": 0.551, "material_group": 0, "material_index": 2}}
+    print("colours read the same in both games (linear, rounded, only what can be put back): ok")
 
     host = D("arthur", "arthur")
     host.on_dirt_report(report([(*BATH, 150, 0), (*LAMP, -1, -1)]))
@@ -155,7 +155,7 @@ async def look_tests():
     keys = {k for k, _, _ in host.sent}
     assert keys == {f"look:1038:{KL}", f"look:1038:{KB}"}, host.sent
     lamp = next(v for k, v, _ in host.sent if k.endswith(KL))
-    assert lamp == {"t": "Lighting04", "p": [50, 50, 250], "m": {"1": {"color": "#FF0000"}}}, lamp
+    assert lamp == {"t": "Lighting04", "p": [50, 50, 250], "m": {"1": {"color": [1.0, 0.0, 0.0, 1.0]}}}, lamp
     print("the host's colours go up when the server has none: ok")
 
     # Chey's game: the server's lamp is red, hers blue; her bath has a colour the server doesn't: reset
@@ -169,6 +169,8 @@ async def look_tests():
     await chey.look_scan(1038)
     calls = [(t, kw) for t, kw in chey.game.calls if t != "build.get_customize_info"]
     assert ("build.set_material", {"entity_id": "15767", "part_index": 1, "Color": "#FF0000"}) in calls, calls
+    lin = [0.1119, 0.0452, 0.0262, 1.0]                # (#5E3C2D as the game reads it: linear)
+    assert detailsync.srgb_hex(lin) == "#5E3C2D", detailsync.srgb_hex(lin)                # (read linear, put sRGB)
     assert ("build.reset_material", {"entity_id": "15778", "part_index": 0}) in calls, calls
     assert not chey.sent
     print("the other PC's first scan: brought to the server's colours, part by part: ok")
@@ -182,7 +184,7 @@ async def look_tests():
     await chey.look_scan(1038)
     await asyncio.sleep(0)
     assert len(chey.sent) == 1 and chey.sent[0][0] == f"look:1038:{KL}" and chey.sent[0][2] == 3, chey.sent
-    assert chey.sent[0][1]["m"] == {"1": {"color": "#FFFF00", "roughness": 0.5}}
+    assert chey.sent[0][1]["m"] == {"1": {"color": [1.0, 1.0, 0.0, 1.0], "roughness": 0.5}}
     print("a colour changed in her game goes up; the game's rendering of a put look doesn't: ok")
 
     # the host gets it: put on his lamp at once
@@ -196,6 +198,16 @@ async def look_tests():
     sets = [kw for t, kw in host.game.calls if t == "build.set_material"]
     assert sets == [{"entity_id": "15767", "part_index": 1, "Color": "#FFFF00", "Roughness": 0.5}], host.game.calls
     print("a partner's colour change is put on my object at once: ok")
+
+    # two objects of a kind 45 cm apart (pieces of lawn) are two keys, not one
+    assert obj_key("Landscape01_v03", 73479, 25224, 68) != obj_key("Landscape01_v03", 73522, 25205, 68)
+    # the host drops look keys of objects that aren't in the home (an older program's keys)
+    host.shared["look:1038:0ld0ld0ld0ld"] = {"key": "look:1038:0ld0ld0ld0ld", "value": {}, "v": 2, "by": "arthur"}
+    host.sent.clear()
+    await host.look_scan(1038)
+    await asyncio.sleep(0)
+    assert ("look:1038:0ld0ld0ld0ld", None, None) in host.sent, host.sent
+    print("objects 45 cm apart are two; stale keys are dropped by the host: ok")
 
 
 async def main():
