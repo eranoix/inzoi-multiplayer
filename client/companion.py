@@ -53,7 +53,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.90"
+VERSION = "0.9.91"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
@@ -68,7 +68,7 @@ NEED_LOW = -40.0                   # a need under this: my Zoi's own needs first
 SPOT_SAME = 60.0                   # cm: two Zois this close on the same object are on one spot (check_spot)
 SPOT_SETTLE = 2.0                  # s after my action began before its spot counts (still walking there)
 SPOT_AGAIN = 20.0                  # s between two moves of my Zoi to another spot
-STUCK_WALK = 6.0                   # s a partner's Zoi may stand in WalkToContext before it's freed (unstick_puppets)
+STUCK_WALK = 15.0                  # s a partner's Zoi may stand in WalkToContext before it's freed (unstick_puppets)
 AGING_SLOWER = 200                 # every phase of life lasts this many times the game's own (the players' choice:
                                    # 10x on 2026-11-03, 200x on 2026-11-04)
 ONLINE_FOR = 15.0                  # s since their last state: a partner still playing (partner_online)
@@ -1740,6 +1740,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 if self._house_n % 12 == 3 and self.world == "play" and self.my_entity:
                     await self.needs_guard()                 # (every 3 s: needs before chats)
                 if self.world == "play" and self.my_entity:
+                    self.tell_social()
                     a = await self.g(self.game.activity, self.my_entity)
                     act = await self.g(self.describe_act, a)
                     anim = a["anim"]["id"] if a.get("anim") else None
@@ -1801,6 +1802,27 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     await self.g(self.game.call, "interaction.cancel", entity_id=self.my_entity)
                 except GameError:
                     pass
+
+    def tell_social(self):
+        """in/posefree.cfg "pid,pid": the partners whose Zoi here is in a social with mine - mine doing it to theirs, or
+        theirs (acted out here) to mine. The B1 script stops putting that Zoi where they are in their game meanwhile, so
+        the game walks it into place and the two line up (it was pulled back every frame: it never got there, every
+        couple action stuck - 2026-11-04); their skeleton still moves its body."""
+        mine = (self.cur_act or {}).get("player")
+        free = sorted(pid for pid, r in self.remotes.items()
+                      if pid in self.puppet_ids and (pid == mine or ((r.state or {}).get("act") or {}).get("player")
+                                                       == self.me_id))
+        text = ",".join(free)
+        if text != self.__dict__.get("posefree_text"):
+            try:
+                (install.INSTALL_DIR / "in").mkdir(parents=True, exist_ok=True)
+                write_atomic(install.INSTALL_DIR / "in" / "posefree.cfg", text)
+                self.posefree_text = text
+                if text:
+                    log.info("in a social with mine: %s's Zoi here is lined up by the game", ", ".join(
+                        self.remotes[p].name for p in free if p in self.remotes))
+            except OSError as e:
+                log.debug("posefree: %s", e)
 
     def partner_online(self, r) -> bool:
         """They're playing now: their game's state keeps coming."""

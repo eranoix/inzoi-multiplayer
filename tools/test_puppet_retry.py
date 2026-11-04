@@ -354,6 +354,22 @@ async def main():
     assert str(install.INSTALL_DIR).startswith(os.environ["INZOI_MP_DOCUMENTS"])
     print("lock files: the online partner's Zoi locked (time-stamped, refreshed), unlocked offline; a refusal "
           "explained once: ok")
+    # A social between the two Zois: the partner's Zoi here is lined up by the game, not put where they are
+    # (in/posefree.cfg for the B1 script) - mine doing it to theirs, or theirs to mine; none: put where they are again.
+    import install
+    comp, r = make()
+    comp.me_id, comp.puppet_ids["p1"] = "me", 25674
+    f = install.INSTALL_DIR / "in" / "posefree.cfg"
+    comp.cur_act = {"bag": "Co_LoverHugDance", "player": "p1"}
+    comp.tell_social()
+    assert f.read_text("utf-8") == "p1"
+    comp.cur_act, r.state = {"bag": "Sleep_Bed", "obj": "Bed01"}, dict(r.state, act={"bag": "Co_Hug", "player": "me"})
+    comp.tell_social()
+    assert f.read_text("utf-8") == "p1"
+    r.state = dict(r.state, act={"bag": "Next_BookRead_Start", "obj": "Book_2"})
+    comp.tell_social()
+    assert f.read_text("utf-8") == ""
+    print("a social between the Zois: the game lines the partner's Zoi up (not put where they are): ok")
     print("puppet retry tests passed")
 
 

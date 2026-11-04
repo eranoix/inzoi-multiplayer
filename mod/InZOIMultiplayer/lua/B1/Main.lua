@@ -656,10 +656,24 @@ end
 
 -- The drawn actor goes where they're drawn, smoothly (place and facing); far off (a jump, another floor), at once.
 -- An actor the game let go (a loading screen, the Zoi spawned again) gives its rig back, and it's built on the new one.
+-- Partners whose Zoi here is in a social with mine (in/posefree.cfg "pid,pid", the companion): not put where they are
+-- meanwhile - the game walks it into place for the hug, the kiss, the dance, and their skeleton moves its body there.
+-- (Put back every frame, it never got into place: every couple action stuck, 2026-11-04.)
+local free, freeAt = {}, -10
+local function read_free()
+    local f = {}
+    for pid in (cfg_load("in", "posefree") or ""):gmatch("[%w_%-]+") do f[pid] = true end
+    free = f
+end
+
 local function glide(dt)
-    for _, r in pairs(remotes) do
+    if clock - freeAt > 0.25 then
+        freeAt = clock
+        pcall(read_free)
+    end
+    for pid, r in pairs(remotes) do
         local tg, rig = r.target, r.rig
-        if tg and rig then
+        if tg and rig and not free[pid] then
             local ok = pcall(function()
                 local a = rig.actor
                 local l, yaw = a:K2_GetActorLocation(), a:K2_GetActorRotation().Yaw

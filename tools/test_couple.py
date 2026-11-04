@@ -596,21 +596,28 @@ async def test_couple():
     assert (await ana_routes["/world/backups"]({}))["backups"][0]["reason"] == "before-undo"
     print("shared household: ok")
 
-    # --- nobody answers: after couple.ANSWER_WITHIN seconds the request is accepted by itself (away from the keyboard,
-    # the panel closed: the partner isn't held up)
-    keep_within, couple.ANSWER_WITHIN = couple.ANSWER_WITHIN, 0.5
+    # --- nobody answers: the request waits - yes or no is the partner's to say (it was accepted by itself after 5 s,
+    # 2026-11-04); not answered within REQUEST_TTL it's declined and the asker hears so
+    keep_within, keep_ttl = couple.ANSWER_WITHIN, couple.REQUEST_TTL
+    couple.ANSWER_WITHIN, couple.REQUEST_TTL = 0.5, 3.0
     ana.world = ben.world = "play"
     auto = asyncio.create_task(ben.answer_loop())
     try:
         res2 = await ana_routes["/partner/action"]({"action": "hug"})
         assert res2.get("ok"), res2
         assert await until(lambda: ben.requests)
-        assert await until(lambda: not ben.requests, 5), "an unanswered request wasn't accepted by itself"
-        assert await until(lambda: ana.sent[res2["id"]]["state"] in ("accepted", "started", "done"), 5), ana.sent[res2["id"]]
+        await asyncio.sleep(1.2)
+        assert ben.requests, "an unanswered request was answered by itself"
+        assert ana.sent[res2["id"]]["state"] == "waiting", ana.sent[res2["id"]]
+        assert await until(lambda: not ben.requests, 5), "an unanswered request stayed open past its time"
+        assert await until(lambda: ana.sent[res2["id"]]["state"] in ("declined", "expired"), 5), ana.sent[res2["id"]]
     finally:
         auto.cancel()
-        couple.ANSWER_WITHIN = keep_within
-    print("an unanswered request is accepted by itself after a few seconds: ok")
+        couple.ANSWER_WITHIN, couple.REQUEST_TTL = keep_within, keep_ttl
+    assert couple.started_as("Coop_Goto_Desk_Kiss_Main", "Co_Desk_Kiss")
+    assert not couple.started_as("Co_Desk_Kiss", "Co_Desk_Kiss") and not couple.started_as("Sleep_Bed", "Co_Desk_Kiss")
+    print("an unanswered request waits for the partner, and is declined when its time is up; a coop action's first "
+          "stage counts as started: ok")
 
     for t in tasks:
         t.cancel()

@@ -59,12 +59,21 @@ GROUP_ORDER = ("romance", "fun", "friendship", "talk", "business", "conflict")
 FAMILY_LINES = {"movein": "You live together now", "engage": "You're engaged!", "marry": "You're married!",
                 "baby": "A baby is on the way!"}
 REQUEST_TTL = 90                           # seconds a request sent stays open on the sender's side
-ANSWER_WITHIN = 5                          # seconds to answer a request here: not answered by then, it's accepted
+ANSWER_WITHIN = 5                          # s: a request for a chat while my Zoi's needs are low is declined then
 MAX_PENDING = 20
 BAG_ID = re.compile(r"^(anim:)?[A-Za-z0-9_]{1,80}$")
 # The game's own answer of a Zoi to what another does to it (DeepHug_MaleToFemale_Success_Feedback, turning to face
 # it): when the partner's Zoi answers mine in their game, here the game makes their Zoi answer by itself - never
 # acted out again, never asked (a popup, then the answer played late, after the interaction was over).
+def started_as(doing, bag) -> bool:
+    """My Zoi doing a stage of that interaction - the game's own name for its first part (Co_Desk_Kiss starts as
+    Coop_Goto_Desk_Kiss_Main: walking to the desk) - counts as it started."""
+    if not doing or not bag:
+        return False
+    core = re.sub(r"^(Co_|Coop_|Social_)", "", str(bag))
+    return core in str(doing) and str(doing) != str(bag)
+
+
 ANSWER_BAG = re.compile(r"Feedback|^MoveRotate$", re.I)
 # What a Zoi does for its needs: never stopped for a partner's interaction (0.9.76: a yes cancelled whatever the Zoi did,
 # eating too, and chats with the partner kept it from eating - Chey's Zoi starved to death).
@@ -205,25 +214,28 @@ class Couple:
                 return
 
     async def answer_loop(self):
-        """A request nobody answered within ANSWER_WITHIN seconds is accepted (the couple plays together: a popup left
-        alone - away from the keyboard, the panel closed - shouldn't hold the partner up)."""
+        """A request waits for the player's answer - yes or no, theirs to give (the players' choice, 2026-11-04: it was
+        accepted by itself after 5 s, before anyone could say no). Not answered within REQUEST_TTL s, it's declined (the
+        asker hears so). A chat asked while my Zoi's needs are low is declined after ANSWER_WITHIN s: needs first."""
         while True:
             await asyncio.sleep(1)
             try:
                 now = time.time()
                 for rid, q in list(self.requests.items()):
-                    if now - q["at"] >= ANSWER_WITHIN and not q.get("auto"):
+                    if q.get("auto"):
+                        continue
+                    low = self.__dict__.get("needs_low")
+                    if now - q["at"] >= ANSWER_WITHIN and low and q.get("action") in ("interaction", "game"):
+                        # (my Zoi must eat / sleep first: chats taken on instead starved Chey's Zoi to death)
                         q["auto"] = True
-                        low = self.__dict__.get("needs_low")
-                        if low and q.get("action") in ("interaction", "game"):
-                            # (my Zoi must eat / sleep first: chats taken on instead starved Chey's Zoi to death)
-                            log.info("%s's request wasn't answered in %d s: declined, my Zoi needs %s first (%s)",
-                                     q.get("from"), ANSWER_WITHIN, "/".join(low), q.get("bag") or "")
-                            asyncio.get_running_loop().create_task(self.couple_respond(rid, False))
-                            continue
-                        log.info("%s's request wasn't answered in %d s: accepted (%s %s)", q.get("from"),
-                                 ANSWER_WITHIN, q.get("action"), q.get("bag") or "")
-                        asyncio.get_running_loop().create_task(self.couple_respond(rid, True))
+                        log.info("%s's request wasn't answered in %d s: declined, my Zoi needs %s first (%s)",
+                                 q.get("from"), ANSWER_WITHIN, "/".join(low), q.get("bag") or "")
+                        asyncio.get_running_loop().create_task(self.couple_respond(rid, False))
+                    elif now - q["at"] >= REQUEST_TTL - 1:
+                        q["auto"] = True
+                        log.info("%s's request wasn't answered: declined (%s %s)", q.get("from"), q.get("action"),
+                                 q.get("bag") or "")
+                        asyncio.get_running_loop().create_task(self.couple_respond(rid, False))
             except Exception as e:                       # noqa: BLE001 - never worth stopping the loop
                 log.debug("answer loop: %s", e)
 
@@ -923,8 +935,8 @@ class Couple:
         bag, until = req["bag"], time.time() + within
         while time.time() < until:
             act = (self.state_base or {}).get("act") or {}
-            if act.get("bag") == bag:
-                log.info("interaction %s: running", bag)
+            if act.get("bag") == bag or started_as(act.get("bag"), bag):
+                log.info("interaction %s: running (%s)", bag, act.get("bag"))
                 return True
             await asyncio.sleep(0.25)
         st = (self.remotes.get(req.get("to_id")) or type("R", (), {"state": None})()).state or {}
