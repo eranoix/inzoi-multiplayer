@@ -52,8 +52,10 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.59"
-CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
+VERSION = "0.9.60"
+CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
+CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
+CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 SILENT_FOR = 45               # s without a byte from the server before it counts as gone (it pings every 15 s)
@@ -2703,8 +2705,22 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             week = 7 * 1440
             d_week = ((int(their_day) % 7) * 1440 + theirs - (int(my_day) % 7) * 1440 - mine) % week
             total = d_week if d_week < week // 2 else d_week - week
-            if abs(total) < CLOCK_SLACK:
+            if abs(total) < CLOCK_JUMP:
+                # A few minutes apart (the host paused a moment, a speed change reached me a second late): no jump - a
+                # jump every minute or two, 3 to 8 minutes back or forward, was this game's time hopping about. My
+                # game runs CLOCK_SLEW faster (behind) or slower (ahead) than the host's until they meet
+                # (follow_leader_speed).
+                slew = self.__dict__.get("_clock_slew", 0)
+                if abs(total) >= 2:
+                    slew = 1 if total > 0 else -1
+                elif slew and total * slew <= 0:
+                    slew = 0                             # (met)
+                if slew != self.__dict__.get("_clock_slew", 0):
+                    log.info("my game's time %s the host's (%+d min)", "catches up with" if slew > 0 else
+                             "waits for" if slew < 0 else "is with", total)
+                self._clock_slew = slew
                 return
+            self._clock_slew = 0
             if total > 0:
                 days, rest = divmod(total, 1440)
                 log.info("following the host's time: %s%d minutes forward", f"{days} day(s) and " if days else "", rest)
@@ -2731,11 +2747,14 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         if not st or not st.get("clock") or not clock or clock[3]:
             return                                       # the leader is paused or away / I'm paused: my own speed
         want = st.get("speed")
+        slew = self.__dict__.get("_clock_slew", 0)
+        if isinstance(want, (int, float)) and 0 < want <= 10 and slew:
+            want = round(want * (1 + CLOCK_SLEW * slew), 1)  # (meeting the host's clock: follow_leader_clock)
         if isinstance(want, (int, float)) and 0 < want <= 10 and abs(clock[2] - want) > 0.01:
             if time.time() - self.__dict__.get("_speed_set_at", 0) < 2:
                 return                                   # (as in keep_speed: no tug of war with the game)
             self._speed_set_at = time.time()
-            if self.__dict__.get("_speed_said") != want:
+            if self.__dict__.get("_speed_said") != want and not slew:
                 self._speed_said = want
                 log.info("following the host's game speed: %s", want)
             await self.g(self.game.call, "environment.time_speed", speed=want)

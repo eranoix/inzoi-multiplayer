@@ -94,6 +94,18 @@ async def main():
     assert (d / "MPSeq.lua").read_text() == f"return {{seq = {seq}}}\n"
     mb.add_point("p1", 1, 0, 0, 0, 0)
     assert mb.flush() and mb.seq == seq + 1
+    # Points from their states (small counts) and their skeleton frames (from 10 000 000) mixed, as at a loading
+    # screen: the controller gets one rising count (a drop read as "their program restarted": teleported back and
+    # forth, seen 10 times in half a second); a repeat of the same sender's count isn't added twice.
+    for src in (10_000_001, 10_000_002, 57, 58, 58, 10_000_003, 59):
+        mb.add_point("p2", src, src % 1000, 0, 0, 0)
+    sent = [pt[0] for pt in mb.trails["p2"]]
+    assert len(sent) == 6 and sent == sorted(sent) and len(set(sent)) == 6, sent
+    time.sleep(0.1)                                           # (this program restarted later: still above - the
+    mb2 = mailbox.Mailbox(Path(tempfile.mkdtemp()))           # count starts from the clock, 100 a second, points come 30)
+    mb2.add_point("p2", 1, 0, 0, 0, 0)
+    assert mb2.trails["p2"][0][0] > sent[-1], (mb2.trails["p2"], sent)
+    print("points from states and skeleton frames: one rising count for the controller: ok")
     mb.set_member("p1", "{}")
     orig = mailbox.write_atomic
 

@@ -211,6 +211,32 @@ async def main():
     await comp.follow_leader_clock()
     assert commands(g, "environment.time_skip") == [{"minutes": 40}]
 
+    # A few minutes apart (the host paused a moment; seen: set 3-8 minutes back or forward every minute or two): no
+    # jump - my game runs 20% faster (behind) or slower (ahead) than the host's until the clocks meet.
+    g, comp = follower(17, 41, 1047, [17, 45, 1047])          # 4 min behind
+    comp.leader_state()["speed"] = 1.0
+    await comp.follow_leader_clock()
+    assert not commands(g, "environment.time_skip") and not commands(g, "environment.set_time"), g.sent
+    await comp.follow_leader_speed()
+    assert commands(g, "environment.time_speed") == [{"speed": 1.2}], g.sent
+    comp.my_clock = (17, 44, 1.2, False, 1047)                # (1 behind: still catching up)
+    await comp.follow_leader_clock()
+    assert comp._clock_slew == 1
+    comp.my_clock = (17, 46, 1.2, False, 1047)                # met (a minute past): the host's speed again
+    await comp.follow_leader_clock()
+    comp._speed_set_at = 0
+    await comp.follow_leader_speed()
+    assert commands(g, "environment.time_speed")[-1] == {"speed": 1.0}, g.sent
+    g, comp = follower(17, 51, 1047, [17, 45, 1047])          # 6 min ahead: slower, never rewound
+    comp.leader_state()["speed"] = 3
+    await comp.follow_leader_clock()
+    await comp.follow_leader_speed()
+    assert not commands(g, "environment.set_time") and commands(g, "environment.time_speed") == [{"speed": 2.4}], g.sent
+    g, comp = follower(17, 34, 1047, [17, 45, 1047])          # 11 min behind (a loading screen, travel): at once
+    await comp.follow_leader_clock()
+    assert commands(g, "environment.time_skip") == [{"minutes": 11}] and comp._clock_slew == 0, g.sent
+    print("a few minutes apart: the follower's game runs 20% faster or slower until they meet, no jumps: ok")
+
     # A friend whose game isn't running (no fresh state) doesn't count.
     g = StandIn(9, 0, speed=3)
     comp, _ = make(g)

@@ -65,6 +65,8 @@ class Mailbox:
         self.ops = []            # [(expires_at, created_at, op)], time.monotonic()
         self.members = {}        # key -> Lua literal of FB1CustomizedCharacterInfo
         self.trails = {}         # key -> list of [n, x, y, z, yaw]
+        self.point_n = int(time.time() * 100)      # the count the controller gets: rising, whatever the source
+        self.point_src = {}      # key -> the sender's count of the last point taken (a repeat is dropped)
         self.paused = False      # the world is paused (no controller ticks): ops don't run out meanwhile
         self.written = None      # the body of the last MPCmd.lua written (None: write next flush)
         self.seq_written = None  # the seq in MPSeq.lua
@@ -94,10 +96,20 @@ class Mailbox:
             self.bulk_seq += 1
 
     def add_point(self, key: str, n: int, x, y, z, yaw, ts=None):
-        """ts: the sender's clock when the point was read (the controller works out their speed from it)."""
+        """A point of where a partner's Zoi is. n: the sender's own count, only for dropping a repeat; the controller
+        gets this program's count instead, one rising count for every source. (Points come from their states - small
+        counts - and from their skeleton frames - counted from 10 000 000 - one or the other as frames stop and start,
+        at a loading screen: mixed in one batch the controller took each drop for "their program restarted", dropped
+        the trail and teleported the Zoi back and forth, 10 times in half a second.) Started from the clock, the
+        count is higher after a restart of this program too.
+        ts: the sender's clock when the point was read (the controller works out their speed from it)."""
         with self.lock:
+            if self.point_src.get(key) == n:
+                return
+            self.point_src[key] = n
+            self.point_n += 1
             t = self.trails.setdefault(key, [])
-            t.append([n, x, y, z, yaw] + ([round(ts % 100000, 3)] if isinstance(ts, (int, float)) else []))
+            t.append([self.point_n, x, y, z, yaw] + ([round(ts % 100000, 3)] if isinstance(ts, (int, float)) else []))
             del t[:-10]                  # the controller dedups by n; resending the last few covers missed polls
 
     def flush(self) -> bool:
