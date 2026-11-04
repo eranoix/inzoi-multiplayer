@@ -264,6 +264,34 @@ async def main():
     assert not spot(comp, r, mine_age=10, their_age=10, host=True), "the host moved on a tie"
     assert spot(comp, r, mine_age=10, their_age=10, host=False), "the other PC didn't move on a tie"
     print("two bodies on one spot: the later one moves to the other side (the host stays on a tie): ok")
+
+    # Needs first (Chey's Zoi starved chatting with Arthur's, 2026-11-04): hungry and busy with the partner's Zoi ->
+    # that's stopped; while hungry, a request left unanswered is declined, not accepted.
+    comp, r = make()
+    comp.my_entity, comp.puppet_ids["p1"], comp.cur_target = 24534, 25674, 25674
+    comp.cur_act = {"bag": "Co_Business_R07", "player": "p1"}
+    calls = []
+    stats = {"Hunger": {"value": -70}, "Sleep": {"value": 20}, "Bladder": {"value": 0}, "Energy": {"value": 10}}
+    comp.game.call = lambda tool, **kw: calls.append((tool, kw)) or ({"stats": stats} if tool == "stat.get_all" else {})
+    await comp.needs_guard()
+    assert comp.needs_low == ["Hunger"] and ("interaction.cancel", {"entity_id": 24534}) in calls, calls
+    calls.clear()
+    stats["Hunger"]["value"] = 50
+    await comp.needs_guard()
+    assert comp.needs_low == [] and not [c for c in calls if c[0] == "interaction.cancel"]
+    comp.needs_low = ["Hunger"]
+    answered = []
+
+    async def respond(rid, accept, always=False, by_player=False):
+        answered.append((rid, accept, by_player))
+    comp.couple_respond = respond
+    comp.requests["q1"] = {"id": "q1", "from": "Ana", "from_id": "p1", "action": "game", "bag": "Co_Business_R07",
+                           "at": time.time() - 10}
+    task = asyncio.get_running_loop().create_task(comp.answer_loop())
+    await asyncio.sleep(1.3)
+    task.cancel()
+    assert answered and answered[0][1] is False, answered
+    print("needs first: hungry, the chat with the partner's Zoi is stopped and their request declined: ok")
     print("puppet retry tests passed")
 
 

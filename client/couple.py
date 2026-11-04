@@ -66,6 +66,9 @@ BAG_ID = re.compile(r"^(anim:)?[A-Za-z0-9_]{1,80}$")
 # it): when the partner's Zoi answers mine in their game, here the game makes their Zoi answer by itself - never
 # acted out again, never asked (a popup, then the answer played late, after the interaction was over).
 ANSWER_BAG = re.compile(r"Feedback|^MoveRotate$", re.I)
+# What a Zoi does for its needs: never stopped for a partner's interaction (0.9.76: a yes cancelled whatever the Zoi did,
+# eating too, and chats with the partner kept it from eating - Chey's Zoi starved to death).
+NEED_ACT = re.compile(r"Eat|Food|Cook|Meal|Snack|Drink|Sleep|Nap|Bed|Toilet|Pee|Shower|Bath|Wash|Death|Die", re.I)
 # Unverified guesses for doing it alone (no list of the game's interaction ids is available offline).
 GUESS_BAGS = {"hug": "Social_Hug", "kiss": "Social_Kiss", "dance": "Dance_Solo", "wave": "Social_Wave"}
 # Done to the partner's Zoi: the game's own ids, checked in the real game (31/10/2026) with interaction.list_available
@@ -211,6 +214,13 @@ class Couple:
                 for rid, q in list(self.requests.items()):
                     if now - q["at"] >= ANSWER_WITHIN and not q.get("auto"):
                         q["auto"] = True
+                        low = self.__dict__.get("needs_low")
+                        if low and q.get("action") in ("interaction", "game"):
+                            # (my Zoi must eat / sleep first: chats taken on instead starved Chey's Zoi to death)
+                            log.info("%s's request wasn't answered in %d s: declined, my Zoi needs %s first (%s)",
+                                     q.get("from"), ANSWER_WITHIN, "/".join(low), q.get("bag") or "")
+                            asyncio.get_running_loop().create_task(self.couple_respond(rid, False))
+                            continue
                         log.info("%s's request wasn't answered in %d s: accepted (%s %s)", q.get("from"),
                                  ANSWER_WITHIN, q.get("action"), q.get("bag") or "")
                         asyncio.get_running_loop().create_task(self.couple_respond(rid, True))
@@ -404,7 +414,7 @@ class Couple:
         self.system_line(f"{r.name} wants to interact with you: {label}")
         log.info("%s's Zoi does %s to yours: asking first", r.name, bag)
 
-    async def couple_respond(self, rid: str, accept: bool, always: bool = False) -> dict:
+    async def couple_respond(self, rid: str, accept: bool, always: bool = False, by_player: bool = False) -> dict:
         self.prune_requests()
         q = self.requests.pop(str(rid), None)
         if not q:
@@ -425,7 +435,8 @@ class Couple:
             return {"ok": True, "result": await self.apply_house(q)}
         if q.get("local"):                               # their Zoi already did it in their game: show it here or not
             if accept:
-                await self.free_my_zoi(q.get("bag"))
+                if by_player:
+                    await self.free_my_zoi(q.get("bag"))
                 r = self.remotes.get(q["from_id"])
                 if r:
                     r.ok_bag, r.ok_seen = q.get("bag"), time.time()
@@ -439,6 +450,7 @@ class Couple:
         await self.send({"t": "event", "kind": "couple", "to": q["from_id"], "data": reply})
         out = {"ok": True}
         if accept:
+            q["by_player"] = by_player
             out["result"] = res = await self.couple_perform(q, initiator=False)
             if q["action"] in FAMILY:
                 try:
@@ -459,8 +471,8 @@ class Couple:
             cur = await self.g(self.game.call, "interaction.get_current", entity_id=self.my_entity) or {}
             doing = str(cur.get("interaction_bag_id") or "")
             if not cur.get("playing") or not doing or re.match(r"(Co_|Coop|Social)", doing, re.I) \
-                    or ANSWER_BAG.search(doing) or re.search(r"Sleep", doing, re.I):
-                return                                   # (asleep stays asleep: a yes by itself after 5 s never wakes it)
+                    or ANSWER_BAG.search(doing) or NEED_ACT.search(doing):
+                return                                   # (eating, sleeping, the toilet...: never stopped for a chat)
             await self.g(self.game.call, "interaction.cancel", entity_id=self.my_entity)
             log.info("my Zoi stops %s to answer %s", doing, bag or "the partner")
         except Exception as e:                           # noqa: BLE001 - the game refused: it answers when it can
@@ -480,7 +492,8 @@ class Couple:
             return self.mark(req, "done" if res.get("ok") else "failed", res.get("error", ""))
         if action == "interaction":
             if not initiator:
-                await self.free_my_zoi(req.get("bag"))
+                if req.get("by_player"):                 # (only a yes clicked: never the one after 5 s - 0.9.76)
+                    await self.free_my_zoi(req.get("bag"))
                 return self.mark(req, "done")            # (their Zoi starts it; it shows up here through the live sync)
             eid = self.puppet_ids.get(pid)
             if not eid or not self.my_entity:
@@ -1066,7 +1079,8 @@ class Couple:
             return await self.couple_request(r, act)
 
         async def respond(body):
-            return await self.couple_respond(str(body.get("id", "")), bool(body.get("accept")), bool(body.get("always")))
+            return await self.couple_respond(str(body.get("id", "")), bool(body.get("accept")), bool(body.get("always")),
+                                             by_player=True)
 
         async def undo(body):
             return await self.world_undo(str(body.get("source") or "auto"), body.get("version"), body.get("backup"))

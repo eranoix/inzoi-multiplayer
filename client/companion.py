@@ -53,12 +53,14 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.75"
+VERSION = "0.9.76"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
 GAME_MIN_PER_S = 0.49         # game minutes a real second at speed 1 (measured on both PCs: 24 in 49.4 s, 20 in 40.9 s)
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
+NEEDS = ("Hunger", "Sleep", "Bladder", "Energy")
+NEED_LOW = -40.0                   # a need under this: my Zoi's own needs first (needs_guard)
 SPOT_SAME = 60.0                   # cm: two Zois this close on the same object are on one spot (check_spot)
 SPOT_SETTLE = 2.0                  # s after my action began before its spot counts (still walking there)
 SPOT_AGAIN = 20.0                  # s between two moves of my Zoi to another spot
@@ -1124,6 +1126,9 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 self.learn_bag(act)              # (couple actions: the game's own interaction ids)
                 if op and act.get("player") == self.me_id and couple.ANSWER_BAG.search(act["bag"]):
                     pass                         # (their Zoi answers mine: here the game makes theirs answer itself)
+                elif op and act.get("player") == self.me_id and self.__dict__.get("needs_low"):
+                    log.info("%s's Zoi does %s to mine: not played here, my Zoi needs %s first", r.name, act["bag"],
+                             "/".join(self.needs_low))
                 elif op:
                     if act.get("player") == self.me_id and not self.mirror_ok(r, act["bag"]):
                         self.ask_local(r, act["bag"], op)    # (couple.py: a popup first, then it plays here)
@@ -1721,6 +1726,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     await self.sample_puppets()              # (twice a second: the telemetry's view of them)
                 if self._house_n % 4 == 2 and self.world == "play" and self.my_entity:
                     self.check_spot()                        # (every second: two bodies in one place)
+                if self._house_n % 12 == 3 and self.world == "play" and self.my_entity:
+                    await self.needs_guard()                 # (every 3 s: needs before chats)
                 if self.world == "play" and self.my_entity:
                     a = await self.g(self.game.activity, self.my_entity)
                     act = await self.g(self.describe_act, a)
@@ -1747,6 +1754,35 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 loop_error("action loop", e)
                 await asyncio.sleep(1)
             await asyncio.sleep(0.25)
+
+    async def needs_guard(self):
+        """My Zoi's needs come before anything with my partner's: a need low (hunger, sleep, bladder, energy under
+        NEED_LOW) and my Zoi busy with their Zoi (a chat it started, an answer to theirs) - that's stopped, so the game
+        sends it to eat or sleep; while it lasts, their requests aren't accepted by themselves and what their Zoi does
+        to mine isn't played here. (2026-11-04: Chey's Zoi kept starting chats with Arthur's, which can't walk into
+        place; each failed and started again, for half an hour - she never ate, and died of hunger.)"""
+        try:
+            stats = (await self.g(self.game.call, "stat.get_all", entity_id=self.my_entity) or {}).get("stats") or {}
+        except GameError:
+            return
+        low = [k for k in NEEDS if isinstance(stats.get(k), dict) and float(stats[k].get("value") or 0) < NEED_LOW]
+        if low != self.__dict__.get("needs_low"):
+            if low:
+                log.info("my Zoi needs %s: chats with my partner's Zoi wait", "/".join(low))
+            elif self.__dict__.get("needs_low"):
+                log.info("my Zoi's needs are fine again")
+        self.needs_low = low
+        if not low:
+            return
+        theirs = set(self.puppet_ids.values())
+        if int(self.__dict__.get("cur_target") or -1) in theirs or (self.cur_act or {}).get("player"):
+            if time.time() - self.__dict__.get("_needs_stop_at", 0) > 10:
+                self._needs_stop_at = time.time()
+                log.info("my Zoi needs %s: stopped %s with my partner's Zoi", "/".join(low), (self.cur_act or {}).get("bag"))
+                try:
+                    await self.g(self.game.call, "interaction.cancel", entity_id=self.my_entity)
+                except GameError:
+                    pass
 
     def check_spot(self):
         """My Zoi lying or sitting where my partner's Zoi is, in their game, on the same object (a side of the bed, a seat
