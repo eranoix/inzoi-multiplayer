@@ -214,6 +214,32 @@ async def main():
     ages = [kw for tool, kw in calls if tool == "life_and_death.stop_aging"]
     assert sorted(kw["entity_id"] for kw in ages) == [5, 10] and all(kw["Enable"] is True for kw in ages), ages
     print("stop_aging: true still stops it while playing together: ok")
+
+    # A partner's Zoi standing in WalkToContext (it has no walk of its own: their skeleton moves it) is freed after
+    # STUCK_WALK s - not before, not while it plays the social itself, not a hidden one.
+    comp, r = make()
+    r.spawned, r.hidden = True, False
+    comp.puppet_ids["p1"] = 25674
+    now = {"action_type": "WalkToContext", "interaction_bag_id": "friendship_R03_2_FeedBack", "playing": True}
+    calls = []
+    comp.game.call = lambda tool, **kw: calls.append((tool, kw)) or (now if tool == "interaction.get_current" else {})
+    resets = lambda: [kw for tool, kw in calls if tool == "movement.reset_zoi"]               # noqa: E731
+    await comp.unstick_puppets()
+    await comp.unstick_puppets()
+    assert not resets(), "freed at once"
+    comp._walk_stuck["p1"] = (comp._walk_stuck["p1"][0], time.time() - companion.STUCK_WALK - 1)
+    await comp.unstick_puppets()
+    assert resets() == [{"entity_id": 25674, "Teleport": False}], resets()
+    calls.clear()
+    now.update(action_type="PlayAnimContext")                 # (walked into place / playing it: left alone)
+    await comp.unstick_puppets()
+    now.update(action_type="WalkToContext", interaction_bag_id="LoverHugDance_Feedback")
+    await comp.unstick_puppets()
+    comp._walk_stuck["p1"] = (comp._walk_stuck["p1"][0], time.time() - companion.STUCK_WALK - 1)
+    r.hidden = True                                           # (elsewhere: not looked at)
+    await comp.unstick_puppets()
+    assert not resets() and "p1" not in comp._walk_stuck
+    print("a partner's Zoi stuck walking into place is freed after a few seconds: ok")
     print("puppet retry tests passed")
 
 

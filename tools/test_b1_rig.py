@@ -181,7 +181,8 @@ def run_ticks(lua, main, seconds, feed=None, dt=0.05):
 
 
 def sender_tests():
-    """This player's own Zoi: the body read 30 times a second, the face (head mesh) 15; A and B frames."""
+    """This player's own Zoi: the body and the head (face, neck, shoulders) read 30 times a second (0.9.66: the
+    players' choice; at 15 the shoulders moved at half the body's pace); every frame carries both (A)."""
     lua = LuaRuntime()
     lua.execute(FAKE_GAME)
     g = lua.globals()
@@ -201,10 +202,10 @@ def sender_tests():
     nb, nh = len(g.BODY), len(g.HEAD)
     body_rate, head_rate = body.reads / nb / 2.0, head.reads / nh / 2.0
     assert 27 <= body_rate <= 31, f"body read {body_rate:.1f} times a second (30 wanted)"
-    assert 14 <= head_rate <= 17, f"face read {head_rate:.1f} times a second (15 wanted, + keyframes)"
+    assert 27 <= head_rate <= 31, f"head read {head_rate:.1f} times a second (30 wanted)"
     frames = [s.value for s in list(g.SAVES.values())[saves_before:] if s.key == "posed"]
     parts = [f.split("|")[3] for f in frames]
-    assert 55 <= len(frames) <= 62 and set(parts) == {"A", "B"}, (len(frames), set(parts))
+    assert 55 <= len(frames) <= 62 and set(parts) == {"A"}, (len(frames), set(parts))
     for f in frames:
         kid, seq, headp, part, rest = f.split("|")
         listed = [int(v) for i, v in enumerate(rest.split(",")) if rest and i % 8 == 0]
@@ -215,7 +216,7 @@ def sender_tests():
     keys = [s.value for s in g.SAVES.values() if s.key == "posek"]
     k = keys[-1].split("|")
     assert int(k[2]) == nb and int(k[3]) == nh and len(k[4].split(",")) == (nb + nh) * 10, "keyframe without sizes"
-    print(f"sending: body {body_rate:.0f}/s, face {head_rate:.0f}/s, A and B frames, keyframes with sizes: ok")
+    print(f"sending: body {body_rate:.0f}/s, head {head_rate:.0f}/s, every frame with both, keyframes with sizes: ok")
 
     # nobody near enough to see it (the companion's in/poserate.cfg): a few frames a second, then full rate again
     g.CFG["in.poserate"] = "2"

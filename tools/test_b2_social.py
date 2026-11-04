@@ -36,12 +36,13 @@ def main():
         assert answering(bag) is False, f"{bag}: let through"
     print("a partner's Zoi answers the socials done to it here; what it starts on its own is still stopped: ok")
 
-    # the controller: answering keeps the stop away; the skeleton places it all the same while it does or answers a
-    # social with mine (the game can't walk it: it stood in WalkToContext, the couple dance never began), and the old
-    # steering never runs then (it pushed an answering puppet around)
+    # the controller: answering keeps the stop away; while it does or answers a social with mine the game lines the two
+    # up - neither the skeleton's place (0.9.65 pinned it where they stand in their world) nor the old steering below
+    # (0.9.61-0.9.64 pushed an answering puppet around) touch it then
     assert "not p.answering then" in src
-    assert "if p.skel and not p.hidden and #p.trail > 0 then" in src, "the skeleton doesn't place it during a social"
-    assert "p.skel and not p.act" not in src and "not p.answering and #p.trail" not in src
+    m = re.search(r"if p\.skel and not p\.hidden and #p\.trail > 0 then\n(.*?)\n        local tgt = ", src, re.S)
+    assert m and "if p.act or p.answering then return end" in m.group(1), "a puppet in a social with mine is moved"
+    print("a puppet doing or answering a social with mine is left to the game (not pinned, not steered): ok")
     print("B2 social tests passed")
 
 

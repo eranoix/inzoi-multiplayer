@@ -7,7 +7,7 @@
 --
 -- 2. Skeleton mirroring: what one PC shows of a player's Zoi is exactly what the other PC computed, bone by bone.
 --    Sending: this player's own Zoi (the possessed one): its actor's place and facing and the bones of its body (every
---    POSE_EVERY s: 30 a second) and head (the face: every FACE_EVERY s, 15 a second) meshes (component space: position
+--    POSE_EVERY s: 30 a second) and head (the face, neck and shoulders: every FACE_EVERY s, also 30 a second) meshes (component space: position
 --    x10, rotation quaternion x10000, as integers) go to
 --      out/posek.cfg  a keyframe "kid|x,y,z,yaw|nbody|nhead|v,v,v,...,s,s,s,..." (7 values a bone, then 3 sizes a
 --                     bone) every KEY_EVERY s
@@ -22,7 +22,9 @@
 local M = {}
 local MOD = "InZOIMultiplayer"
 local LAST, EVERY, t = nil, 0.25, 0
-local POSE_EVERY, FACE_EVERY, KEY_EVERY, STALE, MAP_EVERY, CHECK_EVERY = 1 / 30, 1 / 15, 1.0, 1.5, 1.0, 0.5
+-- (the head at 30 too since 0.9.66, the players' choice: at 15 the head mesh's neck and shoulders moved at half the
+-- body's pace - the partner's Zoi looked out of step there. B frames - the body only - stay for a FACE_EVERY above it.)
+local POSE_EVERY, FACE_EVERY, KEY_EVERY, STALE, MAP_EVERY, CHECK_EVERY = 1 / 30, 1 / 30, 1.0, 1.5, 1.0, 0.5
 local LEADERS = { "CharacterMesh0", "Head" }
 local HEAD_FOLLOWERS = { Hair = true, FaceHair = true, Necklace = true, Earring = true, Hat = true, Eyewear = true }
 

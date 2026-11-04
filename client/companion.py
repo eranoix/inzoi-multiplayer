@@ -52,12 +52,13 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.65"
+VERSION = "0.9.66"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
 GAME_MIN_PER_S = 0.49         # game minutes a real second at speed 1 (measured on both PCs: 24 in 49.4 s, 20 in 40.9 s)
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
+STUCK_WALK = 6.0                   # s a partner's Zoi may stand in WalkToContext before it's freed (unstick_puppets)
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 SILENT_FOR = 45               # s without a byte from the server before it counts as gone (it pings every 15 s)
 CONNECT_WITHIN = 20           # s for the connection to the server to be made before trying again
@@ -1133,6 +1134,37 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             r.outfit_ver = r.__dict__.get("outfit_ver", 0) + 1         # (the skeleton rig is rebuilt on the new clothes)
             self.mail.op("outfit", key=r.pid, category=st["outfit"])
 
+    async def unstick_puppets(self):
+        """A partner's Zoi here is moved by their skeleton and has no walk of its own: when a social needs it to walk
+        into place (WalkToContext: answering one of mine, or one of theirs acted out here), it stood there for minutes -
+        and every social with it waited behind (seen 2026-11-04: my Zoi stood waiting for a hug dance it never joined,
+        their Zoi still walking into an old chat's place). After STUCK_WALK s it's freed in place (movement.reset_zoi):
+        asked again, the social then plays where the two stand."""
+        stuck = self.__dict__.setdefault("_walk_stuck", {})
+        for pid, eid in list(self.puppet_ids.items()):
+            r = self.remotes.get(pid)
+            if not r or not r.spawned or r.hidden:
+                stuck.pop(pid, None)
+                continue
+            try:
+                cur = await self.g(self.game.call, "interaction.get_current", entity_id=eid) or {}
+            except GameError:
+                continue
+            if cur.get("action_type") != "WalkToContext":
+                stuck.pop(pid, None)
+                continue
+            key = (eid, str(cur.get("interaction_bag_id") or ""))
+            seen = stuck.get(pid)
+            if not seen or seen[0] != key:
+                stuck[pid] = (key, time.time())
+            elif time.time() - seen[1] >= STUCK_WALK:
+                stuck.pop(pid, None)
+                log.info("%s's Zoi couldn't walk into place for %s: freed where it stands (ask again)", r.name, key[1])
+                try:
+                    await self.g(self.game.call, "movement.reset_zoi", entity_id=eid, Teleport=False)
+                except GameError as e:
+                    log.debug("freeing %s's Zoi: %s", r.name, e)
+
     def act_op(self, r: Remote, st: dict) -> dict | None:
         """The controller's "act" op for the partner's current action (None: nothing to do it with here)."""
         act = st.get("act") or {}
@@ -1627,6 +1659,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     self.send_latest("state", {"t": "state", "state": {"n": self.n, **st, "ts": round(time.time(), 3),
                                                                         **self.state_base, **self.clock_age()}})
                     await self.manage_puppets()
+                    if tick % 2 == 1 and world == "play":
+                        await self.unstick_puppets()
             except GameError as e:
                 log.debug("game: %s", e)
                 await asyncio.sleep(1)

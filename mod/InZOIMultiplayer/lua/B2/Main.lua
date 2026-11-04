@@ -591,11 +591,12 @@ local function drive(key, p, dt)
         -- walk (a walk lags, gets stuck on furniture, is put back by teleports - the bones then slid around a body in
         -- another place). Every tick it's set where they are, smoothed over the trail (interp_target), simulation only
         -- (no teleport effects); only another floor or a big jump is a real teleport.
-        -- Also while it does a social with my Zoi (p.act: the only actions acted out while their skeleton comes in) or
-        -- answers one (p.answering): the game walks the two Zois into place for it, but this puppet, drawn with their
-        -- bones, has no walk of its own (seen live: it stood in WalkToContext for minutes, the couple dance never
-        -- began). Where they are in their game is where their game walked them for the same social. (Before 0.9.65 it
-        -- was left where it stood then - and while answering, the old steering below pushed it around.)
+        -- Not while it does a social with my Zoi (p.act: the only actions acted out while their skeleton comes in) or
+        -- answers one (p.answering): the game lines the two up for it (a hug, a dance: their bones, from their game
+        -- where they do the same with my Zoi there, fit mine where the game puts them here - not where they stand in
+        -- their world). Never steered meanwhile either (0.9.61-0.9.64 pushed an answering one around; 0.9.65 pinned it
+        -- where they are). A walk into place it can't do by itself is freed by the companion (unstick_puppets).
+        if p.act or p.answering then return end
         local tgt = interp_target(p) or p.trail[#p.trail]
         local mc = c:GetMovementComponent()
         mc.InputVector = UE.FVector(0, 0, 0)
