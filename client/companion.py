@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.63"
+VERSION = "0.9.64"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
@@ -1113,7 +1113,9 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             elif not act.get("npc"):
                 op = self.act_op(r, st)
                 self.learn_bag(act)              # (couple actions: the game's own interaction ids)
-                if op:
+                if op and act.get("player") == self.me_id and couple.ANSWER_BAG.search(act["bag"]):
+                    pass                         # (their Zoi answers mine: here the game makes theirs answer itself)
+                elif op:
                     if act.get("player") == self.me_id and not self.mirror_ok(r, act["bag"]):
                         self.ask_local(r, act["bag"], op)    # (couple.py: a popup first, then it plays here)
                     else:
@@ -1295,12 +1297,19 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         stop = bool(self.cfg.get("stop_aging", False))
         wanted = [self.my_entity] + [self.puppet_ids[r.pid] for r in self.remotes.values()
                                      if r.adopted and r.pid in self.puppet_ids]
+        # (the game shows every stop_aging on screen - "Macete StopAging ... desativado" - and keeps it in the save:
+        # sent once per save and Zoi, again only when the choice changes; cfg "aging_set" {"save:entity": stop})
+        sent = self.cfg.setdefault("aging_set", {})
+        save = str(self.save_session.get("folder") or self.mp_name() or "")
         for e in wanted:
-            if (e, stop) in done:
+            key = f"{save}:{e}"
+            if (e, stop) in done or sent.get(key) is stop:
                 continue
             try:
                 await self.g(self.game.call, "life_and_death.stop_aging", entity_id=int(e), Enable=stop)
                 done.add((e, stop))
+                sent[key] = stop
+                save_config(self.cfg)
                 who = "my Zoi" if e == self.my_entity else f"entity {e}"
                 log.info("aging stopped for %s while playing together" if stop else "%s ages (at the slowed pace)", who)
             except GameError as e2:

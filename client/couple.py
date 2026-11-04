@@ -62,6 +62,10 @@ REQUEST_TTL = 90                           # seconds a request sent stays open o
 ANSWER_WITHIN = 5                          # seconds to answer a request here: not answered by then, it's accepted
 MAX_PENDING = 20
 BAG_ID = re.compile(r"^(anim:)?[A-Za-z0-9_]{1,80}$")
+# The game's own answer of a Zoi to what another does to it (DeepHug_MaleToFemale_Success_Feedback, turning to face
+# it): when the partner's Zoi answers mine in their game, here the game makes their Zoi answer by itself - never
+# acted out again, never asked (a popup, then the answer played late, after the interaction was over).
+ANSWER_BAG = re.compile(r"Feedback|^MoveRotate$", re.I)
 # Unverified guesses for doing it alone (no list of the game's interaction ids is available offline).
 GUESS_BAGS = {"hug": "Social_Hug", "kiss": "Social_Kiss", "dance": "Dance_Solo", "wave": "Social_Wave"}
 # Done to the partner's Zoi: the game's own ids, checked in the real game (31/10/2026) with interaction.list_available
@@ -418,6 +422,7 @@ class Couple:
             return {"ok": True, "result": await self.apply_house(q)}
         if q.get("local"):                               # their Zoi already did it in their game: show it here or not
             if accept:
+                await self.free_my_zoi(q.get("bag"))
                 self.mail.op("act", key=q["from_id"], **q["op"])
             return {"ok": True, "result": {"state": "done" if accept else "declined"}}
         if not (self.writer and self.me_id):
@@ -438,6 +443,23 @@ class Couple:
                     pass
         return out
 
+    async def free_my_zoi(self, bag: str | None):
+        """A yes to the partner's Zoi doing something to mine: mine stops what it does on its own (on the phone on
+        the sofa, it never answered the partner's hug - theirs stood waiting), as when another Zoi greets it in the
+        game. Already with them (a couple / social interaction, an answer) it goes on."""
+        if not self.my_entity:
+            return
+        try:
+            cur = await self.g(self.game.call, "interaction.get_current", entity_id=self.my_entity) or {}
+            doing = str(cur.get("interaction_bag_id") or "")
+            if not cur.get("playing") or not doing or re.match(r"(Co_|Coop|Social)", doing, re.I) \
+                    or ANSWER_BAG.search(doing):
+                return
+            await self.g(self.game.call, "interaction.cancel", entity_id=self.my_entity)
+            log.info("my Zoi stops %s to answer %s", doing, bag or "the partner")
+        except Exception as e:                           # noqa: BLE001 - the game refused: it answers when it can
+            log.debug("freeing my Zoi: %s", e)
+
     async def couple_perform(self, req: dict, initiator: bool) -> dict:
         """Accepted: do it on this PC. req: a sent request (initiator: I asked) or a received one."""
         action = req["action"]
@@ -452,6 +474,7 @@ class Couple:
             return self.mark(req, "done" if res.get("ok") else "failed", res.get("error", ""))
         if action == "interaction":
             if not initiator:
+                await self.free_my_zoi(req.get("bag"))
                 return self.mark(req, "done")            # (their Zoi starts it; it shows up here through the live sync)
             eid = self.puppet_ids.get(pid)
             if not eid or not self.my_entity:

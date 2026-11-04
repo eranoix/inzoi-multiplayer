@@ -323,7 +323,16 @@ async def test_couple():
     q = next(iter(ben.requests.values()))
     assert q["action"] == "interaction" and q["bag"] == "Co_friendship_R10" and q["label"] == "Falar sobre a vida", q
     assert ben.couple_view()["requests"][-1]["label"] == "Falar sobre a vida"
+    keep_call, ben_calls = ben.game.call, []
+
+    def busy_ben(tool, **kw):                                  # (Ben's Zoi on the phone on the sofa)
+        ben_calls.append((tool, kw))
+        return {"playing": True, "interaction_bag_id": "Use_SmartPhone_Sofa03"} if tool == "interaction.get_current" else {}
+    ben.game.call = busy_ben
     await ben_routes["/partner/respond"]({"id": q["id"], "accept": True, "always": True})
+    assert ("interaction.cancel", {"entity_id": 20}) in ben_calls, ben_calls
+    ben.game.call = keep_call
+    print("a yes frees my Zoi from what it does on its own (it answers the partner's): ok")
     assert await until(lambda: len(ops(ana, "social")) > n_social)
     assert ops(ana, "social")[-1] == {**ops(ana, "social")[-1], "bag": "Co_friendship_R10", "key": ben.me_id,
                                       "entity": 10, "now": True}
@@ -344,6 +353,14 @@ async def test_couple():
     out = await ana_routes["/partner/respond"]({"id": lq["id"], "accept": True})
     assert out["result"]["state"] == "done" and ops(ana, "act")[-1]["bag"] == "Coop_Pillow_Fight"
     print("interactions ask first (popup), always yes, game-menu ones too: ok")
+    # their Zoi only answers what mine does to it (the game's own Feedback / turning to face it): nothing asked, nothing
+    # acted out - here the game already makes their Zoi answer mine
+    ana.__dict__.pop("_accepted", None)
+    n_act, n_req = len(ops(ana, "act")), len(ana.requests)
+    for n, bag in ((51, "DeepHug_MaleToFemale_Success_Feedback"), (52, "MoveRotate")):
+        ana.set_state(rb, {"n": n, "city": "Dowon", "x": 1, "y": 2, "z": 3, "act": {"bag": bag, "player": ana.me_id}})
+    assert len(ops(ana, "act")) == n_act and len(ana.requests) == n_req, (ops(ana, "act")[-1:], ana.requests)
+    print("their Zoi answering mine isn't asked nor acted out again: ok")
     assert (await ana_routes["/partner/do"]({"bag": "Co_SomethingElse"}))["code"] == "not_offered"
     assert (await ana_routes["/partner/do"]({"bag": "bad id; x"}))["code"] == "not_offered"
     print("interactions by group, doing one: ok")

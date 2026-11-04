@@ -192,6 +192,7 @@ async def main():
     comp.save_session = {"started": 123.0}
     await comp.keep_young()
     assert set(table.values()) == {14400} and not [c for c in calls if c[0] == "data.patch"], "patched again on top"
+    assert not [c for c in calls if c[0] == "life_and_death.stop_aging"], "stop_aging again (a cheat notice on screen)"
     table.update({s: 1440 for s in table})                    # (the game started again: its own values back)
     comp.save_session = {"started": 124.0}
     await comp.keep_young()
