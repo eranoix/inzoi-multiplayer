@@ -237,6 +237,23 @@ async def main():
     assert commands(g, "environment.time_skip") == [{"minutes": 11}] and comp._clock_slew == 0, g.sent
     print("a few minutes apart: the follower's game runs 20% faster or slower until they meet, no jumps: ok")
 
+    # Readings brought up to the moment they're compared (Cristian / NTP): the host's was read 3 s before it went out
+    # and that state came 1 s ago (4 s at 0.49 game min a second = ~2 min more on their dial); mine is fresh.
+    g, comp = follower(17, 44, 1047, [17, 45, 1047])
+    st = comp.leader_state()
+    st["clock_age"], st["speed"] = 3.0, 1.0
+    comp.remotes["host"].state_at = time.time() - 1.0
+    comp.my_clock_at = time.time()
+    assert abs(comp.clock_drift(st, comp.remotes["host"].state_at) - 4 * companion.GAME_MIN_PER_S) < 0.05
+    await comp.follow_leader_clock()
+    assert comp._clock_slew == 1 and not g.sent, "a dial 1 min apart, really ~3: not caught up"
+    comp.my_clock = (17, 44, 1.0, True, 1047)                 # (my game paused: my reading doesn't move)
+    comp.my_clock_at = time.time() - 5
+    assert abs(comp.clock_drift(st, comp.remotes["host"].state_at) - 4 * companion.GAME_MIN_PER_S) < 0.05
+    comp.state_base, comp.my_clock_at = {"clock": [17, 44, 1047]}, time.time() - 1.5
+    assert 1.4 <= comp.clock_age()["clock_age"] <= 1.7
+    print("clock readings brought up to the moment they're compared (how old each one is): ok")
+
     # A friend whose game isn't running (no fresh state) doesn't count.
     g = StandIn(9, 0, speed=3)
     comp, _ = make(g)

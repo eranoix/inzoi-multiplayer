@@ -280,6 +280,17 @@ local function current_bag(c)
     return ok and tostring(q) or nil
 end
 
+-- A partner's Zoi answering a social one of the players here does to it - the receiving half the game gives it (a
+-- handshake, a hug, a chat, a dance: "..._FeedBack"), the turn to face them that comes first (MoveRotate), or a
+-- couple social (Co_, Coop, Social) - is part of what a player does, not its own doing. Stopped as "its own", every
+-- social done to a partner's Zoi failed here (the receiving half cancelled: seen on both PCs, dozens a session).
+local function answering(bag)
+    if not bag then return false end
+    local b = bag:lower()
+    return b:find("feedback", 1, true) ~= nil or b == "moverotate" or b:sub(1, 3) == "co_" or b:sub(1, 4) == "coop"
+        or b:find("social", 1, true) ~= nil
+end
+
 -- ---------------------------------------------------------------- puppets
 local function spawn_puppet(op)
     local member = S.members[op.key]
@@ -566,14 +577,18 @@ local function drive(key, p, dt)
     if not p.act and not p.actQueued and S.clock - (p.ownT or -10) > OWN_CHECK then
         p.ownT = S.clock
         local bag = current_bag(c)
-        -- (walks are ours; Co_/Coop/Social: answering someone's social, e.g. a hug given to it, which stays)
-        if bag and bag ~= "None" and bag ~= "nil" and bag ~= "" and not bag:match("^ClickMove")
-            and not bag:match("^Co_") and not bag:match("^Coop") and not bag:match("Social") then
+        p.answering = answering(bag)
+        -- (walks are ours; answering a social done to it here stays: answering)
+        if bag and bag ~= "None" and bag ~= "nil" and bag ~= "" and not bag:match("^ClickMove") and not p.answering then
             pcall(clear_all, p.id)
             log_limited(string.format("%s's Zoi started %s on its own: stopped (only what they do is done)", key, bag), 30)
         end
+    elseif p.act then
+        p.answering = false
     end
-    if p.skel and not p.act and not p.hidden and #p.trail > 0 then
+    -- (answering a social done to it here: the game lines the two Zois up - not forced where they are meanwhile; what's
+    -- drawn is still their own skeleton where they are, B1)
+    if p.skel and not p.act and not p.hidden and not p.answering and #p.trail > 0 then
         -- Their skeleton comes in (the companion's "skel"): the pose is theirs, frame by frame, so the puppet doesn't
         -- walk (a walk lags, gets stuck on furniture, is put back by teleports - the bones then slid around a body in
         -- another place). Every tick it's set where they are, smoothed over the trail (interp_target), simulation only

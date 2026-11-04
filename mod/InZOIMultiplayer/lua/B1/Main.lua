@@ -423,6 +423,7 @@ local function read_map()
 end
 
 local function receive(pid, r)
+    if not r.rig and not actor_of(r.e) then return end  -- (not drawn here - far away: their frames aren't even read)
     local d = cfg_load("in", "posed_" .. pid)
     if not d then return end
     local kid, seq, head, part, rest = d:match("^(%d+)|(%d+)|([%-%d,]+)|([AB])|(.*)$")
@@ -517,18 +518,32 @@ local function glide(dt)
     end
 end
 
+-- How often this player's skeleton goes out: in/poserate.cfg (frames a second), written by the companion - 30 while a
+-- partner is near enough to be drawn, a few when nobody is (Unreal's relevancy: what nobody can see isn't sent at full
+-- rate; the far side doesn't even read it - receive). Missing: full rate.
+local sendT, sendEvery = 0, POSE_EVERY
+local function read_rate()
+    local rate = tonumber(cfg_load("in", "poserate") or "")
+    sendEvery = (rate and rate > 0) and 1 / math.min(rate, 30) or POSE_EVERY
+end
+
 local poseT = 0
 local function pose_tick(dt)
     if not swept then sweep() end
-    poseT = poseT + dt
+    poseT, sendT = poseT + dt, sendT + dt
     if clock - mapAt > MAP_EVERY then
         mapAt = clock
         read_map()
+        read_rate()
     end
-    if poseT >= POSE_EVERY - 0.004 then                 -- (a 60 fps frame is 1/60 s: every 2nd one, not every 3rd)
+    if sendT >= sendEvery - 0.004 then                  -- (a 60 fps frame is 1/60 s: every 2nd one, not every 3rd)
+        sendT = sendT - sendEvery
+        if sendT < 0 or sendT > sendEvery then sendT = 0 end
+        send_pose()
+    end
+    if poseT >= POSE_EVERY - 0.004 then
         poseT = poseT - POSE_EVERY
         if poseT < 0 or poseT > POSE_EVERY then poseT = 0 end
-        send_pose()
         for pid, r in pairs(remotes) do
             local ok, err = pcall(receive, pid, r)
             if not ok then result("pose-error " .. tostring(err)) end

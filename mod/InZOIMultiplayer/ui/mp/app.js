@@ -881,6 +881,17 @@
         var where = place ? t('Where: {place}', { place: place }) : t('Where: not known yet');
         if (p.here) { where += ' - ' + t('near you'); } else if (p.away) { where += ' - ' + t('in another city'); }
         setText($('p-where'), where);
+        // the network line, like a game's net graph: their skeleton frames, the newest one's age, the distance and
+        // the clocks' difference (shown only while they're online)
+        var n = p.net || {}, parts = [];
+        if (p.online && n.frames_s !== undefined) {
+            parts.push(t('{n} frames/s', { n: Math.round(n.frames_s) }));
+            if (n.frame_ms !== null && n.frame_ms !== undefined && n.frame_ms < 10000) { parts.push(t('last {ms} ms ago', { ms: n.frame_ms })); }
+            if (n.dist_m !== undefined) { parts.push(t('{m} m away', { m: n.dist_m })); }
+            if (n.clock_min !== undefined) { parts.push(t('clock {d} min', { d: (n.clock_min > 0 ? '+' : '') + n.clock_min })); }
+        }
+        setText($('p-net'), parts.length ? t('Sync: {what}', { what: parts.join(' · ') }) : '');
+        $('p-net').style.display = parts.length ? '' : 'none';
         var doing = p.sleep ? t('Sleeping') : (prettyAction(p.action) || (p.action_text ? prettyAction(p.action_text) : ''));
         var withText = p['with'] === 'you' ? t('with you') : (p['with'] ? t('with {name}', { name: p['with'] }) : '');
         setText($('p-doing'), doing ? (p.sleep ? doing : t('Doing: {what}', { what: doing })) + (withText ? ' ' + withText : '')

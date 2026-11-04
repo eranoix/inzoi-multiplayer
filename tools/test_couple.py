@@ -594,6 +594,30 @@ def test_backup_before_load():
     print("backup before load: ok")
 
 
+def test_confirm_running():
+    """An interaction queued in the game but never started by my Zoi: the panel and the log say so (and why, when the
+    Zois are far apart); started: said too."""
+    comp = companion.Companion({"key": "d" * 20, "name": "D", "server": "x", "port": 1, "password": ""})
+    lines = []
+    comp.system_line = lambda text: lines.append(text)
+    r = companion.Remote("p9", "Chey")
+    r.state = {"x": 4000.0, "y": 0.0}
+    comp.remotes["p9"] = r
+    comp.fast_pos = {"x": 0.0, "y": 0.0}
+
+    async def go():
+        req = {"id": "a1", "to": "Chey", "to_id": "p9", "action": "interaction", "bag": "Co_Hug", "name": "Hug"}
+        comp.state_base = {"act": {"bag": "Stand"}}
+        ok = await comp.confirm_running(req, within=0.5)
+        assert ok is False and req["state"] == "failed" and "40 m apart" in req["message"], req
+        assert lines and "40 m apart" in lines[-1], lines
+        req2 = {"id": "a2", "to": "Chey", "to_id": "p9", "action": "interaction", "bag": "Co_Kiss"}
+        comp.state_base = {"act": {"bag": "Co_Kiss"}}
+        assert await comp.confirm_running(req2, within=0.5) is True
+    asyncio.run(go())
+    print("an interaction my Zoi never starts: the panel says so, and that the Zois are far apart: ok")
+
+
 if __name__ == "__main__":
     import logging
     logging.basicConfig(level=logging.WARNING)
@@ -601,4 +625,5 @@ if __name__ == "__main__":
     test_upload_guard()
     asyncio.run(test_couple())
     test_backup_before_load()
+    test_confirm_running()
     print("couple tests passed")

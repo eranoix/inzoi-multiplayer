@@ -52,10 +52,11 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.60"
+VERSION = "0.9.61"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
+GAME_MIN_PER_S = 0.49         # game minutes a real second at speed 1 (measured on both PCs: 24 in 49.4 s, 20 in 40.9 s)
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 SILENT_FOR = 45               # s without a byte from the server before it counts as gone (it pings every 15 s)
@@ -1574,6 +1575,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                         pass
                 if tick % 2 == 0:
                     self.my_clock = await self.g(self.game.clock)
+                    self.my_clock_at = time.time()
                     self.sleeping = bool(SLEEPING.search(f"{(act or {}).get('bag', '')} {anim or ''}"))
                     if world in ("play", "stopped") and self.writer and self.me_id and active:
                         await self.keep_speed()
@@ -1610,7 +1612,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                                        "sleep": self.sleeping, **self.extra_state(st)}
                     self.sending_state = True
                     self.send_latest("state", {"t": "state", "state": {"n": self.n, **st, "ts": round(time.time(), 3),
-                                                                        **self.state_base}})
+                                                                        **self.state_base, **self.clock_age()}})
                     await self.manage_puppets()
             except GameError as e:
                 log.debug("game: %s", e)
@@ -1638,7 +1640,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             return
         self.n += 1
         st = {"n": self.n, **base, **{k: pos[k] for k in ("x", "y", "z", "yaw", "site")},
-              "ts": round(pos["at"], 3), **self.state_base}
+              "ts": round(pos["at"], 3), **self.state_base, **self.clock_age()}
         self.send_latest("state", {"t": "state", "state": st})     # (on a slow link only the newest one waits)
 
     async def send_quiet(self, msg: dict):
@@ -2683,6 +2685,27 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         except GameError:
             asyncio.get_running_loop().call_later(30, lots.pop, site, None)      # (loading: ask again later)
 
+    def clock_age(self) -> dict:
+        """How old my clock reading is as it goes out (s): the follower brings it up to the moment it compares
+        (follow_leader_clock), as NTP and Cristian's algorithm do with a time server's answer."""
+        if not self.state_base.get("clock") or not self.__dict__.get("my_clock_at"):
+            return {}
+        return {"clock_age": round(time.time() - self.my_clock_at, 2)}
+
+    def clock_drift(self, st: dict, at: float) -> float:
+        """Game minutes the leader's clock has moved since it was read, minus mine since I read mine: the readings
+        are a second or two old by the time they're compared (each side reads its clock about once a second, the
+        state then waits to go out) - compared as they were, that was half a minute to a minute off, enough to set a
+        clock now and then for nothing."""
+        their_age = st.get("clock_age") if isinstance(st.get("clock_age"), (int, float)) else 0.0
+        their_age = min(10.0, max(0.0, their_age + time.time() - at))
+        their_speed = st.get("speed") if isinstance(st.get("speed"), (int, float)) else 1.0
+        my_age = min(10.0, max(0.0, time.time() - self.__dict__.get("my_clock_at", time.time())))
+        my_speed = self.my_clock[2] if len(self.my_clock) > 2 and isinstance(self.my_clock[2], (int, float)) else 1.0
+        if len(self.my_clock) > 3 and self.my_clock[3]:
+            my_speed = 0.0                               # (paused: it doesn't move)
+        return (their_age * their_speed - my_age * my_speed) * GAME_MIN_PER_S
+
     def leader_state(self) -> dict | None:
         r = self.remotes.get(self.leader or "")
         return r.state if r and r.state and time.time() - r.state_at < 10 else None
@@ -2705,19 +2728,22 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             week = 7 * 1440
             d_week = ((int(their_day) % 7) * 1440 + theirs - (int(my_day) % 7) * 1440 - mine) % week
             total = d_week if d_week < week // 2 else d_week - week
-            if abs(total) < CLOCK_JUMP:
+            r = self.remotes.get(self.leader or "")
+            exact = total + (self.clock_drift(r.state, r.state_at) if r else 0.0)
+            self._clock_exact = (round(exact, 1), time.time())
+            if abs(exact) < CLOCK_JUMP:
                 # A few minutes apart (the host paused a moment, a speed change reached me a second late): no jump - a
                 # jump every minute or two, 3 to 8 minutes back or forward, was this game's time hopping about. My
                 # game runs CLOCK_SLEW faster (behind) or slower (ahead) than the host's until they meet
                 # (follow_leader_speed).
                 slew = self.__dict__.get("_clock_slew", 0)
-                if abs(total) >= 2:
-                    slew = 1 if total > 0 else -1
-                elif slew and total * slew <= 0:
+                if abs(exact) >= 2:
+                    slew = 1 if exact > 0 else -1
+                elif slew and exact * slew <= 0:
                     slew = 0                             # (met)
                 if slew != self.__dict__.get("_clock_slew", 0):
-                    log.info("my game's time %s the host's (%+d min)", "catches up with" if slew > 0 else
-                             "waits for" if slew < 0 else "is with", total)
+                    log.info("my game's time %s the host's (%+.1f min)", "catches up with" if slew > 0 else
+                             "waits for" if slew < 0 else "is with", exact)
                 self._clock_slew = slew
                 return
             self._clock_slew = 0
@@ -2781,8 +2807,21 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 "online": bool(r.state_at and now - r.state_at < 15),
                 "presence": {k: r.presence[k] for k in ("world", "box", "busy", "mp")}
                 if r.presence and now - r.presence["at"] < 15 and not (r.state_at and now - r.state_at < 5) else None,
-                "last_seen_s": int(now - r.state_at) if r.state_at else None})
+                "last_seen_s": int(now - r.state_at) if r.state_at else None,
+                "net": self.partner_net(r)})
         return out
+
+    def partner_net(self, r) -> dict:
+        """Frames a second from them, the newest one's age, the distance between our Zois, the clocks' difference (when
+        I follow theirs) and my send rate: what the panel's network line shows."""
+        net = self.pose_net(r.pid)
+        st, me = r.state or {}, self.__dict__.get("fast_pos")
+        if me and isinstance(st.get("x"), (int, float)) and isinstance(st.get("y"), (int, float)):
+            net["dist_m"] = round(((st["x"] - me["x"]) ** 2 + (st["y"] - me["y"]) ** 2) ** 0.5 / 100)
+        exact = self.__dict__.get("_clock_exact")
+        if exact and r.pid == self.leader and time.time() - exact[1] < 5:
+            net["clock_min"] = exact[0]
+        return net
 
     def support_status(self) -> dict:
         return {"partners": self.partner_cards(), "clock_mode": self.clock_mode(),

@@ -217,6 +217,21 @@ def sender_tests():
     assert int(k[2]) == nb and int(k[3]) == nh and len(k[4].split(",")) == (nb + nh) * 10, "keyframe without sizes"
     print(f"sending: body {body_rate:.0f}/s, face {head_rate:.0f}/s, A and B frames, keyframes with sizes: ok")
 
+    # nobody near enough to see it (the companion's in/poserate.cfg): a few frames a second, then full rate again
+    g.CFG["in.poserate"] = "2"
+    run_ticks(lua, m, 1.5, walk, dt=1 / 60)
+    body.reads = 0
+    run_ticks(lua, m, 3.0, walk, dt=1 / 60)
+    far = body.reads / nb / 3.0
+    assert 1.5 <= far <= 2.7, f"far: body read {far:.1f} times a second (2 wanted)"
+    g.CFG["in.poserate"] = "30"
+    run_ticks(lua, m, 1.5, walk, dt=1 / 60)
+    body.reads = 0
+    run_ticks(lua, m, 2.0, walk, dt=1 / 60)
+    near = body.reads / nb / 2.0
+    assert 27 <= near <= 31, f"near again: {near:.1f}/s"
+    print(f"nobody near: {far:.0f} frames a second; near again: {near:.0f}: ok")
+
 
 def face_frame_tests():
     """Receiving: a B frame leaves the face as the last A frame had it; an A frame without a face bone puts it back."""
@@ -253,6 +268,25 @@ def face_frame_tests():
     send("A", [])
     assert ph.set["head"].tr.Translation.X == 6.0, "an A frame without the face bone left it moved"
     print("receiving: the face stays as the last A frame had it through B frames, A frames put it back: ok")
+
+    # a partner not drawn here (far away: no actor): their frames aren't even read
+    loads = {"n": 0}
+    real_execute = g.inzoi.cli.execute
+    ACTORS = g.ACTORS
+    ACTORS[1] = g.MP_B1_OWNER                           # (only my own Zoi left: theirs is far away, not drawn)
+    ACTORS[2] = None
+    lua.execute("ACTORS = {ACTORS[1]}")
+    m2 = lua.execute(MAIN.read_text("utf-8"))           # (a fresh run of the script: no rig yet)
+
+    def counting(cmd):
+        if "posed_" in cmd:
+            loads["n"] += 1
+        return real_execute(cmd)
+    g.inzoi.cli.execute = counting
+    run_ticks(lua, m2, 1.0)
+    g.inzoi.cli.execute = real_execute
+    assert loads["n"] == 0, f"read a far partner's frames {loads['n']} times"
+    print("a partner too far to be drawn: their frames aren't read: ok")
 
 
 def main():

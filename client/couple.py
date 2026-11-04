@@ -863,11 +863,40 @@ class Couple:
             log.info("couple action %s started", req["action"] if req else rid)
             if req:
                 self.mark(req, "done")
+                if req.get("action") == "interaction" and req.get("bag"):
+                    try:
+                        asyncio.get_running_loop().create_task(self.confirm_running(req))
+                    except RuntimeError:
+                        pass
+
         else:
             log.warning("couple action %s failed in the game: %s (the interaction id may be wrong: set it in "
                         "config.json \"couple_bags\" or do it once by hand)", req["action"] if req else rid, why)
             if req:
                 self.mark(req, "failed", why)
+
+    async def confirm_running(self, req: dict, within: float = 6.0):
+        """Queued in the game isn't done: the panel and the log say so when my Zoi never starts it (seen: eight asked,
+        all "ok", none played - and nothing told the players why)."""
+        bag, until = req["bag"], time.time() + within
+        while time.time() < until:
+            act = (self.state_base or {}).get("act") or {}
+            if act.get("bag") == bag:
+                log.info("interaction %s: running", bag)
+                return True
+            await asyncio.sleep(0.25)
+        st = (self.remotes.get(req.get("to_id")) or type("R", (), {"state": None})()).state or {}
+        me = self.__dict__.get("fast_pos")
+        far = ""
+        if me and isinstance(st.get("x"), (int, float)) and isinstance(st.get("y"), (int, float)):
+            d = ((st["x"] - me["x"]) ** 2 + (st["y"] - me["y"]) ** 2) ** 0.5 / 100
+            if d > 15:
+                far = f" (your Zois are {d:.0f} m apart: go to your partner first)"
+        why = "your Zoi didn't start it" + (far or " (busy, or the game refused it)")
+        self.mark(req, "failed", why)
+        self.system_line(f"{req.get('to') or 'Partner'}: {req.get('name') or bag}: {why}")
+        log.warning("interaction %s with %s: %s", bag, req.get("to"), why)
+        return False
 
     # ------------------------------------------------------------------ shared household: backups, undo, status
     def backup_save(self, folder: str | None, reason: str):

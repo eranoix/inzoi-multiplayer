@@ -11,9 +11,11 @@ While a partner's frames keep coming (pose_live), the older re-enactment is off 
 Zoi (except the couple's own interactions with this player), no montage copying, no pose pinning.
 """
 import asyncio
+import base64
 import logging
 import os
 import time
+import zlib
 
 import install
 
@@ -22,6 +24,29 @@ log = logging.getLogger("posesync")
 LIVE_FOR = 2.0            # s without a frame from a partner before the re-enactment takes over again
 SEND_EVERY = 1 / 60       # s between looks at the B1 script's files (it writes 30 frames a second)
 MAP_EVERY = 0.5
+# How often my skeleton goes out (Unreal's relevancy and update rate): FULL_RATE frames a second while a partner's Zoi
+# is within NEAR_IN cm of mine (drawn on their screen, mine on theirs), FAR_RATE once every partner is past NEAR_OUT
+# (not drawn there: the frames would only cost both games time; the far side doesn't even read them). The two
+# distances keep it from flapping at the edge.
+FULL_RATE, FAR_RATE = 30, 2
+NEAR_IN, NEAR_OUT = 5000, 7000
+# Frames go out compressed (Gaffer's snapshot compression, the simple way): "z:" + base64(zlib(text)), a third of the
+# size (the numbers repeat a lot), to partners whose program reads it (ZIP_FROM on); the server only relays and keeps
+# the newest one of each kind for latecomers, as it is.
+ZIP_FROM, ZIP_OVER = (0, 9, 61), 512
+
+
+def pack(text: str) -> str:
+    return "z:" + base64.b64encode(zlib.compress(text.encode("utf-8"), 6)).decode("ascii")
+
+
+def unpack(text: str) -> str | None:
+    if not text.startswith("z:"):
+        return text
+    try:
+        return zlib.decompress(base64.b64decode(text[2:]), bufsize=1 << 20).decode("utf-8")
+    except (ValueError, zlib.error, UnicodeDecodeError):
+        return None
 
 
 def write_atomic(path, text: str):
@@ -37,6 +62,44 @@ class PoseSync:
         self.pose_counts = {"sent": 0, "got": 0}
         self.pose_map_text = None
 
+    def pose_rate(self, partners) -> int:
+        """FULL_RATE while any partner is near my Zoi, FAR_RATE when all are far (positions from their latest states and
+        my own; unknown -> full)."""
+        me = self.__dict__.get("fast_pos")
+        near = self.__dict__.get("pose_near", True)
+        if not me:
+            near = True
+        else:
+            dists = []
+            for r in partners:
+                st = r.state or {}
+                if isinstance(st.get("x"), (int, float)) and isinstance(st.get("y"), (int, float))                         and time.time() - getattr(r, "state_at", 0) < 10:
+                    dists.append(((st["x"] - me["x"]) ** 2 + (st["y"] - me["y"]) ** 2) ** 0.5)
+            if not dists:
+                near = True
+            elif near:
+                near = min(dists) <= NEAR_OUT
+            else:
+                near = min(dists) < NEAR_IN
+        if near != self.__dict__.get("pose_near", True):
+            log.info("skeleton: %s", "a partner is near: full rate" if near else "every partner is far: a few frames a second")
+        self.pose_near = near
+        return FULL_RATE if near else FAR_RATE
+
+    def pose_net(self, pid: str) -> dict:
+        """The partner card's network line (like a game's net graph): their frames a second over the last 3 s, how old
+        the newest one is, and the rate mine go out at."""
+        now = time.time()
+        times = [t for t in self.__dict__.get("pose_times", {}).get(pid, []) if now - t < 3]
+        last = self.pose_from.get(pid) if hasattr(self, "pose_from") else None
+        return {"frames_s": round(len(times) / 3, 1), "frame_ms": int((now - last) * 1000) if last else None,
+                "send_s": FULL_RATE if self.__dict__.get("pose_near", True) else FAR_RATE}
+
+    def pose_zip_ok(self, partners) -> bool:
+        """Every partner's program reads compressed frames (a version not known yet: not yet)."""
+        import updater
+        return all(updater.version_tuple(getattr(r, "version", None) or "0") >= ZIP_FROM for r in partners)
+
     def pose_live(self, r) -> bool:
         return time.time() - self.pose_from.get(r.pid, 0) < LIVE_FOR
 
@@ -50,12 +113,18 @@ class PoseSync:
             for kind in ("k", "d"):
                 text = data.get(kind)
                 if isinstance(text, str) and len(text) < 400000:
-                    write_atomic(folder / f"pose{kind}_{frm}.cfg", text)
+                    text = unpack(text)
+                    if text is not None and len(text) < 1_000_000:
+                        write_atomic(folder / f"pose{kind}_{frm}.cfg", text)
+                        data = {**data, kind: text}
         except OSError as e:
             log.debug("writing a pose: %s", e)
             return
         first = time.time() - self.pose_from.get(frm, 0) > LIVE_FOR
         self.pose_from[frm] = time.time()
+        times = self.__dict__.setdefault("pose_times", {}).setdefault(frm, [])
+        times.append(time.time())
+        del times[:-120]
         self.skel_point(frm, data.get("d") or data.get("k"))
         self.pose_counts["got"] += 1
         if first:
@@ -128,6 +197,8 @@ class PoseSync:
                         # the newest frame of each kind waits for room on a slow link, never a backlog of old ones; a
                         # keyframe is only ever replaced by a newer keyframe, and goes out before the delta
                         # (send_latest; pose_counts["sent"] counts what really went out)
+                        if len(text) > ZIP_OVER and self.pose_zip_ok(partners):
+                            text = pack(text)
                         self.send_latest("pose:" + kind, {"t": "event", "kind": "pose", "data": {kind: text}})
                 if time.time() - map_at > MAP_EVERY:
                     map_at = time.time()
@@ -142,6 +213,11 @@ class PoseSync:
                         if e and r.spawned and not r.hidden and self.pose_live(r):
                             items.append(f"{r.pid}={e}.{r.__dict__.get('outfit_ver', 0)}")
                     text = ";".join(items)
+                    rate = str(self.pose_rate(partners))
+                    if rate != self.__dict__.get("pose_rate_text"):
+                        in_dir.mkdir(parents=True, exist_ok=True)
+                        write_atomic(in_dir / "poserate.cfg", rate)    # (the B1 script sends at this rate)
+                        self.pose_rate_text = rate
                     self.tell_skel()
                     if text != self.pose_map_text:
                         in_dir.mkdir(parents=True, exist_ok=True)
