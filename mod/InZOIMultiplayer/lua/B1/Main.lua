@@ -6,11 +6,14 @@
 --    lookups) and its result goes to out/b1.cfg.
 --
 -- 2. Skeleton mirroring: what one PC shows of a player's Zoi is exactly what the other PC computed, bone by bone.
---    Sending: POSE_EVERY s, this player's own Zoi (the possessed one): its actor's place and facing and every bone of
---    its body and head meshes (component space: position x10, rotation quaternion x10000, as integers) go to
---      out/posek.cfg  a keyframe "kid|x,y,z,yaw|nbody|nhead|v,v,v,..." (7 values a bone) every KEY_EVERY s
---      out/posed.cfg  "kid|seq|x,y,z,yaw|i,v,v,v,v,v,v,v,i,..." only the bones that differ from keyframe kid
---    (a frame lost on the way doesn't matter: each one is complete against its keyframe).
+--    Sending: this player's own Zoi (the possessed one): its actor's place and facing and the bones of its body (every
+--    POSE_EVERY s: 30 a second) and head (the face: every FACE_EVERY s, 15 a second) meshes (component space: position
+--    x10, rotation quaternion x10000, as integers) go to
+--      out/posek.cfg  a keyframe "kid|x,y,z,yaw|nbody|nhead|v,v,v,...,s,s,s,..." (7 values a bone, then 3 sizes a
+--                     bone) every KEY_EVERY s
+--      out/posed.cfg  "kid|seq|x,y,z,yaw|P|i,v,v,v,v,v,v,v,i,..." the bones that differ from keyframe kid: P = A, all
+--                     of them (body and face read), or B, the body's only (the face as in the last A frame)
+--    (a frame lost on the way doesn't matter: each one is complete against its keyframe, the face against the last A).
 --    Receiving: in/posemap.cfg "pid=entity;..." says which Zoi here is whose; in/posed_<pid>.cfg and
 --    in/posek_<pid>.cfg are their frames. That Zoi gets two poseable meshes (body and head) that are never drawn and
 --    hold the bones received, as received; every mesh of the Zoi that is drawn - its own body and head, hair, clothes,
@@ -19,7 +22,7 @@
 local M = {}
 local MOD = "InZOIMultiplayer"
 local LAST, EVERY, t = nil, 0.25, 0
-local POSE_EVERY, KEY_EVERY, STALE, MAP_EVERY, CHECK_EVERY = 1 / 15, 1.0, 1.5, 1.0, 0.5
+local POSE_EVERY, FACE_EVERY, KEY_EVERY, STALE, MAP_EVERY, CHECK_EVERY = 1 / 30, 1 / 15, 1.0, 1.5, 1.0, 0.5
 local LEADERS = { "CharacterMesh0", "Head" }
 local HEAD_FOLLOWERS = { Hair = true, FaceHair = true, Necklace = true, Earring = true, Hat = true, Eyewear = true }
 
@@ -80,9 +83,14 @@ end
 
 local function round(v) return v >= 0 and math.floor(v + 0.5) or -math.floor(-v + 0.5) end
 
+local function asset_name(c)
+    local ok, a = pcall(function() return c:GetSkinnedAsset() end)
+    return ok and a and a:GetName() or ""
+end
+
 -- sending ----------------------------------------------------------
 local me, meAt = nil, -10
-local send = { kid = 0, seq = 0, key = nil, keyAt = -10, at = 0 }
+local send = { kid = 0, seq = 0, key = nil, keyAt = -10, faceAt = -10, cache = {}, vals = nil }
 
 -- (in/me.cfg, written by the companion: asking the game for the possessed Zoi from here hangs this script)
 local function my_entity()
@@ -94,49 +102,67 @@ local function my_entity()
     return me
 end
 
-local function read_pose(actor)
-    local by = meshes(actor)
-    local vals, counts, scales = {}, {}, {}
-    for li, name in ipairs(LEADERS) do
-        local m = by[name]
-        local n = m and m:GetNumBones() or 0
-        counts[li] = n
-        for b = 0, n - 1 do
-            local tr = m:GetSocketTransform(m:GetBoneName(b), 2)          -- (component space)
-            local p, q = tr.Translation, tr.Rotation
-            local k = #vals
-            vals[k + 1], vals[k + 2], vals[k + 3] = round(p.X * 10), round(p.Y * 10), round(p.Z * 10)
-            vals[k + 4], vals[k + 5] = round(q.X * 10000), round(q.Y * 10000)
-            vals[k + 6], vals[k + 7] = round(q.Z * 10000), round(q.W * 10000)
+-- One mesh's bones into vals from bone o on (and their sizes into scales, for a keyframe). Bone names are looked up once
+-- a mesh (send.cache): looking them up every time, and reading every size, was more than half the cost of a frame
+-- (1260 bones: 6-8 ms).
+local function read_mesh(c, vals, o, scales)
+    local m, names = c.mesh, c.names
+    for b = 0, c.n - 1 do
+        local tr = m:GetSocketTransform(names[b], 2)                  -- (component space)
+        local p, q = tr.Translation, tr.Rotation
+        local k = (o + b) * 7
+        vals[k + 1], vals[k + 2], vals[k + 3] = round(p.X * 10), round(p.Y * 10), round(p.Z * 10)
+        vals[k + 4], vals[k + 5] = round(q.X * 10000), round(q.Y * 10000)
+        vals[k + 6], vals[k + 7] = round(q.Z * 10000), round(q.W * 10000)
+        if scales then
             -- (the bone's size: the Zoi's proportions - body shape, age - are bone scales, 153 of 370 body bones;
             -- left at 1 the mirrored skull and body came out bigger than the hair made for them: "bald", hair behind)
-            local s, j = tr.Scale3D, #scales
-            scales[j + 1], scales[j + 2], scales[j + 3] = round(s.X * 1000), round(s.Y * 1000), round(s.Z * 1000)
+            local sz, j = tr.Scale3D, (o + b) * 3
+            scales[j + 1], scales[j + 2], scales[j + 3] = round(sz.X * 1000), round(sz.Y * 1000), round(sz.Z * 1000)
         end
     end
-    local l, r = actor:K2_GetActorLocation(), actor:K2_GetActorRotation()
-    return vals, counts, string.format("%d,%d,%d,%d", round(l.X * 10), round(l.Y * 10), round(l.Z * 10), round(r.Yaw * 100)),
-        scales
 end
 
 local function send_pose()
     local id = my_entity()
     local actor = id and actor_of(id)
     if not actor then return end
-    local vals, counts, head, scales = read_pose(actor)
+    local by, fresh = meshes(actor), false
+    for li, name in ipairs(LEADERS) do
+        local m = by[name]
+        if not m then return end
+        local c = send.cache[li]
+        if not c or c.mesh ~= m or c.asset ~= asset_name(m) then          -- (new body or head: new clothes, a reload)
+            c = { mesh = m, asset = asset_name(m), n = m:GetNumBones(), names = {} }
+            for b = 0, c.n - 1 do c.names[b] = m:GetBoneName(b) end
+            send.cache[li], fresh = c, true
+        end
+    end
+    local c1, c2 = send.cache[1], send.cache[2]
+    if fresh or not send.vals then send.vals = {} end
+    local vals, key = send.vals, send.key
+    local keyframe = fresh or not key or clock - send.keyAt >= KEY_EVERY or key.n1 ~= c1.n or key.n2 ~= c2.n
+    local face = keyframe or clock - send.faceAt >= FACE_EVERY - 0.008
+    local scales = keyframe and {} or nil
+    read_mesh(c1, vals, 0, scales)
+    if face then
+        read_mesh(c2, vals, c1.n, scales)
+        send.faceAt = clock
+    end
+    local l, r = actor:K2_GetActorLocation(), actor:K2_GetActorRotation()
+    local head = string.format("%d,%d,%d,%d", round(l.X * 10), round(l.Y * 10), round(l.Z * 10), round(r.Yaw * 100))
     send.seq = send.seq + 1
-    local key = send.key
-    if not key or clock - send.keyAt >= KEY_EVERY or key.n1 ~= counts[1] or key.n2 ~= counts[2] then
+    if keyframe then
         send.kid = send.kid % 100000 + 1
-        send.key, send.keyAt = { vals = vals, n1 = counts[1], n2 = counts[2] }, clock
+        send.key, send.keyAt = { vals = table.move(vals, 1, #vals, 1, {}), n1 = c1.n, n2 = c2.n }, clock
         -- (the bones' sizes after their place and turn: an older receiver reads 7 values a bone and ignores the rest)
-        cfg_save("posek", string.format("%d|%s|%d|%d|%s,%s", send.kid, head, counts[1], counts[2], table.concat(vals, ","),
+        cfg_save("posek", string.format("%d|%s|%d|%d|%s,%s", send.kid, head, c1.n, c2.n, table.concat(vals, ","),
             table.concat(scales, ",")))
-        cfg_save("posed", string.format("%d|%d|%s|", send.kid, send.seq, head))
+        cfg_save("posed", string.format("%d|%d|%s|A|", send.kid, send.seq, head))
         return
     end
     local kv, parts = key.vals, {}
-    for b = 0, #vals / 7 - 1 do
+    for b = 0, (face and c1.n + c2.n or c1.n) - 1 do
         local o = b * 7
         for j = 1, 7 do
             if math.abs(vals[o + j] - kv[o + j]) >= 2 then
@@ -146,7 +172,8 @@ local function send_pose()
             end
         end
     end
-    cfg_save("posed", string.format("%d|%d|%s|%s", send.kid, send.seq, head, table.concat(parts, ",")))
+    cfg_save("posed", string.format("%d|%d|%s|%s|%s", send.kid, send.seq, head, face and "A" or "B",
+        table.concat(parts, ",")))
 end
 
 -- receiving --------------------------------------------------------
@@ -160,11 +187,6 @@ local function split_ints(s)
 end
 
 local restore              -- (defined below clean_actor, which it uses)
-
-local function asset_name(c)
-    local ok, a = pcall(function() return c:GetSkinnedAsset() end)
-    return ok and a and a:GetName() or ""
-end
 
 -- One reference only: the skeleton received. Each mirrored Zoi gets two poseable meshes (body and head) that are never
 -- drawn - they only hold the bones received, as received - and every mesh of the Zoi that is drawn follows them: its
@@ -403,7 +425,11 @@ end
 local function receive(pid, r)
     local d = cfg_load("in", "posed_" .. pid)
     if not d then return end
-    local kid, seq, head, rest = d:match("^(%d+)|(%d+)|([%-%d,]+)|(.*)$")
+    local kid, seq, head, part, rest = d:match("^(%d+)|(%d+)|([%-%d,]+)|([AB])|(.*)$")
+    if not kid then                                     -- (an older sender: every frame has all the bones)
+        kid, seq, head, rest = d:match("^(%d+)|(%d+)|([%-%d,]+)|(.*)$")
+        part = "A"
+    end
     if not kid or tonumber(seq) == r.seq then return end
     kid, seq = tonumber(kid), tonumber(seq)
     if r.kid ~= kid then
@@ -436,22 +462,27 @@ local function receive(pid, r)
         if not ok or not rig then return end
         r.rig, r.fresh, r.checkAt = rig, true, clock
     end
-    -- this frame = keyframe + its differences (bones not listed are as in the keyframe)
-    local vals = r.key.vals
+    -- this frame = keyframe + its differences (bones not listed are as in the keyframe; in a B frame the face's bones
+    -- - the head mesh's - aren't in it at all: as in the last A frame)
+    local vals, n1 = r.key.vals, r.key.n1
     local diff = split_ints(rest)
     local cur, changed = r.cur, {}
+    local now = {}
     if r.fresh or not cur then                                       -- (all bones from the keyframe)
         cur = {}
         for i = 1, #vals do cur[i] = vals[i] end
         r.cur, r.fresh, changed, r.lastDiff = cur, false, nil, {}
     else
         for b in pairs(r.lastDiff or {}) do                         -- (moved last time, not now: as in the keyframe)
-            local o = b * 7
-            for j = 1, 7 do cur[o + j] = vals[o + j] end
-            changed[b] = true
+            if part == "A" or b < n1 then
+                local o = b * 7
+                for j = 1, 7 do cur[o + j] = vals[o + j] end
+                changed[b] = true
+            else
+                now[b] = true                                       -- (a face bone: kept until the next A frame)
+            end
         end
     end
-    local now = {}
     for i = 1, #diff - 7, 8 do
         local b = diff[i]
         local o = b * 7
@@ -494,8 +525,9 @@ local function pose_tick(dt)
         mapAt = clock
         read_map()
     end
-    if poseT >= POSE_EVERY then
-        poseT = 0
+    if poseT >= POSE_EVERY - 0.004 then                 -- (a 60 fps frame is 1/60 s: every 2nd one, not every 3rd)
+        poseT = poseT - POSE_EVERY
+        if poseT < 0 or poseT > POSE_EVERY then poseT = 0 end
         send_pose()
         for pid, r in pairs(remotes) do
             local ok, err = pcall(receive, pid, r)

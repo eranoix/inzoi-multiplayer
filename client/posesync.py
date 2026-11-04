@@ -2,7 +2,7 @@
 
 What one PC shows of a player's Zoi is exactly what that player's own game computed, bone by bone: nothing is
 re-enacted (no interaction queued, no AI deciding which side of the bed). The B1 script writes this player's frames to
-<mod>/out/posek.cfg (a keyframe, every second) and <mod>/out/posed.cfg (the bones that differ from it, 15 times a
+<mod>/out/posek.cfg (a keyframe, every second) and <mod>/out/posed.cfg (the bones that differ from it, 30 times a
 second); this module sends each new one to every partner as {"t":"event","kind":"pose","data":{"k"|"d": text}} and
 writes what partners send to <mod>/in/posek_<pid>.cfg / posed_<pid>.cfg, plus <mod>/in/posemap.cfg ("pid=entity.v;":
 which Zoi here is whose, v changes when their outfit does, so the rig is rebuilt on the new clothes).
@@ -20,7 +20,7 @@ import install
 log = logging.getLogger("posesync")
 
 LIVE_FOR = 2.0            # s without a frame from a partner before the re-enactment takes over again
-SEND_EVERY = 1 / 30       # s between looks at the B1 script's files
+SEND_EVERY = 1 / 60       # s between looks at the B1 script's files (it writes 30 frames a second)
 MAP_EVERY = 0.5
 
 

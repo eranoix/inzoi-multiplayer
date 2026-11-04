@@ -23,6 +23,7 @@ MAIN = Path(__file__).resolve().parents[1] / "mod" / "InZOIMultiplayer" / "lua" 
 
 FAKE_GAME = r"""
 local cfg = {}                                     -- section.key -> value
+SAVES = {}
 CFG = cfg
 local function q(s) return (s:gsub('\\', '\\\\'):gsub('"', '\\"')) end
 inzoi = { cli = { execute = function(cmd)
@@ -33,7 +34,10 @@ inzoi = { cli = { execute = function(cmd)
         return true, nil, '{"value":"' .. q(v) .. '"}'
     end
     local sec2, key2, val = cmd:match('uimod%.cfg_save mod_id=%S+ section=(%S+) key=(%S+) value="(.*)"$')
-    if sec2 then cfg[sec2 .. "." .. key2] = val end
+    if sec2 then
+        cfg[sec2 .. "." .. key2] = val
+        SAVES[#SAVES + 1] = { key = key2, value = val }
+    end
     return true
 end } }
 
@@ -72,6 +76,14 @@ function Component(name, cls, asset, bones)
     function c:GetNumBones() return #self.bones end
     function c:GetBoneName(b) return self.bones[b + 1] end
     function c:SetBoneTransformByName(n, tr, space) self.set[n] = { tr = tr, space = space } end
+    c.reads, c.wave = 0, 0
+    function c:GetSocketTransform(n, space)
+        self.reads = self.reads + 1
+        local i = 0
+        for k, nm in ipairs(self.bones) do if nm == n then i = k end end
+        return { Translation = { X = i + self.wave, Y = 0, Z = 0 }, Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
+                 Scale3D = { X = 1, Y = 1, Z = 1 } }
+    end
     function c:K2_DestroyComponent() self.destroyed = true; self.actor:remove(self) end
     return c
 end
@@ -168,6 +180,81 @@ def run_ticks(lua, main, seconds, feed=None, dt=0.05):
         main.on_tick(dt)
 
 
+def sender_tests():
+    """This player's own Zoi: the body read 30 times a second, the face (head mesh) 15; A and B frames."""
+    lua = LuaRuntime()
+    lua.execute(FAKE_GAME)
+    g = lua.globals()
+    me = g.Zoi(24534)
+    g.MP_B1_OWNER = me
+    g.CFG["in.me"] = "24534"
+    m = lua.execute(MAIN.read_text("utf-8"))
+    body, head = g.by(me, "CharacterMesh0"), g.by(me, "Head")
+    run_ticks(lua, m, 3.0, dt=1 / 60)                  # (the first second: me.cfg read, a keyframe)
+    body.reads = head.reads = 0
+    saves_before = len(list(g.SAVES.values()))
+
+    def walk():
+        body.wave += 1                                # (every bone moves: each frame lists all of them)
+        head.wave += 1
+    run_ticks(lua, m, 2.0, walk, dt=1 / 60)
+    nb, nh = len(g.BODY), len(g.HEAD)
+    body_rate, head_rate = body.reads / nb / 2.0, head.reads / nh / 2.0
+    assert 27 <= body_rate <= 31, f"body read {body_rate:.1f} times a second (30 wanted)"
+    assert 14 <= head_rate <= 17, f"face read {head_rate:.1f} times a second (15 wanted, + keyframes)"
+    frames = [s.value for s in list(g.SAVES.values())[saves_before:] if s.key == "posed"]
+    parts = [f.split("|")[3] for f in frames]
+    assert 55 <= len(frames) <= 62 and set(parts) == {"A", "B"}, (len(frames), set(parts))
+    for f in frames:
+        kid, seq, headp, part, rest = f.split("|")
+        listed = [int(v) for i, v in enumerate(rest.split(",")) if rest and i % 8 == 0]
+        if part == "B":
+            assert listed and max(listed) < nb, f"a B frame lists a face bone: {listed}"
+        elif rest:
+            assert max(listed) >= nb, "an A frame without the face"
+    keys = [s.value for s in g.SAVES.values() if s.key == "posek"]
+    k = keys[-1].split("|")
+    assert int(k[2]) == nb and int(k[3]) == nh and len(k[4].split(",")) == (nb + nh) * 10, "keyframe without sizes"
+    print(f"sending: body {body_rate:.0f}/s, face {head_rate:.0f}/s, A and B frames, keyframes with sizes: ok")
+
+
+def face_frame_tests():
+    """Receiving: a B frame leaves the face as the last A frame had it; an A frame without a face bone puts it back."""
+    lua = LuaRuntime()
+    lua.execute(FAKE_GAME)
+    g = lua.globals()
+    zoi = g.Zoi(25674)
+    g.MP_B1_OWNER = g.Zoi(24534)
+    cfg = g.CFG
+    m = lua.execute(MAIN.read_text("utf-8"))
+    cfg["in.posemap"] = "pd699142e=25674.1;"
+    nb, nh = 3, 4
+    k, _ = frame(1, 0, nb, nh)
+    cfg["in.posek_pd699142e"] = k
+    hb = nb + 3                                         # (the head mesh's "head" bone)
+    seq = {"n": 0}
+
+    def send(part, bones):
+        seq["n"] += 1
+        rest = ",".join(f"{b},{999},0,0,0,0,0,10000" for b in bones)
+        cfg["in.posed_pd699142e"] = f"1|{seq['n']}|100,200,300,9000|{part}|{rest}"
+        run_ticks(lua, m, 0.1)
+    send("A", [])
+    send("A", [hb, 1])
+    ph = g.poseable_on(zoi, "Head")
+    assert ph.set["head"].tr.Translation.X == 99.9
+    send("B", [2])
+    assert ph.set["head"].tr.Translation.X == 99.9, "a B frame put the face back to the keyframe"
+    pb = g.poseable_on(zoi, "CharacterMesh0")
+    assert pb.set["pelvis"].tr.Translation.X == 1.0, "a body bone missing from a B frame wasn't put back"
+    assert pb.set["spine"].tr.Translation.X == 99.9
+    send("B", [])
+    assert ph.set["head"].tr.Translation.X == 99.9
+    send("A", [])
+    assert ph.set["head"].tr.Translation.X == 6.0, "an A frame without the face bone left it moved"
+    print("receiving: the face stays as the last A frame had it through B frames, A frames put it back: ok")
+
+
 def main():
     lua = LuaRuntime()
     lua.execute(FAKE_GAME)
@@ -255,6 +342,8 @@ def main():
     assert g2.same(gl.parent, h2) and gl.socket == "SOC_M_Glasses", "glasses left on an earlier run's poseable"
     assert "pose-swept 2" in str(g2.CFG["out.b1"]), g2.CFG["out.b1"]
     print("a rig left by an earlier run (old kind too) is cleaned up: ok")
+    sender_tests()
+    face_frame_tests()
     print("B1 rig tests passed")
 
 

@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.58"
+VERSION = "0.9.59"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
@@ -1271,28 +1271,76 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         return [r.state["clock"] for r in self.remotes.values()
                 if r.state and r.state.get("clock") and time.time() - r.state_at < 10]
 
+    AGING_STEPS = ("Infant", "Toddler", "Child", "LowTeen", "HighTeen", "Youth", "Adult", "Old", "Elderly")
+
     async def keep_young(self):
-        """While playing together, nobody's Zoi ages - mine, and this save's copy of each partner (seen: a Zoi turned
-        elderly and died of old age in one save after a day of clock syncing; one save can't age without the other).
-        Asked once per Zoi per loaded world (loading a save brings aging back); cfg "stop_aging": false turns it off."""
-        if not self.cfg.get("stop_aging", True) or not self.mp_active() or not self.my_entity:
+        """How the Zois age while this program runs, checked once per loaded world (loading a save, or the game, can
+        bring the game's own aging back). The players' choice (2026-11-03): adults, aging slowly.
+        - cfg "aging_slower" (default 10): every phase of life lasts that many times longer - the game's Aging table
+          (timeToNextAge of each growth step) patched while the game runs (slow_aging); 1 = the game's own pace.
+        - cfg "stop_aging" (default false): true = nobody ages while playing together - my Zoi and this save's copy of
+          each partner (0.9.56: a Zoi turned elderly and died of old age in one save after a day of clock syncing);
+          false = they age (slowly), and a stop left by 0.9.56 is lifted."""
+        if not self.mp_active() or not self.my_entity:
             return
-        done = self.__dict__.setdefault("_ageless", set())
         world_key = (self.save_session or {}).get("started") if isinstance(getattr(self, "save_session", None), dict) else None
         if self.__dict__.get("_ageless_world") != world_key:
-            self._ageless_world, done = world_key, set()
-            self._ageless = done
+            self._ageless_world, self._ageless, self._aging_patched = world_key, set(), False
+        done = self.__dict__.setdefault("_ageless", set())
+        if not self.__dict__.get("_aging_patched"):
+            self._aging_patched = await self.slow_aging()
+        stop = bool(self.cfg.get("stop_aging", False))
         wanted = [self.my_entity] + [self.puppet_ids[r.pid] for r in self.remotes.values()
                                      if r.adopted and r.pid in self.puppet_ids]
         for e in wanted:
-            if e in done:
+            if (e, stop) in done:
                 continue
             try:
-                await self.g(self.game.call, "life_and_death.stop_aging", entity_id=int(e), Enable=True)
-                done.add(e)
-                log.info("aging stopped for %s while playing together", "my Zoi" if e == self.my_entity else f"entity {e}")
+                await self.g(self.game.call, "life_and_death.stop_aging", entity_id=int(e), Enable=stop)
+                done.add((e, stop))
+                who = "my Zoi" if e == self.my_entity else f"entity {e}"
+                log.info("aging stopped for %s while playing together" if stop else "%s ages (at the slowed pace)", who)
             except GameError as e2:
-                log.debug("stopping aging for %s: %s", e, e2)
+                log.debug("aging for %s: %s", e, e2)
+
+    async def slow_aging(self) -> bool:
+        """Each growth step's timeToNextAge = the game's own x cfg "aging_slower". The game's own values are kept in
+        cfg "aging_base" (read once, before any patch) and the factor applied in "aging_factor": a value already
+        patched (the game still running from an earlier start of this program) isn't multiplied again, and a changed
+        factor is applied from the game's own value. -> True when every step is as wanted."""
+        try:
+            factor = max(1, int(self.cfg.get("aging_slower", 10)))
+        except (TypeError, ValueError):
+            factor = 10
+        base = self.cfg.setdefault("aging_base", {})
+        applied = self.cfg.get("aging_factor")
+        ok, changed = True, False
+        for step in self.AGING_STEPS:
+            try:
+                row = await self.g(self.game.call, "data.table_get", Alias="Aging", Row=step)
+                cur = int(row.get("timeToNextAge")) if isinstance(row, dict) else None
+                if cur is None or cur <= 0:
+                    ok = False
+                    continue
+                b = base.get(step)
+                if not isinstance(b, int) or (cur != b and not (applied and cur == b * applied)):
+                    b = base[step] = cur                 # (first look, or the game's own value changed: an update)
+                    changed = True
+                want = b * factor
+                if cur != want:
+                    await self.g(self.game.call, "data.patch", Method="Override",
+                                 Query=f"Aging[Id={step}].timeToNextAge", Value=str(want))
+            except (GameError, TypeError, ValueError) as e:
+                log.debug("aging pace of %s: %s", step, e)
+                ok = False
+        if ok and (applied != factor or changed):
+            self.cfg["aging_factor"] = factor
+            save_config(self.cfg)
+        elif changed:
+            save_config(self.cfg)
+        if ok and factor > 1:
+            log.info("aging: every phase of life lasts %dx the game's own time", factor)
+        return ok
 
     async def keep_speed(self):
         """Game speed is everyone's: normal for all, except while every player's Zoi is asleep, when everyone's game

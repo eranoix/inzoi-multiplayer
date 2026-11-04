@@ -145,26 +145,62 @@ async def main():
     assert ("relook", {"key": "p1"}) in ops, ops
     print("an adopted partner's Zoi takes their current look: ok")
 
-    # Nobody ages while playing together: my Zoi and this save's copy of the partner, once per loaded world
+    # Aging (the players' choice: adults, aging slowly): every phase lasts cfg "aging_slower" (10) times the game's own,
+    # patched into the game's Aging table once per loaded world; my Zoi and this save's copy of the partner age
+    # (a stop left by 0.9.56 lifted); cfg "stop_aging": true stops it while playing together, as 0.9.56 did.
     comp, r = make()
     r.adopted = True
     comp.puppet_ids["p1"] = 5
     comp.my_entity, comp.world = 10, "play"
     comp.mp_active = lambda: True
+    table = {s: 1440 for s in companion.Companion.AGING_STEPS}
     calls = []
-    comp.game.call = lambda tool, **kw: calls.append((tool, kw)) or {}
+
+    def fake(tool, **kw):
+        calls.append((tool, kw))
+        if tool == "data.table_get":
+            return {"_row_name": kw["Row"], "timeToNextAge": table[kw["Row"]]}
+        if tool == "data.patch":
+            step = kw["Query"].split("Id=")[1].split("]")[0]
+            table[step] = int(kw["Value"])
+            return {"result": "Applied"}
+        return {}
+    comp.game.call = fake
+    companion.save_config = lambda c: None
     await comp.keep_young()
     await comp.keep_young()
-    aged = sorted(kw["entity_id"] for tool, kw in calls if tool == "life_and_death.stop_aging")
-    assert aged == [5, 10] and all(kw["Enable"] is True for _, kw in calls), calls
-    comp.save_session = {"started": 123.0}                    # (another save loaded: aging is back, stopped again)
+    assert set(table.values()) == {14400}, table
+    assert comp.cfg["aging_base"]["Adult"] == 1440 and comp.cfg["aging_factor"] == 10
+    ages = [kw for tool, kw in calls if tool == "life_and_death.stop_aging"]
+    assert sorted(kw["entity_id"] for kw in ages) == [5, 10] and all(kw["Enable"] is False for kw in ages), ages
+    assert len([c for c in calls if c[0] == "data.patch"]) == 9, "patched more than once in one loaded world"
+    print("every phase of life lasts 10x longer, both Zois age (a 0.9.56 stop lifted): ok")
+
+    calls.clear()                                             # (the program restarts, the game still patched)
+    comp.save_session = {"started": 123.0}
     await comp.keep_young()
-    assert len(calls) == 4, calls
-    comp.cfg["stop_aging"] = False
-    comp.save_session = {"started": 456.0}
+    assert set(table.values()) == {14400} and not [c for c in calls if c[0] == "data.patch"], "patched again on top"
+    table.update({s: 1440 for s in table})                    # (the game started again: its own values back)
+    comp.save_session = {"started": 124.0}
     await comp.keep_young()
-    assert len(calls) == 4
-    print("nobody ages while playing together: ok")
+    assert set(table.values()) == {14400}, table
+    comp.cfg["aging_slower"] = 5                              # (another pace chosen: from the game's own value)
+    comp.save_session = {"started": 125.0}
+    await comp.keep_young()
+    assert set(table.values()) == {7200}, table
+    table.update({s: 2000 for s in table})                    # (a game update changed its own values)
+    comp.save_session = {"started": 126.0}
+    await comp.keep_young()
+    assert set(table.values()) == {10000} and comp.cfg["aging_base"]["Adult"] == 2000, table
+    print("the aging pace isn't multiplied twice, follows a new factor and a game update: ok")
+
+    calls.clear()
+    comp.cfg["stop_aging"] = True                             # (0.9.56's way: nobody ages while playing together)
+    comp.save_session = {"started": 200.0}
+    await comp.keep_young()
+    ages = [kw for tool, kw in calls if tool == "life_and_death.stop_aging"]
+    assert sorted(kw["entity_id"] for kw in ages) == [5, 10] and all(kw["Enable"] is True for kw in ages), ages
+    print("stop_aging: true still stops it while playing together: ok")
     print("puppet retry tests passed")
 
 
