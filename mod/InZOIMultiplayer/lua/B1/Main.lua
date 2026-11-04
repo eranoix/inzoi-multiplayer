@@ -401,11 +401,13 @@ local function apply(r, vals, changed)
             -- ("not in ue_global_table.json") and then won't load the mod when the game starts.
             local space = 1
             -- The poseable keeps each bone relative to its parent: a bone not set again goes along when its parent
-            -- moves - a planted foot slid with the shin, a hand with the arm. So a bone is set again when it changed
-            -- or its parent was (parents come first, by number).
-            local did = {}
+            -- moves - a planted foot slid with the shin, a hand with the arm. So a body bone is set again when it
+            -- changed or its parent was (parents come first, by number). Not the head mesh's: its face bones go along
+            -- with the head as they should, and each SetBoneTransformByName costs the whole mesh (Unreal builds its
+            -- pose again): 890 face bones set again every frame took Chey's laptop from 44 to 24 fps (0.9.68).
+            local did, cascade = {}, li == 1
             for b = 0, n - 1 do
-                local up = parents[b]
+                local up = cascade and parents[b]
                 if not changed or changed[base + b] or (up and did[up]) then
                     did[b] = true
                     local o, so = (base + b) * 7, (base + b) * 3
