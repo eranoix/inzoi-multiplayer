@@ -201,9 +201,34 @@ def landed(d: dict, applied) -> bool:
 TRANSIENT = re.compile(r"^(DEV_|Served|Book_\d|Dirty|Puddle|Leftover|Trash(?!Can))", re.I)
 
 
+# Food isn't the house either, nor anything else that spoils - the game's own catalog says which: its Object table gives
+# those a "spoiled" state (availableStatId ObjectStat_Spoiled) or grabs them as food (grabDtId Food): cakes, dishes,
+# ingredients. Kept as house, the anniversary cakes (1stAnniversaryCake_Prepared/_Served) a player threw away, spoiled,
+# came back in both games over and over (2026-11-04). Asked once per kind of object (classify).
+PERISHABLE: dict[str, bool] = {}
+
+
+def perishable_row(row) -> bool:
+    if not isinstance(row, dict):
+        return False
+    return "ObjectStat_Spoiled" in (row.get("availableStatId") or []) or row.get("grabDtId") == "Food"
+
+
+def classify(call, table_ids):
+    """Look up the kinds of object not seen yet in the game's catalog (PERISHABLE)."""
+    for t in sorted({str(x) for x in table_ids if x} - set(PERISHABLE)):
+        try:
+            PERISHABLE[t] = perishable_row(call("data.table_get", Alias="Object", Row=t))
+        except Exception as e:                       # noqa: BLE001 (not in the catalog, the game busy: kept as before)
+            log.debug("catalog of %s: %s", t, e)
+            PERISHABLE[t] = False
+
+
 def lasting(o: dict) -> bool:
-    """A piece of the house (furniture, decoration, doors and windows), not something the game puts and takes away."""
-    return not TRANSIENT.match(str(o.get("table_id") or ""))
+    """A piece of the house (furniture, decoration, doors and windows), not something the game puts and takes away,
+    nor food (anything that spoils)."""
+    t = str(o.get("table_id") or "")
+    return not TRANSIENT.match(t) and not PERISHABLE.get(t)
 
 
 def object_key(o: dict) -> dict:
@@ -840,6 +865,7 @@ class HouseSync:
         while offset < MAX_OBJECTS:
             page = self.game.call("build.scan_objects", Limit=500, Offset=offset) or {}
             objs = page.get("objects") or []
+            classify(self.game.call, [o.get("table_id") for o in objs])
             for o in objs:
                 k = object_key(o)
                 k["entity_id"] = o.get("entity_id")
@@ -2542,6 +2568,7 @@ class HouseSync:
         mode = q.get("mode") or "full"
         h = q["house"]
         if h.get("objects") is not None:                 # (what the game puts and takes away isn't put in: lasting)
+            classify(self.game.call, [o.get("table_id") for o in h["objects"]])
             h = dict(h, objects=[o for o in h["objects"] if lasting(o)])
         live = f"house:{h.get('site')}:live"
         st = state or self.plan_state(key, live)

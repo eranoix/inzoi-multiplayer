@@ -164,6 +164,13 @@ class StandIn:
             return {}
         if tool == "household.get_members":
             return {"household_id": 1, "members": []}
+        if tool == "data.table_get" and kw.get("Alias") == "Object":
+            # (the game's catalog: food and anything else that spoils has an ObjectStat_Spoiled state)
+            row = kw.get("Row") or ""
+            if "Cake" in row or row.startswith("Vegetables"):
+                return {"_row_name": row, "availableStatId": ["ObjectStat_Fresh", "ObjectStat_Spoiled"],
+                        "grabDtId": "Food"}
+            return {"_row_name": row, "availableStatId": [], "grabDtId": "None"}
         if tool == "household.list":
             return {"total": 1, "households": [{"household_id": 1, "residence_site_id": self.home, "member_count": 2}]}
         return {}
@@ -409,8 +416,9 @@ async def main():
 
     # what the game puts in the home and takes away by itself (dust, food served, a book off the shelf) isn't the house:
     # not sent with a purchase, not put in from a version that has it (an older program's), not brought back
-    passing = {"DEV_DustDecal", "ServedSoup01", "Book_6"}
+    passing = {"DEV_DustDecal", "ServedSoup01", "Book_6", "1stAnniversaryCake_Prepared", "Vegetables01"}
     gb.objects += [obj(210, "DEV_DustDecal", 300, 300), obj(211, "ServedSoup01", 320, 300), obj(212, "Book_6", 340, 300),
+                   obj(216, "1stAnniversaryCake_Prepared", 350, 300), obj(217, "Vegetables01", 355, 300),
                    obj(213, "Lamp77", 360, 300)]            # (and a real purchase with them)
     await build(ana, ga, lambda g: g.objects.append(obj(214, "Plant88", 380, 300)))
     assert await until(lambda: "Lamp77" in ga.tables()), "the purchase didn't reach Ana"
@@ -421,7 +429,9 @@ async def main():
     dusty = json.loads(json.dumps(cur["value"]))
     proto = dict(dusty["objects"][0])
     dusty["objects"] += [dict(proto, table_id="DEV_DustDecal", x=600.0, y=600.0), dict(proto, table_id="ServedSoup01",
-                                                                                         x=620.0, y=600.0)]
+                                                                                         x=620.0, y=600.0),
+                         dict(proto, table_id="1stAnniversaryCake_Prepared", x=640.0, y=600.0)]    # (the cakes that came
+    #                                                                     back every day, spoiled, in both games)
     await ana.share(KEY, dusty, base=cur["v"])                # (as an older program sent it)
     assert await until(lambda: ben.seen(KEY) > cur["v"]), "Ben didn't take the version"
     await settle(ana, ben)
@@ -430,7 +440,8 @@ async def main():
     await settle(ana, ben)
     assert not set(gb.tables()) & passing, gb.tables()
     assert not {o["table_id"] for o in ana.shared[KEY]["value"]["objects"]} & passing, "it stayed in the house"
-    print("dust, food served, a book taken out: never the house, never brought back: ok")
+    print("dust, food (served, cakes, ingredients: what the game's catalog says spoils), a book taken out: never the "
+          "house, never brought back: ok")
 
     # --- #7: nothing is applied while Ben is in build mode on the home; his edits go up on top of hers
     gb.phase = "ready"
