@@ -400,8 +400,18 @@ class Servers:
             except (OSError, ValueError, asyncio.TimeoutError, ConnectionError):
                 continue
             if info.get("id") == sid:
-                return {**info, "address": a}
+                return {**info, "address": a, "checked": True}
         return None
+
+    @staticmethod
+    async def answers(address: str, sid) -> bool:
+        """The server `sid` takes a connection at `address`. (An answer to the broadcast can come through a router -
+        a Tailscale subnet router - from the router's own address, where nothing takes a connection.)"""
+        try:
+            info, _ = await ask(address, {"t": "info"}, "info", timeout=3)
+        except (OSError, ValueError, asyncio.TimeoutError, ConnectionError):
+            return False
+        return not sid or info.get("id") == sid
 
     async def discover_lan(self) -> list[dict]:
         if self.lan["busy"]:
@@ -459,9 +469,13 @@ class Servers:
             try:
                 info, _ = await ask(alt["address"], {"t": "info"}, "info", timeout=3)
                 if info.get("id") and info["id"] == alt.get("id"):
-                    pick = {**info, "address": alt["address"]}
+                    pick = {**info, "address": alt["address"], "checked": True}
             except (OSError, ValueError, asyncio.TimeoutError, ConnectionError):
                 pass
+        if pick and not pick.get("checked") and not same_server(pick["address"], primary or "") \
+                and not await self.answers(pick["address"], pick.get("id")):
+            log.info("the server answered from %s, but takes no connection there", pick["address"])
+            pick = None
         if self.writer and self.me_id:                 # (joined while it looked: that session stays as it is)
             self.lan_fail_since = None
             return

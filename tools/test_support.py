@@ -391,6 +391,23 @@ async def other_address():
             comp.lan_fail_since = time.monotonic() - 20
             await comp.lan_tick()
             assert comp.lan_override is None, comp.lan_override
+
+            # The broadcast's answer came through a router (a Tailscale subnet router: its own address, nothing
+            # listening there): never played at, the server's other address instead - also when already stuck on it.
+            relayed = f"127.0.0.2:{free_port()}"
+            servers.netinfo.discover = lambda p, timeout=1.5, targets=None: [
+                {"id": sid, "address": relayed, "protocol": mp.PROTOCOL, "name": "Casa"}]
+            for stuck in (None, ("127.0.0.2", int(relayed.split(":")[1]))):
+                comp, _ = make({"server": "127.0.0.1", "port": int(dead.split(":")[1]), "server_id": sid})
+                comp.note_addresses({"id": sid}, [dead, f"127.0.0.1:{port}"])
+                comp.lan_override, comp.lan_fail_since = stuck, time.monotonic() - 20
+                await comp.lan_tick()
+                assert comp.lan_override == ("127.0.0.1", port), (stuck, comp.lan_override)
+            comp, _ = make({"server": "127.0.0.1", "port": int(dead.split(":")[1]), "server_id": sid})
+            comp.lan_override = ("127.0.0.2", int(relayed.split(":")[1]))          # (and no other address answers)
+            comp.lan_fail_since = time.monotonic() - 20
+            await comp.lan_tick()
+            assert comp.lan_override is None, comp.lan_override                    # (back to the picked address)
         finally:
             servers.netinfo.discover = real
         print("the server's other address (its Tailscale one) is used when the picked one's path breaks: ok")
