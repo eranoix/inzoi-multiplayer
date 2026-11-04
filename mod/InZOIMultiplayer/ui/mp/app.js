@@ -54,15 +54,12 @@
     $('title-bar').addEventListener('click', function () { userOpened = true; });
     // Open while the mouse is on it, a capsule again a moment after it leaves (the player's choice, 0.9.71) - but never
     // while a question waits for an answer, something is being typed or chosen, or the panel is being dragged.
+    // (mouseenter / mouseleave: the events the game's own input routing goes by - window.js setHover)
     var hovered = false, hoverAt = 0, leftAt = 0;
-    root.addEventListener('mouseover', function () {
-        if (!hovered) { hovered = true; hoverAt = Date.now(); }
-    });
-    root.addEventListener('mouseout', function (e) {
-        var to = e.relatedTarget;
-        if (to && root.contains(to)) { return; }               // (from one of its parts to another: still on it)
-        hovered = false; leftAt = Date.now();
-    });
+    function enter() { if (!hovered) { hovered = true; hoverAt = Date.now(); } }
+    root.addEventListener('mouseenter', enter);
+    root.addEventListener('mousemove', enter);
+    root.addEventListener('mouseleave', function () { hovered = false; leftAt = Date.now(); });
     function busy() {
         var a = document.activeElement;
         return !!modalWas || !!document.querySelector('.req') || root._dragging ||
@@ -75,7 +72,7 @@
             userOpened = true;
             root._applyMinimize(false);
         } else if (!hovered && !root._minimized && now - leftAt > 700 && !busy()) {
-            root._applyMinimize(true);
+            root._applyMinimize(true);                       // (it tells the game the cursor's off it: window.js)
         }
     }, 100);
     setTimeout(function () {

@@ -52,7 +52,9 @@
     // setHover: tells the engine whether the cursor is over our UI.
     // NEVER replace with `pointer-events: none` -- breaks inzoi.view.hover().
     // ------------------------------------------------------------------
+    var _hoverOn = false;
     function setHover(bOver) {
+        _hoverOn = !!bOver;
         try { if (window.inzoi && inzoi.view && inzoi.view.hover) { inzoi.view.hover(bOver); return; } } catch (e) {}
         try {
             if (typeof engine !== 'undefined') {
@@ -64,6 +66,9 @@
     }
     root.addEventListener('mouseenter', function () { setHover(true);  });
     root.addEventListener('mouseleave', function () { setHover(false); });
+    // (the cursor on it again after the panel shrank or grew under it: say so - mouseenter doesn't come then)
+    root.addEventListener('mousemove', function () { if (!_hoverOn) { setHover(true); } });
+    root._setHover = setHover;
     root.addEventListener('wheel',      function (e) { e.stopPropagation(); }, { passive: false });
 
     // ------------------------------------------------------------------
@@ -294,6 +299,10 @@
         function applyMinimize(bMin) {
             root._minimized = !!bMin;
             if (bMin) {
+                // Shrunk to the capsule, the cursor is usually left outside it - and the game then sends this view no
+                // more mouse events, so the 'mouseleave' that tells it the cursor left never comes: it kept thinking the
+                // cursor was on the panel and every click went to the UI (the Zois wouldn't walk or do anything).
+                setHover(false);
                 // display:none 상태에서 offsetWidth/Height 는 0 반환 -> inline style 우선 읽기
                 if (root._savedW == null) root._savedW = root.offsetWidth  || (root.style.width  ? parseFloat(root.style.width)  : null);
                 if (root._savedH == null) root._savedH = root.offsetHeight || (root.style.height ? parseFloat(root.style.height) : null);
