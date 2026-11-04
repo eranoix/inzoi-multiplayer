@@ -98,6 +98,28 @@ def srgb_hex(rgba) -> str:
     return "#" + "".join(f"{v:02X}" for v in rgb) + (f"{a:02X}" if a < 255 else "")
 
 
+def same_look(a: dict, b: dict) -> bool:
+    """Two looks alike to the eye: colours within 0.004 a channel, numbers within 0.002 (put through the game, a
+    colour comes back a hair off - 0.368 read as 0.366 - and would be put again at every load)."""
+    if set(a) != set(b):
+        return False
+    for part, fa in a.items():
+        fb = b[part]
+        if set(fa) != set(fb):
+            return False
+        for k, va in fa.items():
+            vb = fb[k]
+            if isinstance(va, list) and isinstance(vb, list):
+                if len(va) != len(vb) or any(abs(x - y) > 0.004 for x, y in zip(va, vb)):
+                    return False
+            elif isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+                if abs(va - vb) > 0.002:
+                    return False
+            elif va != vb:
+                return False
+    return True
+
+
 def normalize_look(info) -> dict:
     """build.get_customize_info -> {part: {field: value}}: only customised parts, only fields that can be put back
     (colours linear, numbers rounded) - the same look reads the same in both games."""
@@ -272,19 +294,19 @@ class DetailSync:
                     if host:                             # (the server has no look for it yet: the host's is it)
                         self.look_srv[k] = m
                         self.shared_task(self.share(key, self.look_value(objs[k], m)))
-                elif m != base:
+                elif not same_look(m, base):
                     self.look_base[k] = self.look_srv[k] = m
                     self.shared_task(self.share(key, self.look_value(objs[k], m)))
                 continue
             sv = (item.get("value") or {}).get("m") or {}
             if first or base is None or sv != self.look_srv.get(k):
                 self.look_srv[k] = sv                    # (the server's changed - or this is the first look at it)
-                if m != sv:
+                if not same_look(m, sv):
                     put.append((k, objs[k], sv, m))
                 else:
                     self.look_base[k] = m
                 continue
-            if m != base:                                # (changed here)
+            if not same_look(m, base):                   # (changed here)
                 self.look_base[k] = self.look_srv[k] = m
                 self.shared_task(self.share(key, self.look_value(objs[k], m), base=version(item)))
         if host:                                         # (keys of objects not in the home: dropped)
@@ -306,7 +328,7 @@ class DetailSync:
                 for part in sorted(set(have) - set(want), key=int):
                     self.game.call("build.reset_material", entity_id=e, part_index=int(part))
                 for part, fields in sorted(want.items(), key=lambda kv: int(kv[0])):
-                    if have.get(part) == fields:
+                    if part in have and same_look({part: have[part]}, {part: fields}):
                         continue
                     args = {SET_PARAM[f]: (srgb_hex(v) if f in COLOR_FIELDS else v)
                             for f, v in fields.items() if f in SET_PARAM}
@@ -345,7 +367,7 @@ class DetailSync:
         except Exception:                                # noqa: BLE001
             return
         self.look_srv[k] = want
-        if have != want:
+        if not same_look(have, want):
             await asyncio.to_thread(self.put_looks, [(k, o, want, have)])
         else:
             self.look_base[k] = have

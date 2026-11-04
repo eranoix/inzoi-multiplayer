@@ -53,12 +53,15 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.73"
+VERSION = "0.9.74"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
 GAME_MIN_PER_S = 0.49         # game minutes a real second at speed 1 (measured on both PCs: 24 in 49.4 s, 20 in 40.9 s)
 SLEEP_SPEED = 3                    # game speed while every player's Zoi is asleep
+SPOT_SAME = 60.0                   # cm: two Zois this close on the same object are on one spot (check_spot)
+SPOT_SETTLE = 2.0                  # s after my action began before its spot counts (still walking there)
+SPOT_AGAIN = 20.0                  # s between two moves of my Zoi to another spot
 STUCK_WALK = 6.0                   # s a partner's Zoi may stand in WalkToContext before it's freed (unstick_puppets)
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 SILENT_FOR = 45               # s without a byte from the server before it counts as gone (it pings every 15 s)
@@ -1659,7 +1662,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     clock = (list(self.my_clock[:2]) + ([self.my_clock[4]] if len(self.my_clock) > 4
                              and self.my_clock[4] is not None else [])) if self.my_clock and world == "play" else None
                     self.state_base = {"act": act, "anim": anim, "outfit": outfit, "clock": clock,
-                                       "sleep": self.sleeping, **self.extra_state(st)}
+                                       "sleep": self.sleeping, **self.extra_state(st),
+                                       "act_t": round(self.__dict__.get("cur_act_since", 0), 2) if act else None}
                     self.sending_state = True
                     self.send_latest("state", {"t": "state", "state": {"n": self.n, **st, "ts": round(time.time(), 3),
                                                                         **self.state_base, **self.clock_age()}})
@@ -1715,16 +1719,22 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     await self.mirror_motions()              # (their poses, exactly: 4 times a second)
                 if self._house_n % 2 == 0 and self.world == "play":
                     await self.sample_puppets()              # (twice a second: the telemetry's view of them)
+                if self._house_n % 4 == 2 and self.world == "play" and self.my_entity:
+                    self.check_spot()                        # (every second: two bodies in one place)
                 if self.world == "play" and self.my_entity:
                     a = await self.g(self.game.activity, self.my_entity)
                     act = await self.g(self.describe_act, a)
                     anim = a["anim"]["id"] if a.get("anim") else None
                     motions = a.get("motions") or []
                     sig = tuple(m["id"] for m in motions)
+                    self.cur_target = a.get("target") or -1
+                    if (act or {}).get("bag") != (self.cur_act or {}).get("bag"):
+                        self.cur_act_since = time.time()     # (when this action began: "act_t", check_spot)
                     if act != self.cur_act or anim != self.cur_anim or sig != self.__dict__.get("cur_motions"):
                         self.cur_act, self.cur_anim, self.cur_motions = act, anim, sig
                         self.learn_bag(act)
-                        self.state_base = {**self.state_base, "act": act, "anim": anim, "motions": motions}
+                        self.state_base = {**self.state_base, "act": act, "anim": anim, "motions": motions,
+                                           "act_t": round(self.__dict__.get("cur_act_since", time.time()), 2)}
                         pos = self.fast_pos
                         if pos and self.sending_state and self.last_full_state and self.writer and self.me_id:
                             self.n += 1
@@ -1737,6 +1747,40 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 loop_error("action loop", e)
                 await asyncio.sleep(1)
             await asyncio.sleep(0.25)
+
+    def check_spot(self):
+        """My Zoi lying or sitting where my partner's Zoi is, in their game, on the same object (a side of the bed, a seat
+        of the sofa): two bodies in one place - in my game theirs is drawn there, in theirs mine. Whoever got there later
+        moves to the object's other spot (the reslot op; on a tie the host stays); only my own Zoi is ever moved, and at
+        most once every SPOT_AGAIN s."""
+        act, me = self.cur_act, self.fast_pos
+        if not act or not act.get("obj") or not me or time.time() - self.__dict__.get("_reslot_at", 0) < SPOT_AGAIN:
+            return
+        now = time.time()
+        mine = now - self.__dict__.get("cur_act_since", now)
+        if mine < SPOT_SETTLE:
+            return                                       # (still getting there: where it ends up counts)
+        for r in self.remotes.values():
+            st = r.state or {}
+            ract = st.get("act") if isinstance(st.get("act"), dict) else None
+            if not ract or ract.get("obj") != act.get("obj") or now - r.state_at > 3:
+                continue
+            try:
+                same_obj = abs(float(ract["ox"]) - float(act["ox"])) < 50 and abs(float(ract["oy"]) - float(act["oy"])) < 50
+                gap = ((float(st["x"]) - me["x"]) ** 2 + (float(st["y"]) - me["y"]) ** 2) ** 0.5
+                theirs = float(st.get("ts") or now) - float(st.get("act_t") or 0) + (now - r.state_at)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not same_obj or gap > SPOT_SAME or not st.get("act_t"):
+                continue
+            if mine > theirs + 0.5 or (abs(mine - theirs) <= 0.5 and self.leader == self.me_id):
+                continue                                 # (mine got there first - or the host stays on a tie)
+            self._reslot_at = now
+            log.info("my Zoi and %s's are on the same spot of %s (%.0f cm apart): mine moves to the other one",
+                     r.name, act["obj"], gap)
+            self.mail.op("reslot", entity=int(self.my_entity), bag=act["bag"], target=int(self.cur_target),
+                         ax=float(st["x"]), ay=float(st["y"]))
+            return
 
     async def mirror_motions(self):
         """Play on each partner's Zoi exactly the montages their own game plays on them (posture, arms, face), each in

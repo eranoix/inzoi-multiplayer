@@ -208,6 +208,11 @@ async def look_tests():
     await asyncio.sleep(0)
     assert ("look:1038:0ld0ld0ld0ld", None, None) in host.sent, host.sent
     print("objects 45 cm apart are two; stale keys are dropped by the host: ok")
+    # a colour put through the game comes back a hair off: the same look (not put again at every load)
+    assert detailsync.same_look({"0": {"color": [0.368, 0.235, 0.177, 1.0], "material_index": 5}},
+                                {"0": {"color": [0.366, 0.235, 0.178, 1.0], "material_index": 5}})
+    assert not detailsync.same_look({"0": {"color": [0.368, 0.235, 0.177, 1.0]}}, {"0": {"color": [0.30, 0.235, 0.177, 1.0]}})
+    print("a colour a hair off after the game's rounding is the same look: ok")
 
 
 async def main():

@@ -240,6 +240,30 @@ async def main():
     await comp.unstick_puppets()
     assert not resets() and "p1" not in comp._walk_stuck
     print("a partner's Zoi stuck walking into place is freed after a few seconds: ok")
+
+    # Two bodies in one place: my Zoi lying on the side of the bed where my partner's lies in their game. Whoever got
+    # there later moves to the other side (only my own Zoi is moved); the one there first stays; on a tie the host stays.
+    def spot(comp, r, mine_age, their_age, gap=20.0, host=False):
+        now = time.time()
+        comp.me_id, comp.leader, comp.my_entity, comp.cur_target = "me", ("me" if host else "p1"), 24534, 15725
+        comp.cur_act = {"bag": "Sleep_Bed", "obj": "Bed01", "ox": 73657.0, "oy": 25786.0, "oz": 76.0}
+        comp.cur_act_since, comp.fast_pos = now - mine_age, {"x": 73767.0, "y": 25849.0, "z": 76.0, "at": now}
+        comp._reslot_at = 0
+        r.state, r.state_at = {"x": 73767.0 + gap, "y": 25849.0, "z": 76.0, "ts": now, "act_t": now - their_age,
+                               "act": {"bag": "Sleep_Bed", "obj": "Bed01", "ox": 73657.0, "oy": 25786.0, "oz": 76.0}}, now
+        comp.mail.ops.clear()
+        comp.check_spot()
+        return [o for _, _, o in comp.mail.ops if o.get("op") == "reslot"]
+    comp, r = make()
+    moved = spot(comp, r, mine_age=5, their_age=60)                  # (I lay down after she did)
+    assert len(moved) == 1 and moved[0]["target"] == 15725 and moved[0]["bag"] == "Sleep_Bed", moved
+    assert abs(moved[0]["ax"] - 73787.0) < 1, moved
+    assert not spot(comp, r, mine_age=60, their_age=5), "the one there first was moved"
+    assert not spot(comp, r, mine_age=5, their_age=60, gap=150), "moved though 1.5 m apart"
+    assert not spot(comp, r, mine_age=1, their_age=60), "moved while still getting there"
+    assert not spot(comp, r, mine_age=10, their_age=10, host=True), "the host moved on a tie"
+    assert spot(comp, r, mine_age=10, their_age=10, host=False), "the other PC didn't move on a tie"
+    print("two bodies on one spot: the later one moves to the other side (the host stays on a tie): ok")
     print("puppet retry tests passed")
 
 

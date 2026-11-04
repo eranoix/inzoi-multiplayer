@@ -920,6 +920,58 @@ local OPS = {
         end
         return string.format("dust and wear set on %d object(s)%s", done, missing > 0 and (", " .. missing .. " not here") or "")
     end,
+    -- {entity, bag, target, ax, ay}: my Zoi is on the spot of an object (a side of the bed, a seat) where my partner's Zoi
+    -- is in their game - two bodies in one place. Mine goes to the object's other spot: the same slot on the other
+    -- side (InteractionSlot_01_l <-> _01_r), else the slot farthest from them; its action is queued again there (the
+    -- game picks the slot nearest to the point given).
+    reslot = function(op)
+        local m = em()
+        local c, o = char(op.entity), m:FindGameObject(eid(op.target))
+        if not c or not o then return "reslot: nothing to move" end
+        local SC = INZOI.FB2SlotComponent
+        local okC, sc = pcall(function() return o:GetComponent(14) end)  -- (EB2ComponentType.Slot)
+        if not okC or not sc then return "reslot: " .. tostring(o:GetObjectTableId()) .. " has no spots" end
+        local me = c:GetLocation()
+        local slots, mine, mineD = {}, nil, 1e12
+        local infos = SC.GetSlotStateInfos(sc)
+        for i = 1, infos:Num() do
+            local it = infos:Get(i)
+            local name = tostring(it.SlotName)
+            local okL, has, loc = pcall(SC.GetSlotLocationBySlotName, sc, it.SlotName)
+            if okL and has and loc and not name:match("Fx") and not name:match("Reform") then
+                local s = { name = name, x = loc.X, y = loc.Y, z = loc.Z }
+                slots[#slots + 1] = s
+                local d = (loc.X - me.X) ^ 2 + (loc.Y - me.Y) ^ 2
+                if d < mineD then mine, mineD = s, d end
+            end
+        end
+        if not mine then return "reslot: no spots found on " .. tostring(o:GetObjectTableId()) end
+        local function swap(n)
+            if n:match("_l$") then return n:sub(1, -3) .. "_r" end
+            if n:match("_r$") then return n:sub(1, -3) .. "_l" end
+            local a, b = n:match("^(.*)_l(_%a+)$")
+            if a then return a .. "_r" .. b end
+            a, b = n:match("^(.*)_r(_%a+)$")
+            if a then return a .. "_l" .. b end
+            return nil
+        end
+        local function far(s) return math.sqrt((s.x - op.ax) ^ 2 + (s.y - op.ay) ^ 2) end
+        local want, other = nil, swap(mine.name)
+        for _, s in ipairs(slots) do
+            if s.name == other and far(s) > 60 then want = s end
+        end
+        if not want then
+            local best = 80
+            for _, s in ipairs(slots) do
+                if s.name ~= mine.name and far(s) > best then want, best = s, far(s) end
+            end
+        end
+        if not want then return "reslot: no free spot on " .. tostring(o:GetObjectTableId()) end
+        pcall(clear_all, op.entity)
+        queue_interaction(op.entity, op.bag, op.target, { x = want.x, y = want.y, z = want.z })
+        return string.format("reslot: %s moved from %s to %s on %s", tostring(op.bag), mine.name, want.name,
+            tostring(o:GetObjectTableId()))
+    end,
     -- {site, table, x, y, z, states = {"group:state", ...}, channel}: that object here (same kind, within a metre) is put in
     -- those states (the game's own state change: lights, screens and sounds follow) and on that channel.
     set_states = function(op)
