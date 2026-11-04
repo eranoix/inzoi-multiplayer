@@ -717,6 +717,124 @@ local function pose_tick(dt)
     glide(dt)    -- (the drawn actor: B2 sets only the simulation where they are ("skel"), which doesn't move it)
 end
 
+-- ------------------------------------------------------------------ an online partner's Zoi in the family portraits
+-- While a partner is online their Zoi can't be played here: the game's own switch refuses it
+-- (lua/B2/Systems/FB2ControllerSystem.lua). Its portrait in the HUD's family list shows that: it can't be clicked and
+-- it's dimmed. in/locked.cfg "<unix time>|<entity>,<entity>..." (the companion, every few seconds while a partner is
+-- online; older than LOCK_FRESH s - the companion closed - locks nothing). Which Zoi a portrait is: its picture is the
+-- very texture that Zoi's B1PortraitComponent holds (Portrait) - the texture's name can't tell: a picture made while
+-- playing is "Portrait<entity>_Tex2D...", one restored with the save a plain "Texture2D_..." (the name is only the
+-- fallback, for a Zoi whose actor isn't here). When they go offline the portrait goes back to how the game had it.
+local LOCK_EVERY, LOCK_FRESH, LOCK_DIM, LOCK_SEARCH, LOCK_SEARCH_MAX = 0.5, 30, 0.45, 5.0, 30.0
+local lockT, lockSearchAt, lockSearchGap, lockCls, lockDimmed = 0, -100, LOCK_SEARCH, nil, {}
+local lockComp = {}            -- entity -> {actor, comp}: the Zoi's portrait component, found once per actor
+
+local function locked_ids()
+    local v = cfg_load("in", "locked") or ""
+    local t, list = v:match("^(%d+)|([%d,]*)$")
+    local set, any = {}, false
+    if t and math.abs(os.time() - tonumber(t)) <= LOCK_FRESH then
+        for e in list:gmatch("%d+") do set[tonumber(e)] = true; any = true end
+    end
+    return set, any
+end
+
+-- The picture a Zoi's portraits show: its B1PortraitComponent's Portrait (found among the actor's components by its
+-- class name - the type itself isn't one the game's mod check lets a script name).
+local function zoi_portrait(entity)
+    local a = actor_of(entity)
+    if not a then return nil end
+    local c = lockComp[entity]
+    if not c or c.actor ~= a then
+        c = { actor = a }
+        local list = a:K2_GetComponentsByClass(UE.UActorComponent)
+        for i = 1, list:Length() do
+            local comp = list:Get(i)
+            if tostring(comp:GetClass():GetName()) == "B1PortraitComponent" then c.comp = comp; break end
+        end
+        lockComp[entity] = c
+    end
+    return c.comp and c.comp.Portrait
+end
+
+-- Which of the locked Zois (set: entity -> true; pics: their pictures) a portrait entry shows, or nil.
+local function portrait_locked(entry, set, pics)
+    local tp = entry.BW_WBP_Portrait.BW_Image_Portrait.Brush.ResourceObject.TextureParameterValues
+    for j = 1, tp:Length() do
+        local tex = tp:Get(j).ParameterValue
+        if tex then
+            for e, pic in pairs(pics) do
+                if pic == tex then return e end
+            end
+            local e = tonumber(tostring(tex:GetName()):match("^Portrait(%d+)_") or "")
+            if e and set[e] then return e end
+        end
+    end
+end
+
+local function set_portrait_locked(entry, on)
+    if entry.BW_Button_Portrait:GetIsEnabled() == on then         -- (the game may enable it again when it redraws)
+        entry.BW_Button_Portrait:SetIsEnabled(not on)
+        entry.BW_WBP_Portrait.BW_Button_Image:SetIsEnabled(not on)
+        entry:SetRenderOpacity(on and LOCK_DIM or 1)
+    end
+end
+
+-- The family list widgets: found by their class once it's known (cheap); before that among all widgets (about 20 ms),
+-- once in LOCK_SEARCH s - less often each time it isn't there (a loading screen...), up to LOCK_SEARCH_MAX s.
+local function family_lists()
+    local own = _G.MP_B1_OWNER
+    local arr = UE.TArray(UE.UUserWidget)
+    if lockCls then
+        UE.UWidgetBlueprintLibrary.GetAllWidgetsOfClass(own, arr, lockCls, false)
+        if arr:Length() > 0 then return arr end
+        lockCls = nil                  -- (a save loaded: the HUD comes back with a class of its own - search again)
+    end
+    if clock - lockSearchAt < lockSearchGap then return nil end
+    lockSearchAt = clock
+    lockSearchGap = math.min(lockSearchGap * 2, LOCK_SEARCH_MAX)
+    UE.UWidgetBlueprintLibrary.GetAllWidgetsOfClass(own, arr, UE.UUserWidget, false)
+    for i = 1, arr:Length() do
+        local w = arr:Get(i)
+        if tostring(w:GetClass():GetName()) == "WBP_HUD_PlayerChange_C" then
+            lockCls, lockSearchGap = w:GetClass(), LOCK_SEARCH
+            local one = UE.TArray(UE.UUserWidget)
+            one:Add(w)
+            return one
+        end
+    end
+end
+
+local function lock_portraits()
+    local set, any = locked_ids()
+    if not any and next(lockDimmed) == nil then return end
+    local lists = family_lists()
+    if not lists then return end
+    local pics = {}
+    for e in pairs(set) do
+        local ok, pic = pcall(zoi_portrait, e)
+        if ok and pic then pics[e] = pic end
+    end
+    local now = {}
+    for i = 1, lists:Length() do
+        local list = lists:Get(i)
+        for k = 0, 7 do
+            local entry = list["BW_WBP_PortraitEntry_" .. k]
+            if entry then
+                local ok, e = pcall(portrait_locked, entry, set, pics)
+                if ok and e then
+                    pcall(set_portrait_locked, entry, true)
+                    now[entry] = true
+                end
+            end
+        end
+    end
+    for entry in pairs(lockDimmed) do
+        if not now[entry] then pcall(set_portrait_locked, entry, false) end
+    end
+    lockDimmed = now
+end
+
 function M.on_begin() end
 
 local lastReal = nil
@@ -739,6 +857,12 @@ function M.on_tick(dt)
     if _G.MP_B1_OWNER then
         local ok, err = pcall(pose_tick, dt)
         if not ok then result("pose-error " .. tostring(err)) end
+        lockT = lockT + dt
+        if lockT >= LOCK_EVERY then
+            lockT = 0
+            local okL, errL = pcall(lock_portraits)
+            if not okL then result("lock-error " .. tostring(errL)) end
+        end
     end
     t = t + dt
     if t < EVERY then return end

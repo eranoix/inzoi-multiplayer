@@ -432,6 +432,7 @@
         [/^Server: (.*)$/, 'Servidor: $T1'],
         [/^(.*) wants to hug you$/, '$1 quer te abraçar'],
         [/^(.*) is playing their own Zoi: you play yours$/, '$1 está jogando com a própria Zoi: você joga com a sua'],
+        [/^(.*) is online playing their own Zoi: it can't be played here$/, '$1 está online jogando com a própria Zoi: ela não pode ser jogada aqui'],
         [/^(.*) wants to kiss you$/, '$1 quer te beijar'],
         [/^(.*) wants to dance with you$/, '$1 quer dançar com você'],
         [/^(.*) wants to high-five you$/, '$1 quer um "toca aqui"'],

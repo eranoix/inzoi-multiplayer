@@ -307,6 +307,35 @@ async def main():
     r.state_at = time.time() - 60                                  # (they're offline)
     assert await comp.own_zoi(25674) == 25674 and not calls
     print("an online partner's Zoi can't be played here: back to mine; offline it can: ok")
+
+    # The lock files: the online partner's Zoi for the game's switch (B2: MPLock.lua in the mailbox) and the portraits
+    # (B1: in/locked.cfg), stamped with the time; offline: nothing locked. A refused switch is explained in the chat.
+    import install
+    comp, r = make()
+    comp.world = "play"
+    comp.puppet_ids["p1"] = 25674
+    r.state_at = time.time()
+    comp.tell_lock()
+    cfg = (install.INSTALL_DIR / "in" / "locked.cfg").read_text("utf-8")
+    box = (install.MAILBOX_DIR / "MPLock.lua").read_text("utf-8")
+    assert cfg.endswith("|25674") and abs(int(cfg.split("|")[0]) - time.time()) < 3, cfg
+    assert "ids = { 25674 }" in box and "t = " in box, box
+    stamp = cfg
+    comp.lock_at -= companion.LOCK_EVERY + 1                       # (rewritten while locked: the time moves on)
+    time.sleep(1.1)
+    comp.tell_lock()
+    assert (install.INSTALL_DIR / "in" / "locked.cfg").read_text("utf-8") != stamp
+    comp.on_refused("25674")
+    assert any("Ana is online playing their own Zoi" in c["text"] for c in comp.chat), comp.chat
+    comp.on_refused("25674")                                       # (said once, not for every key press)
+    assert sum("is online playing" in c["text"] for c in comp.chat) == 1
+    r.state_at = time.time() - 60                                  # (they're offline)
+    comp.tell_lock()
+    assert (install.INSTALL_DIR / "in" / "locked.cfg").read_text("utf-8").endswith("|")
+    assert "ids = {  }" in (install.MAILBOX_DIR / "MPLock.lua").read_text("utf-8")
+    assert str(install.INSTALL_DIR).startswith(os.environ["INZOI_MP_DOCUMENTS"])
+    print("lock files: the online partner's Zoi locked (time-stamped, refreshed), unlocked offline; a refusal "
+          "explained once: ok")
     print("puppet retry tests passed")
 
 

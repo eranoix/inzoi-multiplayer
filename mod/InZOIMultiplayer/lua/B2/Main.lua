@@ -1279,6 +1279,9 @@ function M.on_begin(self)
     require("Systems.B2AutonomyOptionManager")
     require("Objects.B2Site")
     require("Objects.B2GameObject")
+    -- (Systems/FB2ControllerSystem.lua - the game's possession rule - reports through here when it refuses a switch to
+    -- an online partner's Zoi)
+    _G.MP_REPORT = report
     find_me()
     local box = load(CMD)
     S.seq = box and box.seq or nil          -- whatever is already in the mailbox was meant for a previous session

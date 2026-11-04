@@ -47,6 +47,8 @@ if os.name == "nt":
     user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
                                     ctypes.c_int, wintypes.UINT]
     user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetAncestor.restype = wintypes.HWND
+    user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
     user32.LoadCursorW.restype = wintypes.HANDLE
     user32.LoadCursorW.argtypes = [wintypes.HINSTANCE, wintypes.LPVOID]
     user32.SetCursor.argtypes = [wintypes.HANDLE]
@@ -87,6 +89,11 @@ SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x1, 0x2, 0x10
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+if os.name == "nt":
+    user32.WindowFromPoint.restype = wintypes.HWND
+    user32.WindowFromPoint.argtypes = [POINT]
 
 
 class SIZE(ctypes.Structure):
@@ -231,11 +238,25 @@ def cursor_in_game():
     if not hwnd:
         return None
     p, r = POINT(0, 0), wintypes.RECT()
-    if not user32.GetCursorPos(ctypes.byref(p)) or not user32.ScreenToClient(hwnd, ctypes.byref(p)):
+    if not user32.GetCursorPos(ctypes.byref(p)):
+        return None
+    # (the game is what's under the cursor - not the window with the focus: with another program focused on a second
+    # screen, the game and its panel are still there under the mouse; "the game isn't in front" collapsed the panel
+    # the player was pointing at, and the next mouse move opened it again, over and over - 0.9.81)
+    front = _game_under(p, hwnd)
+    if not user32.ScreenToClient(hwnd, ctypes.byref(p)):
         return None
     user32.GetClientRect(hwnd, ctypes.byref(r))
-    front = user32.GetForegroundWindow() == hwnd
     return [p.x, p.y, r.right, r.bottom, front]
+
+
+def _game_under(p, hwnd) -> bool:
+    """Whether the window under screen point p is the game's (or this program's own overlay, which lies on it)."""
+    under = user32.WindowFromPoint(p)
+    if not under:
+        return False
+    top = user32.GetAncestor(under, 2) or under                    # (GA_ROOT)
+    return top == hwnd or _pid(top) in (_pid(hwnd), os.getpid())
 
 
 def client_rect(hwnd) -> tuple[int, int, int, int]:

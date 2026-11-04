@@ -48,12 +48,12 @@ import webui  # noqa: E402
 import world  # noqa: E402
 from game import Game, GameError, describe_act  # noqa: E402
 from lua_data import Registry  # noqa: E402
-from mailbox import Mailbox  # noqa: E402
+from mailbox import Mailbox, write_atomic  # noqa: E402
 from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.80"
+VERSION = "0.9.83"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
@@ -65,6 +65,8 @@ SPOT_SAME = 60.0                   # cm: two Zois this close on the same object 
 SPOT_SETTLE = 2.0                  # s after my action began before its spot counts (still walking there)
 SPOT_AGAIN = 20.0                  # s between two moves of my Zoi to another spot
 STUCK_WALK = 6.0                   # s a partner's Zoi may stand in WalkToContext before it's freed (unstick_puppets)
+ONLINE_FOR = 15.0                  # s since their last state: a partner still playing (partner_online)
+LOCK_EVERY = 5.0                   # s: the lock files are rewritten this often while a Zoi is locked (tell_lock)
 SLEEPING = re.compile(r"sleep|nap", re.I)  # in the action or motion of a sleeping Zoi
 SILENT_FOR = 45               # s without a byte from the server before it counts as gone (it pings every 15 s)
 CONNECT_WITHIN = 20           # s for the connection to the server to be made before trying again
@@ -294,7 +296,7 @@ def write_diagnostics(status: dict, cfg: dict, extra: dict[str, str] | None = No
     files += [(f, f"logs/{f.name}", 1 << 20) for f in (getattr(updater, "DIR", CONFIG_DIR / "update") / "health.json",)]
     out_dir = install.INSTALL_DIR / "out"
     files += [(f, f"mod/out/{f.name}", 1 << 20) for f in sorted(out_dir.glob("*.cfg"))] if out_dir.exists() else []
-    files += [(install.MAILBOX_DIR / n, f"mod/mailbox/{n}", 1 << 20) for n in ("MPCmd.lua", "MPSeq.lua", "MPBulk.lua")]
+    files += [(install.MAILBOX_DIR / n, f"mod/mailbox/{n}", 1 << 20) for n in ("MPCmd.lua", "MPSeq.lua", "MPBulk.lua", "MPLock.lua")]
     files.append((install.INSTALL_DIR / "mod_manifest.json", "mod/mod_manifest.json", 1 << 20))
     game_logs = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "BlueClient" / "Saved" / "Logs"
     if game_logs.exists():
@@ -1575,6 +1577,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             self.on_dirt_report(text)
         elif kind == "log":
             log.info("[game] %s", text)
+        elif kind == "refused":
+            self.on_refused(text)
 
     # ------------------------------------------------------------------ my Zoi -> server
     def describe_act(self, a: dict) -> dict | None:
@@ -1618,6 +1622,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     asyncio.get_running_loop().create_task(self.maybe_upload_world())   # after the game saved
                 if time.time() - last_me > 1:
                     self.my_entity, last_me = await self.own_zoi(await self.g(self.game.possessed)), time.time()
+                    self.tell_lock()
                 fast = self.fast_pos
                 if fast and time.time() - fast["at"] < 1 and tick % 10 and self.last_full_state:
                     st = {**self.last_full_state, **{k: fast[k] for k in ("x", "y", "z", "yaw", "site")}}
@@ -1784,10 +1789,63 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 except GameError:
                     pass
 
+    def partner_online(self, r) -> bool:
+        """They're playing now: their game's state keeps coming."""
+        return bool(r) and time.time() - (r.state_at or 0) <= ONLINE_FOR
+
+    def locked_zois(self) -> list[int]:
+        """The partners' Zois here that can't be played here: their players are online, playing them."""
+        out = set()
+        for pid, e in self.puppet_ids.items():
+            if self.partner_online(self.remotes.get(pid)):
+                try:
+                    out.add(int(e))
+                except (TypeError, ValueError):
+                    pass
+        return sorted(out)
+
+    def tell_lock(self):
+        """While a partner is online their Zoi can't be played here (the players' choice, 2026-11-04): the game's own
+        switch refuses it (B2: lua/B2/Systems/FB2ControllerSystem.lua reads the mailbox's MPLock.lua) and its family
+        portrait can't be clicked (B1: in/locked.cfg). Both carry the time they were written and are rewritten every
+        LOCK_EVERY s while anything is locked: if this program stops, the lock runs out on its own."""
+        ids = self.locked_zois() if self.world != "out" else []
+        now = time.time()
+        prev = self.__dict__.get("lock_ids")
+        if ids == prev and (not ids or now - self.__dict__.get("lock_at", 0) < LOCK_EVERY):
+            return
+        t = int(now)
+        try:
+            (install.INSTALL_DIR / "in").mkdir(parents=True, exist_ok=True)
+            write_atomic(install.INSTALL_DIR / "in" / "locked.cfg", f"{t}|{','.join(map(str, ids))}")
+            install.MAILBOX_DIR.mkdir(parents=True, exist_ok=True)
+            write_atomic(install.MAILBOX_DIR / "MPLock.lua",
+                         f"return {{ t = {t}, ids = {{ {', '.join(map(str, ids))} }} }}\n")
+        except OSError as e:
+            log.debug("lock files: %s", e)
+            return
+        self.lock_ids, self.lock_at = ids, now
+        if ids != prev:
+            log.info("can't be played here while their players are online: %s", ids or "none")
+
+    def on_refused(self, text: str):
+        """The game refused a switch to an online partner's Zoi (a portrait, the next-Zoi key...): say why."""
+        try:
+            e = int(text.strip())
+        except ValueError:
+            return
+        pid = next((p for p, x in self.puppet_ids.items() if str(x) == str(e)), None)
+        r = self.remotes.get(pid) if pid else None
+        if r and time.time() - self.__dict__.get("refused_at", 0) > 5:
+            self.refused_at = time.time()
+            log.info("switch to %s's Zoi refused: they're online", r.name)
+            self.system_line(f"{r.name} is online playing their own Zoi: it can't be played here")
+
     async def own_zoi(self, possessed):
-        """The Zoi I play: the one possessed, unless that's an online partner's Zoi (in my family: picked from the
-        portraits) - they play it in their own game, so play goes straight back to mine (the players' choice,
-        2026-11-04). With them offline, their Zoi can be played here like any family member."""
+        """The Zoi I play: the one possessed. The game refuses a switch to an online partner's Zoi (tell_lock), but I may
+        already be playing it when they come online (I played it while they were away), or the rule isn't in place
+        yet (it starts with the next save loaded): then play goes back to mine. With them offline, their Zoi can be
+        played here like any family member."""
         try:
             possessed = int(possessed)
         except (TypeError, ValueError):
@@ -1796,7 +1854,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         pid = whose.get(possessed)
         r = self.remotes.get(pid) if pid else None
         mine = self.__dict__.get("my_own")
-        if not r or not mine or mine == possessed or time.time() - (r.state_at or 0) > 15:
+        if not r or not mine or mine == possessed or not self.partner_online(r):
             if not r:
                 self.my_own = possessed
             return possessed

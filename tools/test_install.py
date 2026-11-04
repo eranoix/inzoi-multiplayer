@@ -31,8 +31,11 @@ def main():
 
 # Unreal types the game's mod check is known to accept ("accessed via UE" must be in its ue_global_table.json, else the
 # game refuses the whole mod when it starts: EBoneSpaces was refused). A new one needs checking in the game first.
+# (The game's own list ships as BlueClient/Content/Data/Lua/luals-defs/globals/UE.lua - EBoneSpaces isn't in it;
+# UUserWidget, UWidgetBlueprintLibrary and UActorComponent are: the family portraits, 0.9.81-0.9.83.)
 UE_ALLOWED = {"FVector", "FRotator", "FTransform", "FQuat", "TArray", "AActor", "UGameplayStatics",
-              "USkinnedMeshComponent", "UPoseableMeshComponent"}
+              "USkinnedMeshComponent", "UPoseableMeshComponent", "UUserWidget", "UWidgetBlueprintLibrary",
+              "UActorComponent"}
 
 
 def ue_types_allowed():
