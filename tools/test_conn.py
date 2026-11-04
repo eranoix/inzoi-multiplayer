@@ -47,7 +47,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "client"), str(ROOT / "server")]
 import companion  # noqa: E402
 import inzoi_mp_server as mp  # noqa: E402
-from posesync import write_atomic  # noqa: E402
+from posesync import unpack, write_atomic  # noqa: E402
 
 assert str(companion.CONFIG_DIR).startswith(str(TMP)), companion.CONFIG_DIR
 assert str(companion.install.INSTALL_DIR).startswith(str(TMP)), companion.install.INSTALL_DIR
@@ -552,7 +552,7 @@ async def test_slow_uplink():
                 sets[f"obj:1038:lamp{k}"] = time.time()
                 await ana.send({"t": "set", "key": f"obj:1038:lamp{k}", "value": {"on": k}})
         await until(lambda: set(sets) <= {m.get("key") for m in ben.msgs if m.get("t") == "shared"}, 5)
-        poses = [(m["_at"], kind, text) for m in ben.msgs if m.get("kind") == "pose"
+        poses = [(m["_at"], kind, unpack(text) or "") for m in ben.msgs if m.get("kind") == "pose"     # (z: since 0.9.61)
                  for kind, text in (m.get("data") or {}).items()]
         late = [(at, at - float(text.split("|", 1)[0])) for at, kind, text in poses if kind == "d"]
         recent = [age for at, age in late if at > time.time() - 8]

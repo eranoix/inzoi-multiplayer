@@ -8,6 +8,8 @@ restarts the game) gets the whole state in the server's welcome and brings their
     house:<lot>:live   the couple's home as the game's commands read it (objects, walls, storey heights)
     house:<lot>:exact  the same home as the game's own saved property (paint, floors, roofs, customization: lotsync.py)
     obj:<lot>:<key>    one object's states there (on/off, the TV's channel...: objsync.py)
+    dirt:<lot>         the home's dust and wear (detailsync.py)
+    look:<lot>:<key>   one object's colours and materials there (detailsync.py)
     family             {"together": true, "head": <player id>, "home_site": <lot>, "members": [ids]}
 
 Each value carries who set it. A PC remembers the last version it applied of each key (cfg["shared_seen"]) so a
@@ -84,8 +86,10 @@ class SharedState:
                 cur and cur.get("by") == self.me_id and digest(cur.get("value")) == s["digest"])
             self._share_done(ref, "ok" if got else "lost", recheck=False)
         objects = sum(k.startswith("obj:") for k in self.shared)
-        named = [f"{k} v{v.get('v')}" for k, v in self.shared.items() if not k.startswith("obj:")]
+        looks = sum(k.startswith("look:") for k in self.shared)
+        named = [f"{k} v{v.get('v')}" for k, v in self.shared.items() if not k.startswith(("obj:", "look:"))]
         named += [f"{objects} object states"] if objects else []
+        named += [f"{looks} objects' colours"] if looks else []
         log.info("shared state from the server: %s", ", ".join(named) or "nothing yet")
         for key, item in list(self.shared.items()):
             self.shared_changed(key, item, snapshot=True)
@@ -296,6 +300,8 @@ class SharedState:
                 self.on_shared_family(item, snapshot)
             elif key.startswith("obj:"):
                 self.on_shared_object(key, item, snapshot)
+            elif key.startswith(("dirt:", "look:")):
+                self.on_shared_detail(key, item, snapshot)
         except Exception as e:                           # noqa: BLE001
             log.warning("applying shared %s: %s", key, e)
 

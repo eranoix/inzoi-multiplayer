@@ -856,6 +856,70 @@ local OPS = {
         report("states", table.concat(lines, ";"))
         return nil
     end,
+    -- Every object of a lot with its dust and wear, for the companion's detailsync.py: one line an object
+    -- "entity|table|x|y|z|dust|grade" (dust in 1/1000, the wear grade; -1: the object has none), "dirt" with the lot
+    -- first. (Objects without either are listed too: the colours are read by entity.)
+    read_dirt = function(op)
+        local m = em()
+        local site = m:FindSite(eid(op.site))
+        if not site then return nil end
+        local D, W = INZOI.FB2DustyComponent, INZOI.FB2ObjectWeatheringComponent
+        local objs, lines = site:GetObjects(), { tostring(op.site) }
+        for i = 1, objs:Num() do
+            local id = objs:Get(i)
+            local o = m:FindGameObject(id)
+            if o then
+                local d, w = -1, -1
+                pcall(function()
+                    local dc = o:GetComponent(38)              -- (EB2ComponentType.Dusty)
+                    if dc then d = math.floor(D.GetDustyValue(dc) * 1000 + 0.5) end
+                end)
+                pcall(function()
+                    local wc = o:GetComponent(39)              -- (EB2ComponentType.ObjectWeathering)
+                    if wc then w = math.floor(W.GetGrade(wc)) end
+                end)
+                local l = o:GetLocation()
+                lines[#lines + 1] = string.format("%d|%s|%.0f|%.0f|%.0f|%d|%d", id.Value, tostring(o:GetObjectTableId()),
+                    l.X, l.Y, l.Z, d, w)
+            end
+        end
+        report("dirt", table.concat(lines, ";"))
+        return nil
+    end,
+    -- {site, items = {{table, x, y, z, d, w}, ...}}: each object here (same kind, nearest within a metre) gets that dust
+    -- (1/1000) and wear grade (-1: left as it is). (The setters need their last argument: without it nothing changes.)
+    set_dirt = function(op)
+        local m = em()
+        local site = m:FindSite(eid(op.site))
+        if not site then return nil end
+        local D, W = INZOI.FB2DustyComponent, INZOI.FB2ObjectWeatheringComponent
+        local objs, byTable = site:GetObjects(), {}
+        for i = 1, objs:Num() do
+            local o = m:FindGameObject(objs:Get(i))
+            if o then
+                local t = tostring(o:GetObjectTableId())
+                byTable[t] = byTable[t] or {}
+                table.insert(byTable[t], o)
+            end
+        end
+        local done, missing = 0, 0
+        for _, it in ipairs(op.items or {}) do
+            local best, bestD = nil, 100
+            for _, o in ipairs(byTable[it.table] or {}) do
+                local l = o:GetLocation()
+                local dd = math.sqrt((l.X - it.x) ^ 2 + (l.Y - it.y) ^ 2 + (l.Z - it.z) ^ 2)
+                if dd < bestD then best, bestD = o, dd end
+            end
+            if best then
+                if it.d and it.d >= 0 then pcall(function() D.SetDustyValue(best:GetComponent(38), it.d / 1000, true) end) end
+                if it.w and it.w >= 0 then pcall(function() W.SetWeatheringGrade(best:GetComponent(39), it.w, true) end) end
+                done = done + 1
+            else
+                missing = missing + 1
+            end
+        end
+        return string.format("dust and wear set on %d object(s)%s", done, missing > 0 and (", " .. missing .. " not here") or "")
+    end,
     -- {site, table, x, y, z, states = {"group:state", ...}, channel}: that object here (same kind, within a metre) is put in
     -- those states (the game's own state change: lights, screens and sounds follow) and on that channel.
     set_states = function(op)
