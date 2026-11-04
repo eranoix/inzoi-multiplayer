@@ -317,9 +317,10 @@ def launcher_tests(tmp: Path):
         with contextlib.ExitStack() as stack:
             stack.enter_context(contextlib.redirect_stdout(out))
             orig = (ue4ss.game_binaries, menu.game_window, game_mod.Game, os.startfile, launcher.time.sleep,
-                    companion.save_config)
+                    companion.save_config, menu.game_running)
             ue4ss.game_binaries = lambda cfg=None, g=game: g
             menu.game_window = lambda: 1 if running["game"] else None
+            menu.game_running = lambda: running["game"]      # (never the real inZOI's process)
             game_mod.Game = FakeGame
             os.startfile = lambda url: started.append(url)
             launcher.time.sleep = lambda s: None
@@ -329,7 +330,7 @@ def launcher_tests(tmp: Path):
                 launcher.start_game()
             finally:
                 (ue4ss.game_binaries, menu.game_window, game_mod.Game, os.startfile, launcher.time.sleep,
-                 companion.save_config) = orig
+                 companion.save_config, menu.game_running) = orig
         text = out.getvalue()
         check((game / "dwmapi.dll").exists() and cfg.get("ingame_menu") is True, f"{case}: installed without asking")
         check(str(game) in text and "dwmapi.dll" in text and "ue4ss" in text, f"{case}: told where it is")

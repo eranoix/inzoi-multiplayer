@@ -643,8 +643,8 @@ def restart_game(lobby: str):
 def start_game():
     """The Multiplayer button on the game's main menu needs this program running: start inZOI along with it."""
     global GAME_STARTED
-    if os.name != "nt" or testing() or GAME_STARTED or menu.game_window():
-        return
+    if os.name != "nt" or testing() or GAME_STARTED or menu.game_window() or menu.game_running():
+        return                  # (running, its window not found from here: not asked to start again - seen on Chey's PC)
     GAME_STARTED = True
     try:                    # (the game checks the mod's scripts when it starts: it must see this version's files)
         if companion.install.install():
