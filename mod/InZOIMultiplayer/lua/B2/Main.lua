@@ -586,13 +586,16 @@ local function drive(key, p, dt)
     elseif p.act then
         p.answering = false
     end
-    -- (answering a social done to it here: the game lines the two Zois up - not forced where they are meanwhile; what's
-    -- drawn is still their own skeleton where they are, B1)
-    if p.skel and not p.act and not p.hidden and not p.answering and #p.trail > 0 then
+    if p.skel and not p.hidden and #p.trail > 0 then
         -- Their skeleton comes in (the companion's "skel"): the pose is theirs, frame by frame, so the puppet doesn't
         -- walk (a walk lags, gets stuck on furniture, is put back by teleports - the bones then slid around a body in
         -- another place). Every tick it's set where they are, smoothed over the trail (interp_target), simulation only
         -- (no teleport effects); only another floor or a big jump is a real teleport.
+        -- Also while it does a social with my Zoi (p.act: the only actions acted out while their skeleton comes in) or
+        -- answers one (p.answering): the game walks the two Zois into place for it, but this puppet, drawn with their
+        -- bones, has no walk of its own (seen live: it stood in WalkToContext for minutes, the couple dance never
+        -- began). Where they are in their game is where their game walked them for the same social. (Before 0.9.65 it
+        -- was left where it stood then - and while answering, the old steering below pushed it around.)
         local tgt = interp_target(p) or p.trail[#p.trail]
         local mc = c:GetMovementComponent()
         mc.InputVector = UE.FVector(0, 0, 0)

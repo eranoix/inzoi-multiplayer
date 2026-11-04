@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.64"
+VERSION = "0.9.65"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
@@ -1103,6 +1103,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             if r.act_sig is None:
                 act = "skip"
         sig = json.dumps(act, sort_keys=True) if act and act != "skip" else None
+        if sig and sig == r.act_sig and act.get("bag") == r.__dict__.get("ok_bag"):
+            r.ok_seen = time.time()          # (a social with me said yes to, still going on: not asked again, couple.py)
         if act == "skip":
             pass
         elif sig != r.act_sig:
@@ -1119,6 +1121,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     if act.get("player") == self.me_id and not self.mirror_ok(r, act["bag"]):
                         self.ask_local(r, act["bag"], op)    # (couple.py: a popup first, then it plays here)
                     else:
+                        if act.get("player") == self.me_id:
+                            r.ok_bag, r.ok_seen = act["bag"], time.time()
                         self.mail.op("act", key=r.pid, **op)
                         self.tele.rec("note", text=f"{r.name}: act {act['bag']} sent")
         if isinstance(act, dict) and act.get("npc") and st.get("anim") and st["anim"] != r.anim:   # (not "skip")

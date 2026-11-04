@@ -331,6 +331,12 @@ async def test_couple():
     ben.game.call = busy_ben
     await ben_routes["/partner/respond"]({"id": q["id"], "accept": True, "always": True})
     assert ("interaction.cancel", {"entity_id": 20}) in ben_calls, ben_calls
+    ben_calls.clear()
+    asleep = lambda tool, **kw: ben_calls.append((tool, kw)) or (                      # noqa: E731
+        {"playing": True, "interaction_bag_id": "Sleep_Bed"} if tool == "interaction.get_current" else {})
+    ben.game.call = asleep
+    await ben.free_my_zoi("Co_DeepHug_FemaleToMale_Success")
+    assert not [c for c in ben_calls if c[0] == "interaction.cancel"], "woken up by a yes"
     ben.game.call = keep_call
     print("a yes frees my Zoi from what it does on its own (it answers the partner's): ok")
     assert await until(lambda: len(ops(ana, "social")) > n_social)
@@ -353,6 +359,21 @@ async def test_couple():
     out = await ana_routes["/partner/respond"]({"id": lq["id"], "accept": True})
     assert out["result"]["state"] == "done" and ops(ana, "act")[-1]["bag"] == "Coop_Pillow_Fight"
     print("interactions ask first (popup), always yes, game-menu ones too: ok")
+    # the same one said yes to, starting over in their game (a couple dance after its walk into place): not asked again
+    # while it's still going on; long over, it is
+    ana.__dict__.pop("_accepted", None)
+    pillow = {"n": 60, "city": "Dowon", "x": 1, "y": 2, "z": 3, "act": {"bag": "Coop_Pillow_Fight", "player": ana.me_id}}
+    ana.set_state(rb, pillow)                                  # (still going on: seen again)
+    ana.set_state(rb, {**pillow, "n": 61, "act": None})       # (stopped...)
+    n_act, n_req = len(ops(ana, "act")), len(ana.requests)
+    ana.set_state(rb, {**pillow, "n": 62})                     # (...and started over)
+    assert len(ops(ana, "act")) == n_act + 1 and len(ana.requests) == n_req, "the same yes asked again"
+    ana.set_state(rb, {**pillow, "n": 63, "act": None})
+    rb.ok_seen -= 60                                           # (a minute later: another time)
+    ana.set_state(rb, {**pillow, "n": 64})
+    assert len(ops(ana, "act")) == n_act + 1 and len(ana.requests) == n_req + 1
+    ana.requests.clear()
+    print("a social said yes to, starting over while it goes on, isn't asked again: ok")
     # their Zoi only answers what mine does to it (the game's own Feedback / turning to face it): nothing asked, nothing
     # acted out - here the game already makes their Zoi answer mine
     ana.__dict__.pop("_accepted", None)

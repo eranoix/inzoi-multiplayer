@@ -36,8 +36,12 @@ def main():
         assert answering(bag) is False, f"{bag}: let through"
     print("a partner's Zoi answers the socials done to it here; what it starts on its own is still stopped: ok")
 
-    # the controller: answering keeps the stop away, and the skeleton doesn't force its place meanwhile
-    assert "not p.answering then" in src and "not p.hidden and not p.answering and #p.trail > 0" in src
+    # the controller: answering keeps the stop away; the skeleton places it all the same while it does or answers a
+    # social with mine (the game can't walk it: it stood in WalkToContext, the couple dance never began), and the old
+    # steering never runs then (it pushed an answering puppet around)
+    assert "not p.answering then" in src
+    assert "if p.skel and not p.hidden and #p.trail > 0 then" in src, "the skeleton doesn't place it during a social"
+    assert "p.skel and not p.act" not in src and "not p.answering and #p.trail" not in src
     print("B2 social tests passed")
 
 

@@ -377,7 +377,10 @@ class Couple:
     def mirror_ok(self, r, bag: str) -> bool:
         """The partner's Zoi does something to mine in their game: it plays here without asking when it's an "always
         yes" or right after a yes (the couple action just accepted)."""
-        return self.always_yes("interaction", bag) or time.time() < self.__dict__.get("_accepted", {}).get(r.pid, 0)
+        return (self.always_yes("interaction", bag) or time.time() < self.__dict__.get("_accepted", {}).get(r.pid, 0)
+                # (the same one, played here a moment ago and still going on in their game: a couple dance starting over
+                # after its walk into place was asked again a minute later)
+                or (bag == r.__dict__.get("ok_bag") and time.time() - r.__dict__.get("ok_seen", 0) < ACCEPTED_FOR))
 
     def label_for(self, bag: str) -> str:
         """A readable name for an interaction id: the game's own (from the last list) or one made from the id."""
@@ -423,6 +426,9 @@ class Couple:
         if q.get("local"):                               # their Zoi already did it in their game: show it here or not
             if accept:
                 await self.free_my_zoi(q.get("bag"))
+                r = self.remotes.get(q["from_id"])
+                if r:
+                    r.ok_bag, r.ok_seen = q.get("bag"), time.time()
                 self.mail.op("act", key=q["from_id"], **q["op"])
             return {"ok": True, "result": {"state": "done" if accept else "declined"}}
         if not (self.writer and self.me_id):
@@ -453,8 +459,8 @@ class Couple:
             cur = await self.g(self.game.call, "interaction.get_current", entity_id=self.my_entity) or {}
             doing = str(cur.get("interaction_bag_id") or "")
             if not cur.get("playing") or not doing or re.match(r"(Co_|Coop|Social)", doing, re.I) \
-                    or ANSWER_BAG.search(doing):
-                return
+                    or ANSWER_BAG.search(doing) or re.search(r"Sleep", doing, re.I):
+                return                                   # (asleep stays asleep: a yes by itself after 5 s never wakes it)
             await self.g(self.game.call, "interaction.cancel", entity_id=self.my_entity)
             log.info("my Zoi stops %s to answer %s", doing, bag or "the partner")
         except Exception as e:                           # noqa: BLE001 - the game refused: it answers when it can
