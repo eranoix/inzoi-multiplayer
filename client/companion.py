@@ -53,7 +53,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.91"
+VERSION = "0.9.92"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
@@ -68,6 +68,8 @@ NEED_LOW = -40.0                   # a need under this: my Zoi's own needs first
 SPOT_SAME = 60.0                   # cm: two Zois this close on the same object are on one spot (check_spot)
 SPOT_SETTLE = 2.0                  # s after my action began before its spot counts (still walking there)
 SPOT_AGAIN = 20.0                  # s between two moves of my Zoi to another spot
+SEAT_FRESH = 5.0                   # s: the spots a partner's Zoi occupies in their game, held here while this fresh
+SEAT_MAX = 8                       # spots at most per partner (a Zoi has one or two: a chair, the computer before it)
 STUCK_WALK = 15.0                  # s a partner's Zoi may stand in WalkToContext before it's freed (unstick_puppets)
 AGING_SLOWER = 200                 # every phase of life lasts this many times the game's own (the players' choice:
                                    # 10x on 2026-11-03, 200x on 2026-11-04)
@@ -1514,6 +1516,12 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             # a fresh controller re-reads the profiles; ops sent before it started were missed
             for r in self.remotes.values():
                 r.act_sig = r.anim = r.outfit = None
+                r.seat_sig = None            # (their spots: held again by this controller)
+            held = [h for h in self.cfg.get("held_seats") or [] if isinstance(h, str)]
+            if held:                         # (the save keeps who occupies a spot: the last session's go back first)
+                self.mail.op("unseat", holds=held)
+                self.cfg["held_seats"] = []
+                self.save_cfg()
         elif kind == "up":
             now = self.mod["beat"] = time.time()
             self.mod["state"] = "running"
@@ -1585,6 +1593,10 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             log.info("[game] %s", text)
         elif kind == "refused":
             self.on_refused(text)
+        elif kind == "seats":
+            self.on_my_seats(text)
+        elif kind == "seat":
+            self.on_seat_report(text)
 
     # ------------------------------------------------------------------ my Zoi -> server
     def describe_act(self, a: dict) -> dict | None:
@@ -1736,6 +1748,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                 if self._house_n % 2 == 0 and self.world == "play":
                     await self.sample_puppets()              # (twice a second: the telemetry's view of them)
                 if self._house_n % 4 == 2 and self.world == "play" and self.my_entity:
+                    self.hold_seats()                        # (every second: their spots are their Zoi's here)
                     self.check_spot()                        # (every second: two bodies in one place)
                 if self._house_n % 12 == 3 and self.world == "play" and self.my_entity:
                     await self.needs_guard()                 # (every 3 s: needs before chats)
@@ -1918,8 +1931,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
         for r in self.remotes.values():
             st = r.state or {}
             ract = st.get("act") if isinstance(st.get("act"), dict) else None
-            if not ract or ract.get("obj") != act.get("obj") or now - r.state_at > 3:
-                continue
+            if not ract or ract.get("obj") != act.get("obj") or now - r.state_at > 3 or "seats" in st:
+                continue                                 # ("seats": their spots are held here - hold_seats, a clash)
             try:
                 same_obj = abs(float(ract["ox"]) - float(act["ox"])) < 50 and abs(float(ract["oy"]) - float(act["oy"])) < 50
                 gap = ((float(st["x"]) - me["x"]) ** 2 + (float(st["y"]) - me["y"]) ** 2) ** 0.5
@@ -1936,6 +1949,90 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             self.mail.op("reslot", entity=int(self.my_entity), bag=act["bag"], target=int(self.cur_target),
                          ax=float(st["x"]), ay=float(st["y"]))
             return
+
+    def on_my_seats(self, text: str):
+        """The controller read the spots my Zoi occupies in my game ("Table x y z Slot|...": a chair, a side of the bed,
+        the place at the computer - the game's own choice): they go out with my state, and my partners' games make
+        those same spots my Zoi's there (hold_seats)."""
+        seats = []
+        for part in filter(None, (text or "").split("|")):
+            t, *rest = part.split(" ", 4)
+            if len(rest) < 4:
+                continue
+            try:
+                seats.append({"t": t, "x": float(rest[0]), "y": float(rest[1]), "z": float(rest[2]), "s": rest[3]})
+            except ValueError:
+                continue
+        self.my_seats = seats[:SEAT_MAX]
+        if isinstance(getattr(self, "state_base", None), dict):
+            self.state_base = {**self.state_base, "seats": self.my_seats}     # (out with the next position, 0.1 s)
+
+    def hold_seats(self):
+        """Two bodies never share one place: the spots a partner's Zoi occupies in their game (their "seats") are made
+        their Zoi's here, the game's own occupancy - no Zoi here is given them, mine by order or by its own will. Their
+        Zoi here is only drawn by their skeleton: those spots stayed free, and my Zoi sat on it (2026-11-04). Sent on a
+        change (and once at the start, to clear what a controller still holds); none while they're away, hidden or their
+        skeleton isn't coming (their Zoi here then does its actions itself, and those take their spots)."""
+        now = time.time()
+        for pid, r in self.remotes.items():
+            e = self.puppet_ids.get(pid)
+            if not e:
+                r.seat_sig = None
+                continue
+            st = r.state or {}
+            want = []
+            if r.spawned and not r.hidden and self.pose_live(r) and now - (r.state_at or 0) <= SEAT_FRESH \
+                    and isinstance(st.get("seats"), list):
+                want = [{"t": str(w["t"]), "x": float(w["x"]), "y": float(w["y"]), "z": float(w["z"]), "s": str(w["s"])}
+                        for w in st["seats"] if isinstance(w, dict) and w.get("t") and w.get("s")
+                        and all(isinstance(w.get(k), (int, float)) for k in ("x", "y", "z"))][:SEAT_MAX]
+            sig = f"{e}:{json.dumps(want, sort_keys=True)}"
+            if sig == r.__dict__.get("seat_sig"):
+                continue
+            r.seat_sig = sig
+            extra = {"site": st["site"]} if isinstance(st.get("site"), int) and st["site"] >= 0 else {}
+            self.mail.op("seat", key=pid, seats=want, **extra)
+
+    def on_seat_report(self, text: str):
+        """ "held obj slot entity|...": the spots this game holds for my partners' Zois (kept: the save keeps them, and
+        the next controller gives them back - see the "restart" report); "clash key obj slot who": a spot their Zoi has
+        in their game is someone's here."""
+        word, _, rest = (text or "").partition(" ")
+        if word == "held":
+            held = sorted(filter(None, rest.split("|")))
+            if held != (self.cfg.get("held_seats") or []):
+                self.cfg["held_seats"] = held
+                self.save_cfg()
+        elif word == "clash":
+            parts = rest.split(" ")
+            if len(parts) >= 4 and parts[1].lstrip("-").isdigit() and parts[-1].lstrip("-").isdigit():
+                self.on_seat_clash(parts[0], int(parts[1]), " ".join(parts[2:-1]), int(parts[-1]))
+
+    def on_seat_clash(self, key: str, obj: int, slot: str, who: int):
+        """A spot their Zoi has in their game is my Zoi's here: both got it at the same moment (each game had it free),
+        two bodies in one place. Whoever got there later moves (on a tie the host stays): if that's mine, it goes to the
+        other side of the object (a bed), else it gets up - its own will finds something else, never that spot (theirs
+        here now). Their game, by the same rule, keeps theirs. Someone else of this save on it: the game's own business."""
+        r = self.remotes.get(key)
+        if not r or not self.my_entity or who != int(self.my_entity):
+            return
+        now = time.time()
+        st = r.state or {}
+        mine = now - self.__dict__.get("cur_act_since", now)
+        try:
+            theirs = float(st.get("ts") or now) - float(st.get("act_t") or now) + (now - (r.state_at or now))
+        except (TypeError, ValueError):
+            theirs = 0.0
+        if mine > theirs + 0.5 or (abs(mine - theirs) <= 0.5 and self.leader == self.me_id):
+            log.info("%s's Zoi and mine are on one spot (%s): mine got there first and stays", r.name, slot)
+            return
+        if now - self.__dict__.get("_reslot_at", 0) < SPOT_AGAIN:
+            return
+        self._reslot_at = now
+        log.info("%s's Zoi and mine are on one spot (%s): theirs got there first, mine moves", r.name, slot)
+        self.mail.op("reslot", entity=int(self.my_entity), bag=(self.cur_act or {}).get("bag") or "", target=obj,
+                     ax=float(st.get("x") or 0), ay=float(st.get("y") or 0), stand=True, swap_only=True,
+                     mine=int(self.__dict__.get("cur_target") or -1) == obj)
 
     async def mirror_motions(self):
         """Play on each partner's Zoi exactly the montages their own game plays on them (posture, arms, face), each in
@@ -2936,7 +3033,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             lots[site] = ""
             asyncio.get_running_loop().create_task(self.lookup_lot(site))
         c = self.my_clock
-        out = {"lot": lots.get(site, ""), "speed": c[2] if c else None, "time": list(c[:2]) if c else None}
+        out = {"lot": lots.get(site, ""), "speed": c[2] if c else None, "time": list(c[:2]) if c else None,
+               "seats": self.__dict__.get("my_seats") or []}
         if self.clock_mode() == "host" and self.leader and self.leader != self.me_id:
             out["clock"] = None                          # never pushes anyone's clock
         return out

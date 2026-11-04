@@ -17,6 +17,9 @@
 --   adopt   {key, entity, x?, y?, z?}                          the player's Zoi already lives here (a member of the
 --           family in this save): drive that one instead of a copy; despawn gives it back to the game
 --   despawn {key}
+--   seat    {key, seats = {{t, x, y, z, s}, ...}, site?}  the spots that player's Zoi occupies in their game: made its
+--           occupancy here (no Zoi here is given them); reports "seats <mine>", "seat held ...", "seat clash ..."
+--   unseat  {holds = {"obj slot entity", ...}}             spots an earlier session held, given back
 --   social  {rid, bag, entity?, key?}   couple actions: the player's own Zoi (`entity`, else the possessed one) runs
 --           interaction `bag` on the puppet of `key` (or on its own without key); "anim:<id>" plays a motion instead.
 --           Reports "social <rid> ok|fail <text>".
@@ -310,6 +313,188 @@ local function answering(bag)
         or b:find("social", 1, true) ~= nil
 end
 
+-- ---------------------------------------------------------------- seats
+-- Two bodies never share one place. The game keeps it so for every Zoi it moves: a spot of an object (a seat, a side
+-- of the bed, the place at the computer) has one occupant at a time, and no Zoi is given a spot someone occupies. A
+-- partner's Zoi here, though, is only drawn by their skeleton: the spots it sits on in their game stayed free here,
+-- and my Zoi sat on it (2026-11-04). So each game tells which spots its own Zoi occupies - the game's own choice,
+-- the chair at the desk and all ("seats" report) - and the other gives those same spots, on the same objects, to that
+-- partner's Zoi here as their occupant (the slot's own occupancy: every Zoi here respects it, mine by order or by its
+-- own will). A spot my Zoi got at the same moment is told back ("seat clash"): whoever got there later moves.
+local SEATS_EVERY = 1.0      -- s: the spots my Zoi occupies, read again
+local SEATS_LOOK = 350       -- cm: objects this close to my Zoi are looked at (a bed's side is 1.3 m from its middle)
+local SEAT_FIND = 60         -- cm: the same object here (same kind) is this close to where it is in their game
+local SEAT_AGAIN = 2.0       -- s: a held spot the game gave back (their Zoi's actions cleared here) is taken again
+local SEAT_REASON = 1        -- EB1SlotOccupyingReason.Interaction, as an action takes a spot
+
+local function slot_comp(o)
+    local ok, sc = pcall(function() return o:GetComponent(14) end)  -- (EB2ComponentType.Slot)
+    return ok and sc or nil
+end
+
+-- The spots my Zoi occupies now: "Table x y z Slot|..." (sorted: the same spots, the same text).
+local function my_seats()
+    local m = em()
+    local c = S.me and char(S.me)
+    if not c then return "" end
+    local l = c:GetLocation()
+    local site = m:FindSite(c:GetLocatedSiteId())
+    if not site then return "" end
+    local SC, out, seen = INZOI.FB2SlotComponent, {}, {}
+    local objs = site:GetObjects()
+    for i = 1, objs:Num() do
+        local o = m:FindGameObject(objs:Get(i))
+        if o then
+            local ol = o:GetLocation()
+            if math.abs(ol.X - l.X) < SEATS_LOOK and math.abs(ol.Y - l.Y) < SEATS_LOOK and math.abs(ol.Z - l.Z) < 250 then
+                local sc = slot_comp(o)
+                local infos = sc and SC.GetSlotStateInfos(sc)
+                for k = 1, infos and infos:Num() or 0 do
+                    local it = infos:Get(k)
+                    if it.OccupyingEntityId.Value == S.me then
+                        local s = string.format("%s %.0f %.0f %.0f %s", tostring(o:GetObjectTableId()), ol.X, ol.Y, ol.Z,
+                            tostring(it.SlotName))
+                        if not seen[s] then seen[s] = true; out[#out + 1] = s end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(out)
+    return table.concat(out, "|")
+end
+
+-- That object here: the same kind, within SEAT_FIND cm of where it is in their game.
+local function seat_object(site, t, x, y, z)
+    local m = em()
+    local s = site and m:FindSite(site)
+    if not s then return nil end
+    local objs = s:GetObjects()
+    local best, bestD = nil, SEAT_FIND
+    for i = 1, objs:Num() do
+        local id = objs:Get(i)
+        local o = m:FindGameObject(id)
+        if o and tostring(o:GetObjectTableId()) == t then
+            local l = o:GetLocation()
+            local d = math.sqrt((l.X - x) ^ 2 + (l.Y - y) ^ 2 + (l.Z - z) ^ 2)
+            if d < bestD then best, bestD = id.Value, d end
+        end
+    end
+    return best
+end
+
+local function seat_occupant(sc, slot)
+    local infos = INZOI.FB2SlotComponent.GetSlotStateInfos(sc)
+    for k = 1, infos:Num() do
+        local it = infos:Get(k)
+        if tostring(it.SlotName) == slot and it.OccupyingEntityId.Value ~= -1 then return it.OccupyingEntityId.Value end
+    end
+    return -1
+end
+
+-- h = {obj, slot}: the spot is made that puppet's (its occupant). Returns "held", "gone", or who has it instead.
+local function seat_take(p, h)
+    local o = em():FindGameObject(eid(h.obj))
+    local sc = o and slot_comp(o)
+    if not sc then return "gone" end
+    local who = seat_occupant(sc, h.slot)
+    if who == p.id then return "held" end
+    if who ~= -1 then return who end
+    local param = INZOI.FB2TargetSlotParam()
+    param.SlotName = h.slot
+    param.OccupyEntityId = eid(p.id)
+    param.OccupyingReason = SEAT_REASON
+    pcall(INZOI.FB2SlotComponent.TryOccupySlot, sc, inzoi.EB1SlotType and inzoi.EB1SlotType.Interaction or 1, param)
+    who = seat_occupant(sc, h.slot)
+    return who == p.id and "held" or (who ~= -1 and who or "refused")
+end
+
+local function seat_give_back(p, h)
+    pcall(function()
+        local o = em():FindGameObject(eid(h.obj))
+        local sc = o and slot_comp(o)
+        if sc and seat_occupant(sc, h.slot) == p.id then
+            INZOI.FB2SlotComponent.RemoveOccupyingReasonBySlotName(sc, h.slot, SEAT_REASON)
+        end
+    end)
+end
+
+-- What this game holds for the partners' Zois, for the companion to keep: "obj slot entity|..." (after a crash or a
+-- reload the save still has them: the next controller gets them back to give back).
+local function seats_held_report()
+    local out = {}
+    for _, p in pairs(PUPPETS) do
+        for _, h in pairs(p.seats or {}) do
+            if h.held then out[#out + 1] = string.format("%d %s %d", h.obj, h.slot, p.id) end
+        end
+    end
+    table.sort(out)
+    local text = table.concat(out, "|")
+    if text ~= S.seatsHeld then
+        S.seatsHeld = text
+        report("seat", "held " .. text)
+    end
+end
+
+-- Hold, for this puppet, the spots `want` ({{t, x, y, z, s}, ...}, from their game); give back the others.
+local function seats_set(key, p, want, site)
+    local keep, out = {}, {}
+    for _, w in ipairs(want or {}) do
+        local obj = seat_object(site, tostring(w.t), w.x, w.y, w.z)
+        if obj then keep[obj .. "|" .. tostring(w.s)] = { obj = obj, slot = tostring(w.s), t = tostring(w.t) } end
+    end
+    for k, h in pairs(p.seats or {}) do
+        if not keep[k] then
+            if h.held then seat_give_back(p, h); out[#out + 1] = "gave back " .. h.t .. " " .. h.slot end
+        else
+            keep[k] = h                                 -- (still theirs: as it was)
+        end
+    end
+    p.seats = keep
+    for _, h in pairs(keep) do
+        if not h.held then
+            local r = seat_take(p, h)
+            h.held, h.tried = r == "held", S.clock
+            if r == "held" then
+                out[#out + 1] = "holds " .. h.t .. " " .. h.slot
+            elseif type(r) == "number" and not h.clashed then
+                h.clashed = true
+                report("seat", string.format("clash %s %d %s %d", key, h.obj, h.slot, r))
+                out[#out + 1] = string.format("%s %s is %d's", h.t, h.slot, r)
+            end
+        end
+    end
+    seats_held_report()
+    return #out > 0 and (key .. " " .. table.concat(out, ", ")) or nil
+end
+
+local function seats_free(p)
+    for _, h in pairs(p.seats or {}) do
+        if h.held then seat_give_back(p, h) end
+    end
+    p.seats = nil
+    seats_held_report()
+end
+
+-- Every SEAT_AGAIN s: a held spot the game took from their Zoi (its actions cleared here) or one that was someone
+-- else's is taken (again) when free.
+local function seats_keep()
+    for key, p in pairs(PUPPETS) do
+        for _, h in pairs(p.seats or {}) do
+            if S.clock - (h.tried or 0) >= SEAT_AGAIN then
+                h.tried = S.clock
+                local r = seat_take(p, h)
+                h.held = r == "held"
+                if type(r) == "number" and not h.clashed then
+                    h.clashed = true
+                    report("seat", string.format("clash %s %d %s %d", key, h.obj, h.slot, r))
+                end
+            end
+        end
+    end
+    seats_held_report()
+end
+
 -- ---------------------------------------------------------------- puppets
 local function spawn_puppet(op)
     local member = S.members[op.key]
@@ -403,6 +588,7 @@ local function despawn_puppet(op)
     else
         cli(string.format("zoi.destroy entity_id=%d", p.id))
     end
+    pcall(seats_free, p)
     FROZEN[p.id] = nil
     PUPPETS[op.key] = nil
     report("despawned", op.key)
@@ -812,6 +998,7 @@ local OPS = {
         local p = PUPPETS[op.key]
         if not p then return nil end
         p.hidden = op.on ~= false
+        if p.hidden then pcall(seats_free, p) end       -- (not here: their spots are free here)
         char(p.id):SetCharacterHiddenInGame(p.hidden, "mp_away")
         return string.format("%s %s", op.key, p.hidden and "hidden" or "shown")
     end,
@@ -941,14 +1128,21 @@ local OPS = {
         end
         return string.format("dust and wear set on %d object(s)%s", done, missing > 0 and (", " .. missing .. " not here") or "")
     end,
-    -- {entity, bag, target, ax, ay}: my Zoi is on the spot of an object (a side of the bed, a seat) where my partner's Zoi
-    -- is in their game - two bodies in one place. Mine goes to the object's other spot: the same slot on the other
-    -- side (InteractionSlot_01_l <-> _01_r), else the slot farthest from them; its action is queued again there (the
-    -- game picks the slot nearest to the point given).
+    -- {entity, bag, target, ax, ay, stand?}: my Zoi is on the spot of an object (a side of the bed, a seat) where my
+    -- partner's Zoi is in their game - two bodies in one place. Mine goes to the object's other spot: the same slot on
+    -- the other side (InteractionSlot_01_l <-> _01_r), else the free slot farthest from them; its action is queued again
+    -- there (the game picks the slot nearest to the point given). stand: with no other free spot (a chair has one), or
+    -- an action that isn't on that object, my Zoi gets up instead - its own will finds something else to do.
     reslot = function(op)
         local m = em()
         local c, o = char(op.entity), m:FindGameObject(eid(op.target))
-        if not c or not o then return "reslot: nothing to move" end
+        local function stand(why)
+            if not op.stand or not c then return "reslot: " .. why end
+            pcall(clear_all, op.entity)
+            return "reslot: " .. why .. " - got up"
+        end
+        if not c or not o then return stand("nothing to move") end
+        if op.mine == false then return stand("their spot isn't on what my Zoi is doing") end
         local SC = INZOI.FB2SlotComponent
         local okC, sc = pcall(function() return o:GetComponent(14) end)  -- (EB2ComponentType.Slot)
         if not okC or not sc then return "reslot: " .. tostring(o:GetObjectTableId()) .. " has no spots" end
@@ -959,7 +1153,9 @@ local OPS = {
             local it = infos:Get(i)
             local name = tostring(it.SlotName)
             local okL, has, loc = pcall(SC.GetSlotLocationBySlotName, sc, it.SlotName)
-            if okL and has and loc and not name:match("Fx") and not name:match("Reform") then
+            local who = it.OccupyingEntityId.Value
+            if okL and has and loc and not name:match("Fx") and not name:match("Reform")
+                    and (who == -1 or who == op.entity) then   -- (someone else's spot - their Zoi's here too - isn't free)
                 local s = { name = name, x = loc.X, y = loc.Y, z = loc.Z }
                 slots[#slots + 1] = s
                 local d = (loc.X - me.X) ^ 2 + (loc.Y - me.Y) ^ 2
@@ -981,13 +1177,13 @@ local OPS = {
         for _, s in ipairs(slots) do
             if s.name == other and far(s) > 60 then want = s end
         end
-        if not want then
+        if not want and not op.swap_only then          -- (swap_only: only the other side - a bed's - else get up)
             local best = 80
             for _, s in ipairs(slots) do
                 if s.name ~= mine.name and far(s) > best then want, best = s, far(s) end
             end
         end
-        if not want then return "reslot: no free spot on " .. tostring(o:GetObjectTableId()) end
+        if not want then return stand("no free spot on " .. tostring(o:GetObjectTableId())) end
         pcall(clear_all, op.entity)
         queue_interaction(op.entity, op.bag, op.target, { x = want.x, y = want.y, z = want.z })
         return string.format("reslot: %s moved from %s to %s on %s", tostring(op.bag), mine.name, want.name,
@@ -1043,6 +1239,29 @@ local OPS = {
         p.pose = op.on and true or nil
         if p.pose then stop_direct(char(p.id)) end
         return nil
+    end,
+    -- {key, seats = {{t, x, y, z, s}, ...}, site}: the spots that player's Zoi occupies in their game (object kind and
+    -- place, slot name): here they're made their Zoi's; the ones it no longer has are given back.
+    seat = function(op)
+        local p = PUPPETS[op.key]
+        if not p then return nil end
+        local site = op.site and eid(op.site) or char(p.id):GetLocatedSiteId()
+        return seats_set(op.key, p, op.seats, site)
+    end,
+    -- {holds = {"obj slot entity", ...}}: spots an earlier controller held (the save kept them): given back, if that
+    -- Zoi still has them and nobody here asks for them again.
+    unseat = function(op)
+        local SC, n = INZOI.FB2SlotComponent, 0
+        for _, line in ipairs(op.holds or {}) do
+            local obj, slot, ent = tostring(line):match("^(%d+) (.+) (%d+)$")
+            local o = obj and em():FindGameObject(eid(tonumber(obj)))
+            local sc = o and slot_comp(o)
+            if sc and seat_occupant(sc, slot) == tonumber(ent) then
+                pcall(SC.RemoveOccupyingReasonBySlotName, sc, slot, SEAT_REASON)
+                n = n + 1
+            end
+        end
+        return n > 0 and string.format("unseat: %d spot(s) an earlier session held given back", n) or nil
     end,
     -- {key}: a Zoi of this save stands for that player (adopted: their family member here): it takes their look as
     -- their own game has it (hair, face, body, age's look...: their profile from MPBulk), which this save's copy of them
@@ -1357,6 +1576,23 @@ function M.on_tick(self, dt)
         local ok, err = pcall(poll)
         if not ok then log_limited("poll ERR " .. tostring(err)) end
     end
+    S.seatsT = (S.seatsT or 0) + dt
+    if S.me and S.seatsT >= SEATS_EVERY then            -- the spots my Zoi occupies (sent on: the partners hold them)
+        S.seatsT = 0
+        local ok, text = pcall(my_seats)
+        if ok and (text ~= S.mySeats or S.clock - (S.mySeatsAt or -99) >= 10) then
+            S.mySeats, S.mySeatsAt = text, S.clock
+            report("seats", text)
+        elseif not ok then
+            log_limited("seats ERR " .. tostring(text), 30)
+        end
+    end
+    S.keepT = (S.keepT or 0) + dt
+    if S.keepT >= SEAT_AGAIN then
+        S.keepT = 0
+        local ok, err = pcall(seats_keep)
+        if not ok then log_limited("seats keep ERR " .. tostring(err), 30) end
+    end
     S.beat = (S.beat or 0) + dt
     if S.beat >= 2 then                                 -- heartbeat: the companion knows the mod is loaded and alive
         S.beat = 0
@@ -1376,6 +1612,7 @@ function M.on_tick(self, dt)
             p.errs = (p.errs or 0) + 1
             p.errT = p.errs == 1 and S.clock or p.errT
             if p.errs >= DRIVE_ERRS and S.clock - p.errT >= DRIVE_ERR_SPAN then
+                pcall(seats_free, p)
                 PUPPETS[key] = nil
                 FROZEN[p.id] = nil
                 if p.adopted then
