@@ -62,6 +62,21 @@ async def main():
     assert res is None, (res, n)
     print("the process list unreadable: not taken as closed: ok")
 
+    # started while inZOI already runs, its window never found (seen on Chey's PC: closed after half an hour, "inZOI
+    # didn't start"): the running process counts as started
+    real_never = launcher.NEVER_STARTED
+    launcher.NEVER_STARTED = 0
+    try:
+        res, n = await run([None] * 150, [True] * 150, max_steps=60)
+        assert res is None, f"closed under a running game whose window wasn't found: {res}"
+        res, n = await run([None] * 150, [True] * 5 + [False] * 150)
+        assert res == "inZOI closed", (res, n)
+        res, n = await run([None] * 150, [False] * 150, max_steps=60)
+        assert res == "inZOI didn't start", (res, n)
+    finally:
+        launcher.NEVER_STARTED = real_never
+    print("started under a running inZOI whose window isn't found: carries on; its process gone: closes: ok")
+
     # a failed name lookup isn't cached
     menu._names.clear()
     calls = []

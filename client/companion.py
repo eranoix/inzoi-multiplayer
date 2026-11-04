@@ -52,7 +52,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.61"
+VERSION = "0.9.62"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
