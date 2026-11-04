@@ -1125,6 +1125,10 @@ local OPS = {
         local ok, msg
         if op.now then      -- a couple action the player just asked for: it starts now, not after what's playing
             pcall(clear_all, me)
+            -- (and the partner's Zoi here is only a mirror of theirs, answering chats my Zoi started by itself: left as
+            -- it was, the game turned the player's request down - "Cheyenne Oliveira is busy right now" - once their
+            -- partner had said yes)
+            if target then pcall(clear_all, target) end
         end
         if anim then
             ok, msg = cli(string.format("motion.play entity_id=%d anim_id=%s", me, anim))
