@@ -181,7 +181,7 @@ def run_ticks(lua, main, seconds, feed=None, dt=0.05):
 
 
 def sender_tests():
-    """This player's own Zoi: the body and the head (face, neck, shoulders) read 30 times a second (0.9.66: the
+    """This player's own Zoi: the body and the head (face, neck, shoulders) read 60 times a second (0.9.67: the
     players' choice; at 15 the shoulders moved at half the body's pace); every frame carries both (A)."""
     lua = LuaRuntime()
     lua.execute(FAKE_GAME)
@@ -201,11 +201,11 @@ def sender_tests():
     run_ticks(lua, m, 2.0, walk, dt=1 / 60)
     nb, nh = len(g.BODY), len(g.HEAD)
     body_rate, head_rate = body.reads / nb / 2.0, head.reads / nh / 2.0
-    assert 27 <= body_rate <= 31, f"body read {body_rate:.1f} times a second (30 wanted)"
-    assert 27 <= head_rate <= 31, f"head read {head_rate:.1f} times a second (30 wanted)"
+    assert 57 <= body_rate <= 61, f"body read {body_rate:.1f} times a second (60 wanted)"
+    assert 57 <= head_rate <= 61, f"head read {head_rate:.1f} times a second (60 wanted)"
     frames = [s.value for s in list(g.SAVES.values())[saves_before:] if s.key == "posed"]
     parts = [f.split("|")[3] for f in frames]
-    assert 55 <= len(frames) <= 62 and set(parts) == {"A"}, (len(frames), set(parts))
+    assert 115 <= len(frames) <= 122 and set(parts) == {"A"}, (len(frames), set(parts))
     for f in frames:
         kid, seq, headp, part, rest = f.split("|")
         listed = [int(v) for i, v in enumerate(rest.split(",")) if rest and i % 8 == 0]
@@ -225,12 +225,12 @@ def sender_tests():
     run_ticks(lua, m, 3.0, walk, dt=1 / 60)
     far = body.reads / nb / 3.0
     assert 1.5 <= far <= 2.7, f"far: body read {far:.1f} times a second (2 wanted)"
-    g.CFG["in.poserate"] = "30"
+    g.CFG["in.poserate"] = "60"
     run_ticks(lua, m, 1.5, walk, dt=1 / 60)
     body.reads = 0
     run_ticks(lua, m, 2.0, walk, dt=1 / 60)
     near = body.reads / nb / 2.0
-    assert 27 <= near <= 31, f"near again: {near:.1f}/s"
+    assert 57 <= near <= 61, f"near again: {near:.1f}/s"
     print(f"nobody near: {far:.0f} frames a second; near again: {near:.0f}: ok")
 
 

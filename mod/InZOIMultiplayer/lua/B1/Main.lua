@@ -7,7 +7,7 @@
 --
 -- 2. Skeleton mirroring: what one PC shows of a player's Zoi is exactly what the other PC computed, bone by bone.
 --    Sending: this player's own Zoi (the possessed one): its actor's place and facing and the bones of its body (every
---    POSE_EVERY s: 30 a second) and head (the face, neck and shoulders: every FACE_EVERY s, also 30 a second) meshes (component space: position
+--    POSE_EVERY s: 60 a second) and head (the face, neck and shoulders: every FACE_EVERY s, also 60 a second) meshes (component space: position
 --    x10, rotation quaternion x10000, as integers) go to
 --      out/posek.cfg  a keyframe "kid|x,y,z,yaw|nbody|nhead|v,v,v,...,s,s,s,..." (7 values a bone, then 3 sizes a
 --                     bone) every KEY_EVERY s
@@ -22,9 +22,11 @@
 local M = {}
 local MOD = "InZOIMultiplayer"
 local LAST, EVERY, t = nil, 0.25, 0
--- (the head at 30 too since 0.9.66, the players' choice: at 15 the head mesh's neck and shoulders moved at half the
--- body's pace - the partner's Zoi looked out of step there. B frames - the body only - stay for a FACE_EVERY above it.)
-local POSE_EVERY, FACE_EVERY, KEY_EVERY, STALE, MAP_EVERY, CHECK_EVERY = 1 / 30, 1 / 30, 1.0, 1.5, 1.0, 0.5
+-- (60 a second, body and head, since 0.9.67 - the players' choice; the head at the body's pace since 0.9.66: at 15
+-- the head mesh's neck and shoulders moved at half the body's - out of step. A game drawing fewer frames than that
+-- sends one a frame. B frames - the body only - stay for a FACE_EVERY above POSE_EVERY.)
+local POSE_EVERY, FACE_EVERY, KEY_EVERY, STALE, MAP_EVERY, CHECK_EVERY = 1 / 60, 1 / 60, 1.0, 1.5, 1.0, 0.5
+local SLACK = 0.002          -- s early a frame may go: a 60 fps frame isn't exactly 1/60 s (not every other one)
 local LEADERS = { "CharacterMesh0", "Head" }
 local HEAD_FOLLOWERS = { Hair = true, FaceHair = true, Necklace = true, Earring = true, Hat = true, Eyewear = true }
 
@@ -520,13 +522,13 @@ local function glide(dt)
     end
 end
 
--- How often this player's skeleton goes out: in/poserate.cfg (frames a second), written by the companion - 30 while a
+-- How often this player's skeleton goes out: in/poserate.cfg (frames a second), written by the companion - 60 while a
 -- partner is near enough to be drawn, a few when nobody is (Unreal's relevancy: what nobody can see isn't sent at full
 -- rate; the far side doesn't even read it - receive). Missing: full rate.
 local sendT, sendEvery = 0, POSE_EVERY
 local function read_rate()
     local rate = tonumber(cfg_load("in", "poserate") or "")
-    sendEvery = (rate and rate > 0) and 1 / math.min(rate, 30) or POSE_EVERY
+    sendEvery = (rate and rate > 0) and 1 / math.min(rate, 60) or POSE_EVERY
 end
 
 local poseT = 0
@@ -538,12 +540,12 @@ local function pose_tick(dt)
         read_map()
         read_rate()
     end
-    if sendT >= sendEvery - 0.004 then                  -- (a 60 fps frame is 1/60 s: every 2nd one, not every 3rd)
+    if sendT >= sendEvery - SLACK then
         sendT = sendT - sendEvery
         if sendT < 0 or sendT > sendEvery then sendT = 0 end
         send_pose()
     end
-    if poseT >= POSE_EVERY - 0.004 then
+    if poseT >= POSE_EVERY - SLACK then
         poseT = poseT - POSE_EVERY
         if poseT < 0 or poseT > POSE_EVERY then poseT = 0 end
         for pid, r in pairs(remotes) do

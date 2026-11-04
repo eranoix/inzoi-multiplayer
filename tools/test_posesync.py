@@ -1,4 +1,4 @@
-"""The skeleton's send rate (client/posesync.py pose_rate, Unreal-style relevancy): full rate (30 a second) while a
+"""The skeleton's send rate (client/posesync.py pose_rate, Unreal-style relevancy): full rate (60 a second) while a
 partner's Zoi is near mine, a few frames a second once every partner is far; two distances so it doesn't flap at the
 edge; unknown positions -> full rate.
 
@@ -62,7 +62,7 @@ def main():
     p.pose_times = {"p2": [time.time() - 2.5 + i * 0.1 for i in range(25)]}
     p.pose_from["p2"] = time.time() - 0.04
     net = p.pose_net("p2")
-    assert 7 <= net["frames_s"] <= 9 and 30 <= net["frame_ms"] <= 200 and net["send_s"] in (2, 30), net
+    assert 7 <= net["frames_s"] <= 9 and 30 <= net["frame_ms"] <= 200 and net["send_s"] in (2, 60), net
     print("network line: frames a second, the newest frame's age, my send rate: ok")
     print("posesync tests passed")
 

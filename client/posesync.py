@@ -2,7 +2,7 @@
 
 What one PC shows of a player's Zoi is exactly what that player's own game computed, bone by bone: nothing is
 re-enacted (no interaction queued, no AI deciding which side of the bed). The B1 script writes this player's frames to
-<mod>/out/posek.cfg (a keyframe, every second) and <mod>/out/posed.cfg (the bones that differ from it, 30 times a
+<mod>/out/posek.cfg (a keyframe, every second) and <mod>/out/posed.cfg (the bones that differ from it, 60 times a
 second); this module sends each new one to every partner as {"t":"event","kind":"pose","data":{"k"|"d": text}} and
 writes what partners send to <mod>/in/posek_<pid>.cfg / posed_<pid>.cfg, plus <mod>/in/posemap.cfg ("pid=entity.v;":
 which Zoi here is whose, v changes when their outfit does, so the rig is rebuilt on the new clothes).
@@ -22,18 +22,31 @@ import install
 log = logging.getLogger("posesync")
 
 LIVE_FOR = 2.0            # s without a frame from a partner before the re-enactment takes over again
-SEND_EVERY = 1 / 60       # s between looks at the B1 script's files (it writes 30 frames a second)
+SEND_EVERY = 1 / 250      # s between looks at the B1 script's files (it writes 60 frames a second; timer_1ms)
 MAP_EVERY = 0.5
 # How often my skeleton goes out (Unreal's relevancy and update rate): FULL_RATE frames a second while a partner's Zoi
 # is within NEAR_IN cm of mine (drawn on their screen, mine on theirs), FAR_RATE once every partner is past NEAR_OUT
 # (not drawn there: the frames would only cost both games time; the far side doesn't even read them). The two
 # distances keep it from flapping at the edge.
-FULL_RATE, FAR_RATE = 30, 2
+FULL_RATE, FAR_RATE = 60, 2
 NEAR_IN, NEAR_OUT = 5000, 7000
 # Frames go out compressed (Gaffer's snapshot compression, the simple way): "z:" + base64(zlib(text)), a third of the
 # size (the numbers repeat a lot), to partners whose program reads it (ZIP_FROM on); the server only relays and keeps
 # the newest one of each kind for latecomers, as it is.
 ZIP_FROM, ZIP_OVER = (0, 9, 61), 512
+
+
+def timer_1ms() -> None:
+    """Windows wakes a sleeping program every 15.6 ms by default: polling the B1 script's files for 60 frames a second
+    (one every 16.7 ms) then misses some. Asking for 1 ms (timeBeginPeriod, as games and media players do) - for this
+    program only on Windows 10 2004 and later."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.WinDLL("winmm").timeBeginPeriod(1)
+    except (OSError, AttributeError) as e:
+        log.debug("1 ms timer: %s", e)
 
 
 def pack(text: str) -> str:
@@ -174,6 +187,7 @@ class PoseSync:
         out_dir = install.INSTALL_DIR / "out"
         in_dir = install.INSTALL_DIR / "in"
         map_at = 0.0
+        timer_1ms()                                      # (a look every 4 ms, really)
         while True:
             try:
                 partners = [r for r in self.remotes.values() if getattr(r, "pid", None)]
