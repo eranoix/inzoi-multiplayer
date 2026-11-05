@@ -87,9 +87,12 @@ class SharedState:
             self._share_done(ref, "ok" if got else "lost", recheck=False)
         objects = sum(k.startswith("obj:") for k in self.shared)
         looks = sum(k.startswith("look:") for k in self.shared)
-        named = [f"{k} v{v.get('v')}" for k, v in self.shared.items() if not k.startswith(("obj:", "look:"))]
+        floors = sum(k.startswith("floor:") for k in self.shared)
+        named = [f"{k} v{v.get('v')}" for k, v in self.shared.items()
+                 if not k.startswith(("obj:", "look:", "floor:"))]
         named += [f"{objects} object states"] if objects else []
         named += [f"{looks} objects' colours"] if looks else []
+        named += [f"{floors} rooms' floors"] if floors else []
         log.info("shared state from the server: %s", ", ".join(named) or "nothing yet")
         for key, item in list(self.shared.items()):
             self.shared_changed(key, item, snapshot=True)
@@ -300,7 +303,7 @@ class SharedState:
                 self.on_shared_family(item, snapshot)
             elif key.startswith("obj:"):
                 self.on_shared_object(key, item, snapshot)
-            elif key.startswith(("dirt:", "look:")):
+            elif key.startswith(("dirt:", "look:", "floor:")):
                 self.on_shared_detail(key, item, snapshot)
         except Exception as e:                           # noqa: BLE001
             log.warning("applying shared %s: %s", key, e)

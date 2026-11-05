@@ -19,13 +19,25 @@ Colours and materials change in build mode, on any PC: a change read here (an ob
 synced) goes up and is put on that object in the other game, part by part (build.set_material; a part the server has
 as default is reset). The first time a lot's looks are shared, the host's home is the starting point. Right after a
 look is put on an object here, the game's own rendering of it (a field it fills in) isn't taken for a change.
+
+    floor:<lot>:<key>   one room's floor: {"lv": storey, "n": border node keys, "g": material group, "i": index,
+                        "c": linear [r, g, b, a] or None, "x": [pattern scale, offset x, offset y, roughness]}
+
+Floors change in build mode too (a room repainted): the game's commands can set a room's floor (build.set_floor_material:
+group, index, tint) but not read one, so the controller reads the game's own built data (read_floors) - a room is its
+border on the site's grid, the same in both saves while the walls are (key: floor_key). A room repainted here goes up
+and is put on that room in the other game; one nobody has repainted since isn't touched (neither game's is newer). The
+pattern's scale and offset can't be put through the command, so only the material and its colour count; and a floor
+taken back to as built (no material at all) can't be put by any command - it stays as it is there. (They went only with the exact house, the whole property, which the other game
+takes at its next start: Chey's new kitchen floor never showed in Arthur's game, 2026-11-04.)
 """
 import asyncio
 import hashlib
 import logging
+import math
 import time
 
-from housesync import TRANSIENT
+from housesync import TRANSIENT, _payload
 from shared import version
 
 log = logging.getLogger("detailsync")
@@ -67,6 +79,87 @@ def parse_dirt(text: str):
             continue
         objs[detail_key(f[1], x, y, z)] = {"t": f[1], "p": [round(x), round(y), round(z)], "d": d, "w": w, "e": f[0]}
     return site, objs
+
+
+GRID_CM = 25.0           # the site's build grid: a border node key is (row << 16) + column
+
+
+def floor_key(lv: int, nodes) -> str:
+    """A room's floor, the same in both saves: its storey and border (the walls make it)."""
+    raw = f"{int(lv)}|{','.join(str(n) for n in sorted(int(n) for n in nodes))}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
+def node_xy(key: int) -> tuple[float, float]:
+    """A border node key -> its point on the site (site-relative cm, as build.scan_floors gives a room's nodes)."""
+    col = int(key) & 0xFFFF
+    if col >= 0x8000:
+        col -= 0x10000
+    row = (int(key) - col) >> 16
+    return col * GRID_CM + GRID_CM / 2, row * GRID_CM + GRID_CM / 2
+
+
+def parse_floors(text: str):
+    """The controller's "floors" report: "<lot>;storey|nodes|group|index|r,g,b,a|scale,x,y,rough;..." ->
+    (lot, {key: room})."""
+    parts = str(text or "").split(";")
+    try:
+        site = int(parts[0])
+    except (ValueError, IndexError):
+        return None, {}
+    rooms = {}
+    for line in parts[1:]:
+        f = line.split("|")
+        if len(f) < 6:
+            continue
+        try:
+            lv = int(f[0])
+            nodes = [int(n) for n in f[1].split(",") if n]
+            g, i = int(f[2]), int(f[3])
+            c = None if f[4] in ("", "-") else [round(float(v), 4) for v in f[4].split(",")][:4]
+            extra = [round(float(v), 4) for v in f[5].split(",")]
+        except ValueError:
+            continue
+        if not nodes:
+            continue
+        rooms[floor_key(lv, nodes)] = {"lv": lv, "n": nodes, "g": g, "i": i, "c": c, "x": extra}
+    return site, rooms
+
+
+def floor_look(f: dict) -> dict:
+    """What of a floor can be put through the game's command: its material and tint."""
+    c = f.get("c")
+    return {"g": int(f.get("g", -1)), "i": int(f.get("i", -1)), "c": list(c) if isinstance(c, list) else None}
+
+
+def same_floor(a: dict, b: dict) -> bool:
+    """The same material, the tint within 0.004 a channel (none on one side: the material decides)."""
+    if a["g"] != b["g"] or a["i"] != b["i"]:
+        return False
+    ca, cb = a.get("c"), b.get("c")
+    if not ca or not cb:
+        return True
+    return len(ca) == len(cb) and all(abs(x - y) <= 0.004 for x, y in zip(ca, cb))
+
+
+def room_index(scan: dict, room: dict) -> int | None:
+    """This room in build.scan_floors' list (whose room_index build.set_floor_material takes): the one on its storey
+    that starts at its first border node, else the one whose middle is nearest the middle of its border."""
+    lv = int(room["lv"])
+    rooms = [r for f in (scan or {}).get("floors") or [] if int(f.get("floor_level", 99999)) == lv
+             for r in f.get("rooms") or []]
+    fx, fy = node_xy(room["n"][0])
+    for r in rooms:
+        p = r.get("first_node") or {}
+        if abs(float(p.get("x", 1e9)) - fx) < 1 and abs(float(p.get("y", 1e9)) - fy) < 1:
+            return int(r["room_index"])
+    pts = [node_xy(n) for n in room["n"]]
+    mx, my = sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+    best = min(rooms, default=None, key=lambda r: math.hypot(float((r.get("center") or {}).get("x", 1e9)) - mx,
+                                                             float((r.get("center") or {}).get("y", 1e9)) - my))
+    if best and math.hypot(float(best["center"]["x"]) - mx, float(best["center"]["y"]) - my) <= 150:
+        return int(best["room_index"])
+    return None
 
 
 def dirt_differs(a, b) -> bool:
@@ -154,6 +247,11 @@ class DetailSync:
         self.look_srv: dict[str, dict] = {}        # key -> the server's look it was synced with
         self.look_put: dict[str, float] = {}       # key -> when a look was put on it here (its next read is the game's)
         self.look_busy = False
+        self.floor_site = self.floor_inst = None
+        self.floor_last: dict[str, dict] = {}      # key -> the last reading of that room's floor
+        self.floor_base: dict[str, dict] = {}      # key -> my game's floor as last synced (floor_look)
+        self.floor_srv: dict[str, dict] = {}       # key -> the server's floor it was synced with
+        self.floor_busy = False
 
     def is_host(self) -> bool:
         return bool(self.leader) and self.leader == self.me_id
@@ -172,6 +270,7 @@ class DetailSync:
                 if not home:
                     continue
                 self.mail.op("read_dirt", site=int(home))
+                self.mail.op("read_floors", site=int(home))
                 if time.time() - looked >= LOOK_EVERY and not self.look_busy and self.dirt_site == int(home):
                     looked = time.time()
                     self.shared_task(self.look_scan(int(home)))
@@ -338,6 +437,89 @@ class DetailSync:
                 log.debug("colours of %s: %s", o.get("t"), ex)
         log.info("colours brought to the shared home's on %d object(s)", len(put))
 
+    # ---------------------------------------------------------------- floors
+    def on_floors_report(self, text: str):
+        site, rooms = parse_floors(text)
+        if site is None or self.floor_busy:
+            return                                       # (a put on its way: the next read sees what it did)
+        self.shared_task(self.reconcile_floors(site, rooms))
+
+    async def reconcile_floors(self, site: int, rooms: dict):
+        first = site != self.floor_site or self.floor_inst != self.mod_instance()
+        if first:
+            self.floor_site, self.floor_inst, self.floor_base, self.floor_srv = site, self.mod_instance(), {}, {}
+            log.info("floors of lot %d: %d room(s)", site, len(rooms))
+        self.floor_last = rooms
+        put = []
+        for k, f in rooms.items():
+            key = f"floor:{site}:{k}"
+            if key in self.shared_inflight:
+                continue
+            m, item, base = floor_look(f), self.shared.get(key), self.floor_base.get(k)
+            if item is None:
+                if base is None:
+                    # (a room nobody has repainted since the floors are synced: each game's stays - neither is newer,
+                    # and one put over the other would undo a player's work. From its first repaint on, it's shared.)
+                    self.floor_base[k] = m
+                elif not same_floor(m, base):
+                    self.floor_base[k] = self.floor_srv[k] = m
+                    self.shared_task(self.share(key, f))
+                continue
+            sv = floor_look(item.get("value") or {})
+            if first or base is None or sv != self.floor_srv.get(k):
+                self.floor_srv[k] = sv                   # (the server's changed - or this is the first look at it)
+                if not same_floor(m, sv) and sv["g"] >= 0:
+                    put.append((k, f, sv))
+                else:
+                    if not same_floor(m, sv):            # (back to the floor as built: no command puts that)
+                        log.info("a floor taken back to as built in my partner's game (storey %d) can't be put here "
+                                 "by the game's commands: it stays as it is", f["lv"])
+                    self.floor_base[k] = m
+                continue
+            if not same_floor(m, base):                  # (repainted here)
+                self.floor_base[k] = self.floor_srv[k] = m
+                self.shared_task(self.share(key, f, base=version(item)))
+                log.info("a floor repainted here (storey %d): shared", f["lv"])
+        if put:
+            self.floor_busy = True
+            try:
+                done = await asyncio.to_thread(self.put_floors, site, put)
+            finally:
+                self.floor_busy = False
+            for k, f, sv in put:
+                if k in done:
+                    self.floor_base[k] = sv
+                else:
+                    self.floor_srv.pop(k, None)          # (not put - not home, a room it couldn't find: next read)
+
+    def put_floors(self, site: int, put: list) -> set:
+        """Each room's floor here as the server has it (the game's build.set_floor_material: material and tint)."""
+        if not self.at_home_now(site):
+            return set()                                 # (the commands work on the lot my Zoi is on)
+        try:
+            scan = _payload(self.game.call("build.scan_floors", Limit=0))
+        except Exception as e:                           # noqa: BLE001
+            log.debug("floors: scan: %s", e)
+            return set()
+        done = set()
+        for k, f, want in put:
+            ri = room_index(scan, f)
+            if ri is None:
+                log.debug("floors: room %s (storey %d) not found here", k, f["lv"])
+                continue
+            args = {"material_group": want["g"], "material_index": want["i"], "floor_level": int(f["lv"]),
+                    "room_index": ri}
+            if want.get("c"):
+                args["Color"] = srgb_hex(want["c"])
+            try:
+                self.game.call("build.set_floor_material", **args)
+                done.add(k)
+            except Exception as e:                       # noqa: BLE001
+                log.debug("floors: room %d: %s", ri, e)
+        if done:
+            log.info("floors brought to the shared home's in %d room(s)", len(done))
+        return done
+
     # ---------------------------------------------------------------- the server's word
     def on_shared_detail(self, key: str, item: dict | None, snapshot: bool):
         """A partner's dust or colours (or my own, confirmed): brought into my game at the next read (dirt) or now
@@ -352,6 +534,10 @@ class DetailSync:
         if parts[0] == "dirt":
             if self.dirt_site == site and self.dirt_inst == self.mod_instance() and self.detail_live():
                 self.reconcile_dirt(site)
+            return
+        if parts[0] == "floor":
+            if self.floor_site == site and self.detail_live():
+                self.mail.op("read_floors", site=site)  # (read now: the room is brought to it at once)
             return
         if parts[0] == "look" and len(parts) == 3 and self.look_site == site and self.detail_live():
             k = parts[2]

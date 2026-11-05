@@ -1118,6 +1118,44 @@ local OPS = {
         report("states", table.concat(lines, ";"))
         return nil
     end,
+    -- Every room's floor of a lot, for the companion's detailsync.py - the game's own built data (the commands can only
+    -- set a floor, not read one): "floors" with the lot first, then one line a room
+    -- "storey|border node keys (comma)|material group|index|r,g,b,a (linear; - none)|pattern scale,x,y,roughness".
+    -- Storeys: 0, 1... above ground, -1, -2... basements. A node key is (row << 16) + column on the site's 25 cm grid;
+    -- the same walls make the same border in both saves. Group -1: the floor as built (never painted).
+    read_floors = function(op)
+        local site = em():FindSite(eid(op.site))
+        if not site then return nil end
+        local bd = site:GetSiteEntireSaveData().BuiltData
+        local lines = { tostring(op.site) }
+        local function entries(layers, sign, first)
+            for li = 1, layers:Num() do
+                local rooms = layers:Get(li).CustomRoomBottomFloor
+                for i = 1, rooms:Num() do
+                    local c = rooms:Get(i)
+                    local nodes = {}
+                    for j = 1, c.RoomBorder:Num() do nodes[#nodes + 1] = tostring(c.RoomBorder:Get(j)) end
+                    local mv = c.MaterialValue
+                    local ints, floats, color = {}, {}, "-"
+                    pcall(function() for k, v in pairs(mv.Int32Map) do ints[tostring(k)] = v end end)
+                    pcall(function() for k, v in pairs(mv.FloatMap) do floats[tostring(k)] = v end end)
+                    pcall(function() for k, v in pairs(mv.ColorMap) do
+                        if tostring(k) == "MaterialColor" then
+                            color = string.format("%.4f,%.4f,%.4f,%.4f", v.R, v.G, v.B, v.A)
+                        end
+                    end end)
+                    lines[#lines + 1] = string.format("%d|%s|%d|%d|%s|%.4f,%.4f,%.4f,%.4f", sign * (li - first),
+                        table.concat(nodes, ","), ints.MaterialGroup or -1, ints.MaterialIndex or -1, color,
+                        floats.PatternScale or 0, floats.PatternOffsetX or 0, floats.PatternOffsetY or 0,
+                        floats.MaterialRoughness or 0)
+                end
+            end
+        end
+        entries(bd.GroundFloors, 1, 1)
+        entries(bd.Basements, -1, 0)
+        report("floors", table.concat(lines, ";"))
+        return nil
+    end,
     -- Every object of a lot with its dust and wear, for the companion's detailsync.py: one line an object
     -- "entity|table|x|y|z|dust|grade" (dust in 1/1000, the wear grade; -1: the object has none), "dirt" with the lot
     -- first. (Objects without either are listed too: the colours are read by entity.)
