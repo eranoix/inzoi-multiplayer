@@ -53,7 +53,7 @@ from profile import member_lua, profile_hash, read_profile  # noqa: E402
 from reports import Reports  # noqa: E402
 
 PROTOCOL = 1
-VERSION = "0.9.92"
+VERSION = "0.9.93"
 CLOCK_SLACK = 3               # game minutes the clocks may differ before the follower's is set (a host without its day)
 CLOCK_JUMP = 10               # game minutes apart before the follower's clock is set at once; closer, its game runs
 CLOCK_SLEW = 0.2              # this much faster or slower than the host's until they meet (follow_leader_clock)
@@ -1517,10 +1517,16 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             for r in self.remotes.values():
                 r.act_sig = r.anim = r.outfit = None
                 r.seat_sig = None            # (their spots: held again by this controller)
+                r.sleep_sig = None           # (asleep: told again)
             held = [h for h in self.cfg.get("held_seats") or [] if isinstance(h, str)]
             if held:                         # (the save keeps who occupies a spot: the last session's go back first)
                 self.mail.op("unseat", holds=held)
                 self.cfg["held_seats"] = []
+                self.save_cfg()
+            slept = [e for e in self.cfg.get("slept") or [] if isinstance(e, int)]
+            if slept:                        # (the save keeps buffs: the last session's Sleep comes off first)
+                self.mail.op("wake", ids=slept)
+                self.cfg["slept"] = []
                 self.save_cfg()
         elif kind == "up":
             now = self.mod["beat"] = time.time()
@@ -1597,6 +1603,8 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             self.on_my_seats(text)
         elif kind == "seat":
             self.on_seat_report(text)
+        elif kind == "asleep":
+            self.on_my_asleep(text)
 
     # ------------------------------------------------------------------ my Zoi -> server
     def describe_act(self, a: dict) -> dict | None:
@@ -1749,6 +1757,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
                     await self.sample_puppets()              # (twice a second: the telemetry's view of them)
                 if self._house_n % 4 == 2 and self.world == "play" and self.my_entity:
                     self.hold_seats()                        # (every second: their spots are their Zoi's here)
+                    self.hold_sleep()                        # (every second: asleep there, asleep here)
                     self.check_spot()                        # (every second: two bodies in one place)
                 if self._house_n % 12 == 3 and self.world == "play" and self.my_entity:
                     await self.needs_guard()                 # (every 3 s: needs before chats)
@@ -1992,6 +2001,49 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             r.seat_sig = sig
             extra = {"site": st["site"]} if isinstance(st.get("site"), int) and st["site"] >= 0 else {}
             self.mail.op("seat", key=pid, seats=want, **extra)
+
+    def on_my_asleep(self, text: str):
+        """The controller read whether my Zoi has the game's "Sleep" buff (its sleep gives it while it sleeps): out with
+        my state, and my partners' games give my Zoi there the same buff (hold_sleep)."""
+        asleep = (text or "").strip() == "1"
+        if asleep != bool(self.__dict__.get("my_asleep")):
+            self.my_asleep = asleep
+            if isinstance(getattr(self, "state_base", None), dict):
+                self.state_base = {**self.state_base, "asleep": asleep}
+
+    def hold_sleep(self):
+        """A Zoi asleep isn't talked to - the game's own rule (its sleep gives it the "Sleep" buff, and no chat starts
+        with a Zoi that has it). A partner's Zoi here is only drawn by their skeleton: asleep in their game, it had no
+        buff here, and my Zoi's own will started chats with it all night, each failing at once - it stood there trying
+        ("travada", 2026-11-04). So their Zoi here gets the game's Sleep buff while they sleep, and loses it when they
+        wake, hide, leave or go quiet. Sent on a change (and once at the start: a buff the save kept comes off)."""
+        now = time.time()
+        slept = {e for e in self.cfg.get("slept") or [] if isinstance(e, int)}
+        before = set(slept)
+        for pid, r in self.remotes.items():
+            e = self.puppet_ids.get(pid)
+            if not e:
+                r.sleep_sig = None
+                continue
+            st = r.state or {}
+            asleep = st.get("asleep") if "asleep" in st else st.get("sleep")      # (an older program: its guess)
+            want = bool(r.spawned and not r.hidden and now - (r.state_at or 0) <= SEAT_FRESH and asleep)
+            sig = f"{e}:{want}"
+            if sig == r.__dict__.get("sleep_sig"):
+                continue
+            was = r.__dict__.get("sleep_sig") == f"{e}:True"
+            r.sleep_sig = sig
+            self.mail.op("asleep", key=pid, on=want)
+            if want:
+                slept.add(int(e))
+                log.info("%s's Zoi sleeps in their game: asleep here too (nobody starts a chat with it)", r.name)
+            else:
+                slept.discard(int(e))
+                if was:
+                    log.info("%s's Zoi woke up in their game: awake here too", r.name)
+        if slept != before:
+            self.cfg["slept"] = sorted(slept)
+            self.save_cfg()
 
     def on_seat_report(self, text: str):
         """ "held obj slot entity|...": the spots this game holds for my partners' Zois (kept: the save keeps them, and
@@ -3034,7 +3086,7 @@ class Companion(couple.Couple, housesync.HouseSync, posesync.PoseSync, shared.Sh
             asyncio.get_running_loop().create_task(self.lookup_lot(site))
         c = self.my_clock
         out = {"lot": lots.get(site, ""), "speed": c[2] if c else None, "time": list(c[:2]) if c else None,
-               "seats": self.__dict__.get("my_seats") or []}
+               "seats": self.__dict__.get("my_seats") or [], "asleep": bool(self.__dict__.get("my_asleep"))}
         if self.clock_mode() == "host" and self.leader and self.leader != self.me_id:
             out["clock"] = None                          # never pushes anyone's clock
         return out

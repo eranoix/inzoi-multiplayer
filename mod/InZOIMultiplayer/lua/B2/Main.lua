@@ -20,6 +20,9 @@
 --   seat    {key, seats = {{t, x, y, z, s}, ...}, site?}  the spots that player's Zoi occupies in their game: made its
 --           occupancy here (no Zoi here is given them); reports "seats <mine>", "seat held ...", "seat clash ..."
 --   unseat  {holds = {"obj slot entity", ...}}             spots an earlier session held, given back
+--   asleep  {key, on}                   that player's Zoi sleeps in their game (the game's "Sleep" buff there): the same
+--           buff on their Zoi here, so nobody here starts a chat with it; reports "asleep 1|0" for my own Zoi
+--   wake    {ids = {entity, ...}}       Zois an earlier session gave that buff (the save keeps buffs): taken off
 --   social  {rid, bag, entity?, key?}   couple actions: the player's own Zoi (`entity`, else the possessed one) runs
 --           interaction `bag` on the puppet of `key` (or on its own without key); "anim:<id>" plays a motion instead.
 --           Reports "social <rid> ok|fail <text>".
@@ -495,6 +498,56 @@ local function seats_keep()
     seats_held_report()
 end
 
+-- ---------------------------------------------------------------- asleep
+-- A Zoi asleep isn't talked to. The game's sleep (FB2Action_Sleep) gives its Zoi the "Sleep" buff while it sleeps, and
+-- the game's talk rule (FB2TalkComponent::IsTalkable_Target) turns down every chat with a Zoi that has it - asked by
+-- the player or by a Zoi's own will. A partner's Zoi here is only drawn by their skeleton: asleep in their game, it had
+-- no such buff here, so my Zoi's own will started chats with it all night - each failed at once (it can't get up here
+-- for it) and mine stood there trying again and again ("travada", 2026-11-04). So each game says whether its own Zoi
+-- has the game's "Sleep" buff, and the other gives their Zoi there the same buff while it does.
+local SLEEP_BUFF = "Sleep"
+
+local function buffs_of(id)
+    local c = char(id)
+    return c and c:GetComponent(inzoi.EB2ComponentType.Buff), c
+end
+
+local function has_sleep(id)
+    local b = buffs_of(id)
+    return b ~= nil and b:HasBuff(SLEEP_BUFF) == true
+end
+
+-- A Zoi sleeping by its own action (one of this save while its player is away): that buff is the game's business.
+local function sleeps_itself(c)
+    local bag = current_bag(c)
+    if not bag then return false end
+    bag = bag:lower()
+    return bag:find("sleep", 1, true) ~= nil or bag:find("doz", 1, true) ~= nil
+end
+
+-- "asleep" / "awake" when it changed something
+local function sleep_set(id, on)
+    local b, c = buffs_of(id)
+    if not b then return nil end
+    local has = b:HasBuff(SLEEP_BUFF) == true
+    if on and not has then
+        b:AddBuff(SLEEP_BUFF, INZOI.FB1BuffDetail(), "None")      -- (without a detail the game drops it, silently)
+        return "asleep"
+    elseif not on and has and not sleeps_itself(c) then
+        b:RemoveBuff(SLEEP_BUFF, false)
+        return "awake"
+    end
+    return nil
+end
+
+-- Every SEAT_AGAIN s: what the game did to their Zoi's buffs meanwhile (cleared it, or one left from the save) is put
+-- right.
+local function sleep_keep()
+    for _, p in pairs(PUPPETS) do
+        if p.asleep ~= nil then pcall(sleep_set, p.id, p.asleep) end
+    end
+end
+
 -- ---------------------------------------------------------------- puppets
 local function spawn_puppet(op)
     local member = S.members[op.key]
@@ -589,6 +642,7 @@ local function despawn_puppet(op)
         cli(string.format("zoi.destroy entity_id=%d", p.id))
     end
     pcall(seats_free, p)
+    if p.adopted then pcall(sleep_set, p.id, false) end    -- (back to the game: asleep only when it sleeps)
     FROZEN[p.id] = nil
     PUPPETS[op.key] = nil
     report("despawned", op.key)
@@ -1263,6 +1317,21 @@ local OPS = {
         end
         return n > 0 and string.format("unseat: %d spot(s) an earlier session held given back", n) or nil
     end,
+    asleep = function(op)
+        local p = PUPPETS[op.key]
+        if not p then return nil end
+        p.asleep = op.on == true
+        local r = sleep_set(p.id, p.asleep)
+        return r and string.format("%s %s here (the game's Sleep buff)", op.key, r) or nil
+    end,
+    wake = function(op)
+        local n = 0
+        for _, id in ipairs(op.ids or {}) do
+            local ok, r = pcall(sleep_set, tonumber(id), false)
+            if ok and r then n = n + 1 end
+        end
+        return n > 0 and string.format("wake: %d Zoi(s) an earlier session put to sleep woke", n) or nil
+    end,
     -- {key}: a Zoi of this save stands for that player (adopted: their family member here): it takes their look as
     -- their own game has it (hair, face, body, age's look...: their profile from MPBulk), which this save's copy of them
     -- doesn't follow by itself - a haircut, aging, a new style there showed here as the old look under their skeleton
@@ -1586,12 +1655,18 @@ function M.on_tick(self, dt)
         elseif not ok then
             log_limited("seats ERR " .. tostring(text), 30)
         end
+        local okA, asleep = pcall(has_sleep, S.me)      -- my Zoi asleep (sent on: the partners' games buff theirs)
+        if okA and (asleep ~= S.myAsleep or S.clock - (S.myAsleepAt or -99) >= 10) then
+            S.myAsleep, S.myAsleepAt = asleep, S.clock
+            report("asleep", asleep and "1" or "0")
+        end
     end
     S.keepT = (S.keepT or 0) + dt
     if S.keepT >= SEAT_AGAIN then
         S.keepT = 0
         local ok, err = pcall(seats_keep)
         if not ok then log_limited("seats keep ERR " .. tostring(err), 30) end
+        pcall(sleep_keep)
     end
     S.beat = (S.beat or 0) + dt
     if S.beat >= 2 then                                 -- heartbeat: the companion knows the mod is loaded and alive
@@ -1616,6 +1691,7 @@ function M.on_tick(self, dt)
                 PUPPETS[key] = nil
                 FROZEN[p.id] = nil
                 if p.adopted then
+                    pcall(sleep_set, p.id, false)
                     pcall(freeze, p.id, false)
                 else
                     pcall(cli, string.format("zoi.destroy entity_id=%d", p.id))   -- if it's still there: no duplicate
